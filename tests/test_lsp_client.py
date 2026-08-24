@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import stat
 from pathlib import Path
 
 import pytest
+from fake_lsp_util import executable_lsp_script
 
 from vhdl_rag_mcp.lsp import (
     DiagnosticInfo,
@@ -136,10 +136,7 @@ while True:
 
 @pytest.fixture
 def fake_server(tmp_path: Path) -> Path:
-    script = tmp_path / "fake_lsp.py"
-    script.write_text(FAKE_SERVER, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return script
+    return executable_lsp_script(tmp_path, "fake_lsp.py", FAKE_SERVER)
 
 
 @pytest.fixture

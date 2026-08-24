@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Check formatting
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type-check
+        run: uv run mypy src
+
+  test:
+    name: Tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run tests
+        run: uv run pytest -q
+
+  test-almalinux-9:
+    name: Tests (AlmaLinux 9, py3.12)
+    needs: quality
+    # Alma 9 has no hosted runner; run it as a container on Ubuntu. The
+    # container's glibc (2.34) is the strictest floor in the locked wheel
+    # set, so a green run here verifies RHEL 9-compatible Linux in general.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: quay.io/almalinux/almalinux:9
+    env:
+      UV_PYTHON: "3.12"
+      UV_INSTALL_DIR: /opt/uv
+    steps:
+      - name: Install system packages
+        run: |
+          microdnf install -y git curl ca-certificates python3.12
+          ln -sf /usr/bin/python3.12 /usr/local/bin/python3
+      - uses: actions/checkout@v4
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Install dependencies
+        run: /opt/uv/bin/uv sync --frozen
+      - name: Run tests
+        run: /opt/uv/bin/uv run pytest -q

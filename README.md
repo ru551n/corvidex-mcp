@@ -253,6 +253,11 @@ The test suite runs fully offline: local `file://` git remotes, a fake
 LSP server script, and fake embedding providers (one real-binary test
 is gated on the `VHDL_LS_TEST_BIN` environment variable).
 
+CI (`.github/workflows/ci.yml`) runs on every push to `main` and on
+pull requests: `ruff format --check`, `ruff check`, `mypy` (strict),
+and the full test suite on a matrix of Python 3.12/3.13/3.14 across
+Ubuntu, Windows, and macOS, plus an AlmaLinux 9 container job.
+
 Layout:
 
 ```

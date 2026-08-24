@@ -7,12 +7,12 @@ Runs fully offline: a local file:// git remote, a fake LSP server binary
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 from pathlib import Path
 
 import numpy as np
 import pytest
+from fake_lsp_util import executable_lsp_script
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
@@ -263,10 +263,7 @@ def remote(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def fake_lsp(tmp_path: Path) -> Path:
-    script = tmp_path / "fake_lsp"
-    script.write_text(FAKE_LSP, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return script
+    return executable_lsp_script(tmp_path, "fake_lsp", FAKE_LSP)
 
 
 @pytest.fixture

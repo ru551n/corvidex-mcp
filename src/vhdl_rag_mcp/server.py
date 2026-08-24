@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import functools
 import logging
 import os
@@ -35,6 +34,16 @@ import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -399,19 +408,39 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
 
 
 def _acquire_lock(config: AppConfig) -> Path:
-    """Take an exclusive single-instance lock; exit on failure."""
+    """Take an exclusive single-instance lock; exit on failure.
+
+    POSIX uses ``flock(2)`` (per open file description); Windows uses an
+    advisory byte-range lock via ``msvcrt`` (per handle). The lock file
+    records the owning PID for diagnosis.
+    """
     lock_path = config.resolved_data_dir / "server.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        logger.error(
-            "another vhdl-rag-mcp instance holds the lock (%s); exiting",
-            lock_path,
-        )
-        raise SystemExit(1) from None
-    handle.write(f"{os.getpid()}\n")
+    if sys.platform == "win32":
+        # Windows has no flock(2); use an advisory byte-range lock on the
+        # first byte (held per handle, released on close/exit).
+        handle = open(lock_path, "a+b")  # noqa: SIM115
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            logger.error(
+                "another vhdl-rag-mcp instance holds the lock (%s); exiting",
+                lock_path,
+            )
+            raise SystemExit(1) from None
+        handle.write(f"{os.getpid()}\n".encode())
+    else:
+        handle = open(lock_path, "a+")  # noqa: SIM115
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            logger.error(
+                "another vhdl-rag-mcp instance holds the lock (%s); exiting",
+                lock_path,
+            )
+            raise SystemExit(1) from None
+        handle.write(f"{os.getpid()}\n")
     handle.flush()
     # Keep the handle open for the process lifetime.
     global _LOCK_HANDLE

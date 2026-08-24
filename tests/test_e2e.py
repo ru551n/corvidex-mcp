@@ -14,13 +14,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import stat
 import subprocess
 import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+from fake_lsp_util import executable_lsp_script
 from test_pipeline import FAKE_LSP
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
@@ -178,10 +178,7 @@ def remote(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def fake_lsp(tmp_path: Path) -> Path:
-    script = tmp_path / "fake_lsp"
-    script.write_text(FAKE_LSP, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return script
+    return executable_lsp_script(tmp_path, "fake_lsp", FAKE_LSP)
 
 
 def make_config(tmp_path: Path, remote: Path, lsp_binary: str) -> AppConfig:
