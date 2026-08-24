@@ -70,5 +70,5 @@ file, lines, commit) and the identifiers the chunk references
   structural scan — still indexed, coarser chunks.
 - The index updates automatically (default every 300 s); you normally
   never need to sync manually.
-- `search_*` `limit` is capped sensibly by the server default (8); pass
+- `search_*` `limit` defaults to 8 (10 for `search_knowledge`); pass
   `limit=20` for broad exploration.
