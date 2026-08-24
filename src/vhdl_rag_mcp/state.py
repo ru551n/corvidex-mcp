@@ -96,6 +96,12 @@ class StateStore:
     def all(self) -> list[RepositoryState]:
         return [self._states[name] for name in sorted(self._states)]
 
+    def remove(self, name: str) -> None:
+        """Forget one repository's state (config removal)."""
+        if name in self._states:
+            del self._states[name]
+            self.save()
+
     def set_indexed(
         self, name: str, commit: str, file_count: int = 0, save: bool = True
     ) -> None:

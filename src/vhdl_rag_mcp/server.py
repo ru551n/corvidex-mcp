@@ -85,14 +85,20 @@ class VhdlRagApp:
         self,
         config: AppConfig,
         providers: EmbeddingProviders | None = None,
+        store: VectorStore | None = None,
+        states: StateStore | None = None,
     ) -> None:
         self.config = config
         self.git = GitManager(config.repos_dir)
-        self.store = VectorStore(config)
+        self.store = store if store is not None else VectorStore(config)
         self.providers = (
             providers if providers is not None else EmbeddingProviders(config)
         )
-        self.states = StateStore(config.state_dir / "repositories.json")
+        self.states = (
+            states
+            if states is not None
+            else StateStore(config.state_dir / "repositories.json")
+        )
         self.pipeline = IndexPipeline(
             config, self.git, self.store, self.providers, self.states
         )
@@ -163,6 +169,16 @@ class VhdlRagApp:
             "status": "ok",
             "commit": self.states.get(cfg.name).indexed_commit or "",
         }
+
+    def drop_unconfigured_repositories(self) -> list[str]:
+        """Drop index chunks and state for repos removed from the config."""
+        configured = {cfg.name for cfg in self.config.repositories}
+        dropped = [
+            state.name for state in self.states.all() if state.name not in configured
+        ]
+        for name in dropped:
+            self.pipeline.delete_repository(name)
+        return dropped
 
     async def periodic_sync(self) -> None:
         """Sync all repositories every ``config.sync_interval`` seconds."""
@@ -419,6 +435,11 @@ async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
 async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
     logger.info("ensuring collections (embedding models download on first run)")
     app.ensure_collections()
+    dropped = app.drop_unconfigured_repositories()
+    if dropped:
+        logger.info(
+            "dropped chunks of unconfigured repositories: %s", ", ".join(dropped)
+        )
     logger.info("initial sync of %d repositories", len(app.config.repositories))
     await app.sync_all()
     await _serve(app, mcp)

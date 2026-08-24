@@ -246,3 +246,26 @@ async def test_unknown_repository_name_rejected(env) -> None:
     app, _mcp, _up = env
     with pytest.raises(Exception, match="unknown repository"):
         await app.sync_all(repositories=["ghost"])
+
+
+async def test_drop_unconfigured_repositories(env) -> None:
+    app, _mcp, _up = env
+    before = app.store.count()
+    assert before > 0
+    # Reconfigure without "repo" (keep "broken") -> "repo" is dropped.
+    config = app.config.model_copy(
+        update={"repositories": [app.config.repository("broken")]}
+    )
+    # Share the store (Qdrant local mode locks its directory) and state.
+    app2 = VhdlRagApp(
+        config, providers=app.providers, store=app.store, states=app.states
+    )
+    try:
+        dropped = app2.drop_unconfigured_repositories()
+        assert dropped == ["repo"]
+        assert app2.store.count() == 0  # only "repo" had chunks
+        assert "repo" not in [st.name for st in app2.states.all()]
+        # Idempotent.
+        assert app2.drop_unconfigured_repositories() == []
+    finally:
+        app2.close()

@@ -214,4 +214,5 @@ class IndexPipeline:
     def delete_repository(self, name: str) -> None:
         """Remove a repository's chunks and state (config removal)."""
         deleted = self._store.delete_repository(name)
+        self._states.remove(name)
         logger.info("%s: removed %d chunks from all collections", name, deleted)
