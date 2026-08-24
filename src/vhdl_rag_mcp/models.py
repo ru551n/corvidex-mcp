@@ -145,6 +145,7 @@ class SearchResult:
     result_type: str  # "vhdl" | "docs" | "code"
     repository: str
     repository_category: str
+    repository_priority: int
     commit: str
     file: str
     content: str
@@ -189,7 +190,7 @@ class SearchResult:
             f"## [{self.result_type}] {title}\n"
             f"- source: {where}\n"
             f"- repository: {self.repository} ({self.repository_category}, "
-            f"commit {self.commit[:12]})\n"
+            f"priority {self.repository_priority}, commit {self.commit[:12]})\n"
             f"- score: store={self.store_score:.4f} final={self.final_score:.4f}\n"
             f"{refs}\n\n{body}\n"
         )

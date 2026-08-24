@@ -439,6 +439,7 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
         result_type="vhdl",
         repository=got.repository,
         repository_category=got.repository_category,
+        repository_priority=got.repository_priority,
         commit=got.commit,
         file=got.file,
         content=got.content,
