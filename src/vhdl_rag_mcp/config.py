@@ -61,15 +61,25 @@ class QdrantConfig(BaseModel):
 
 
 class RepositoryConfig(BaseModel):
-    """One configured Git repository.
+    """One configured source repository.
 
-    ``ref`` is any resolvable Git ref — a branch name, a tag, or a commit
-    SHA (full or abbreviated). A branch tracks the remote branch and is
-    updated on every sync; a tag or a commit SHA pins the repository, and
-    sync only verifies the pin (a full-SHA pin skips the network fetch
-    entirely). Authentication for private repositories uses the ambient
-    Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys); no
-    credentials are stored by this application.
+    A repository is either a **remote** (``url`` — cloned and kept in
+    sync by this server) or a **local working repository** (``path`` —
+    the user's own checkout; indexed in place, never mutated). Exactly
+    one of the two must be set.
+
+    For remote repositories, ``ref`` is any resolvable Git ref — a
+    branch name, a tag, or a commit SHA (full or abbreviated). A branch
+    tracks the remote branch and is updated on every sync; a tag or a
+    commit SHA pins the repository, and sync only verifies the pin (a
+    full-SHA pin skips the network fetch entirely). Authentication for
+    private repositories uses the ambient Git/SSH setup (SSH agent,
+    ~/.ssh/config, deploy keys); no credentials are stored by this
+    application.
+
+    For local working repositories ``ref`` is ignored: HEAD plus the
+    working tree (uncommitted changes and git-respected untracked
+    files) are indexed, attributed to the current HEAD commit.
 
     ``domains`` selects which of the three indexed domains (VHDL,
     documentation, general code) are loaded from this repository; the
@@ -79,7 +89,8 @@ class RepositoryConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
-    url: str
+    url: str | None = None
+    path: Path | None = None
     ref: str = Field(
         default="main",
         description="Branch, tag, or commit SHA (full or 4-40 hex) to index.",
@@ -113,10 +124,21 @@ class RepositoryConfig(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _validate_url(cls, value: str) -> str:
+    def _validate_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.strip():
             raise ValueError("repository url must not be empty")
         return value.strip()
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        if not str(value).strip():
+            raise ValueError("repository path must not be empty")
+        return Path(value).expanduser()
 
     @field_validator("ref")
     @classmethod
@@ -137,6 +159,24 @@ class RepositoryConfig(BaseModel):
                 raise ValueError(f"duplicate domain: {domain.value!r}")
             seen.add(domain)
         return value
+
+    @model_validator(mode="after")
+    def _check_source(self) -> RepositoryConfig:
+        if self.url is None and self.path is None:
+            raise ValueError(
+                f"repository {self.name!r} must set exactly one of 'url' or 'path'"
+            )
+        if self.url is not None and self.path is not None:
+            raise ValueError(
+                f"repository {self.name!r} must set exactly one of 'url' "
+                "or 'path', not both"
+            )
+        return self
+
+    @property
+    def is_local(self) -> bool:
+        """True for a local working repository (``path``; no cloning)."""
+        return self.path is not None
 
     @property
     def is_pinned_sha(self) -> bool:
@@ -227,13 +267,17 @@ _DEFAULT_TEMPLATE = """\
 # vhdl-rag-mcp configuration.
 #
 # Indexed domains: VHDL (via vhdl_ls), VHDL-related documentation, and
-# general source code (C/C++, Python, ...). Repositories are indexed with
-# a bounded priority bonus per category; private repositories work with
-# your normal Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys).
+# general source code (C/C++, Python, ...). Each repository is either a
+# remote Git URL (cloned and synced by the server) or a local working
+# repository directory (path): the user's own checkout, indexed in place
+# without ever being modified. Private remotes work with your normal
+# Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys).
 #
 # "ref" is any resolvable Git ref: a branch name (tracked on every sync),
 # a tag, or a commit SHA (full or abbreviated). Tags and SHAs pin the
-# repository to a fixed version — sync only verifies the pin.
+# repository to a fixed version — sync only verifies the pin. "ref" is
+# ignored for local working repositories (path): HEAD plus uncommitted
+# changes and untracked files are indexed.
 #
 # "domains" selects which domains are indexed from a repository: any
 # subset of ["vhdl", "docs", "code"]. Default: all three.
@@ -272,8 +316,13 @@ ref = "v2.1"               # pinned to a release tag
 
 [[repositories]]
 name = "current-project"
-url = "git@github.com:company/current-project.git"
-ref = "main"
+# url = "git@github.com:company/current-project.git"  # remote (default ref: main)
+# ... or index the active checkout instead (never modified by the server):
+path = "~/work/current-project"
+# ref = "main"               # tracked branch, tag, or SHA (pinned);
+#                             # ignored for path repositories
+# domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
+# exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 """
 
 

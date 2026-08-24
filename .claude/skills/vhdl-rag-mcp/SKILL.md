@@ -16,9 +16,13 @@ file, lines, commit) and the identifiers the chunk references
 
 1. Config at `~/.config/vhdl-rag/config.toml` (or the
    `VHDL_RAG_MCP_CONFIG` env var / `--config` flag) — at least one
-   `[[repositories]]` entry with `name`, `url`, `ref` (branch/tag/SHA).
-   Per repo: `domains = ["vhdl", "docs", "code"]` and `exclude = [...]`
-   select what gets indexed.
+   `[[repositories]]` entry with `name` and exactly one of `url`
+   (remote, cloned by the server) or `path` (your own local working
+   checkout, indexed in place and never modified). For `url` repos set
+   `ref` (branch/tag/SHA); `ref` is ignored for `path` repos, whose
+   working tree (uncommitted changes + git-respected untracked files)
+   is indexed. Per repo: `domains = ["vhdl", "docs", "code"]` and
+   `exclude = [...]` select what gets indexed.
 2. `vhdl_ls` binary on `PATH` (or `vhdl_ls_path` in config) — required
    for repositories containing VHDL; without it those repositories
    fail their sync (visible in `repository_status`).

@@ -387,6 +387,7 @@ def _make_chunk(
     lines: list[str],
     commit: str,
     spec: ChunkSpec,
+    branch: str | None = None,
 ) -> Chunk:
     if not lines:
         raise ValueError(f"empty VHDL file {file!r}")
@@ -395,7 +396,7 @@ def _make_chunk(
     text = "\n".join(lines[start - 1 : end])
     return Chunk(
         repository=cfg.name,
-        branch=cfg.ref,
+        branch=branch if branch is not None else cfg.ref,
         commit=commit,
         file=file,
         content_type=ContentType.SOURCE,
@@ -419,6 +420,7 @@ def chunk_vhdl_file(
     content: str,
     commit: str,
     lsp_symbols: tuple[SymbolInfo, ...] | None = None,
+    branch: str | None = None,
 ) -> list[Chunk]:
     """Chunk one VHDL file into :class:`Chunk` objects.
 
@@ -453,4 +455,4 @@ def chunk_vhdl_file(
         )
         for spec in specs
     ]
-    return [_make_chunk(cfg, file, lines, commit, spec) for spec in specs]
+    return [_make_chunk(cfg, file, lines, commit, spec, branch) for spec in specs]

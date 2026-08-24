@@ -175,6 +175,128 @@ def test_second_sync_reuses_clone(manager: GitManager, remote: Path):
     run(manager.sync(cfg, git(remote, "rev-parse", "HEAD")))
 
 
+# -- local working repositories (path) ----------------------------------------
+
+
+@pytest.fixture
+def work_repo(tmp_path: Path) -> Path:
+    """A local working repository: a checkout the user owns and edits."""
+    repo = tmp_path / "work"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "rtl").mkdir()
+    (repo / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# Guide\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "fifo.c").write_text("int fifo_write(void);\n")
+    (repo / "README.txt").write_text("readme\n")
+    (repo / ".gitignore").write_text("build/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "first")
+    return repo
+
+
+def make_local_config(work_repo: Path) -> RepositoryConfig:
+    return RepositoryConfig(name="repo", path=work_repo)
+
+
+def test_local_first_sync_is_full(manager: GitManager, work_repo: Path):
+    plan = run(manager.sync(make_local_config(work_repo), None))
+    assert plan.full
+    assert plan.commit == git(work_repo, "rev-parse", "HEAD")
+    assert plan.ref == "main"
+    assert sorted(plan.added_or_modified) == [
+        ".gitignore",
+        "README.txt",
+        "docs/guide.md",
+        "rtl/fifo.vhd",
+        "src/fifo.c",
+    ]
+
+
+def test_local_uncommitted_and_untracked(manager: GitManager, work_repo: Path):
+    cfg = make_local_config(work_repo)
+    first = run(manager.sync(cfg, None))
+    head = git(work_repo, "rev-parse", "HEAD")
+    # Uncommitted work: modify one tracked file, add untracked files.
+    (work_repo / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n-- v2\n")
+    (work_repo / "src" / "helper.c").write_text("void help(void);\n")
+    (work_repo / "build").mkdir()
+    (work_repo / "build" / "artifact.o").write_text("junk\n")
+    plan = run(manager.sync(cfg, first.commit))
+    assert not plan.full
+    assert plan.commit == head  # nothing committed: HEAD did not move
+    assert plan.ref == "main"
+    assert sorted(plan.added_or_modified) == ["rtl/fifo.vhd", "src/helper.c"]
+    # .gitignore is honored: build/ is untracked but ignored.
+    assert not any(p.startswith("build/") for p in plan.added_or_modified)
+
+
+def test_local_committed_changes_are_incremental(manager: GitManager, work_repo: Path):
+    cfg = make_local_config(work_repo)
+    first = run(manager.sync(cfg, None))
+    (work_repo / "src" / "helper.c").write_text("void help(void);\n")
+    git(work_repo, "rm", "-q", "README.txt")
+    git(work_repo, "add", "-A")
+    git(work_repo, "commit", "-qm", "second")
+    plan = run(manager.sync(cfg, first.commit))
+    assert not plan.full
+    assert plan.commit == git(work_repo, "rev-parse", "HEAD")
+    assert sorted(plan.added_or_modified) == ["src/helper.c"]
+    assert plan.deleted == ("README.txt",)
+
+
+def test_local_unchanged_tree_is_empty_plan(manager: GitManager, work_repo: Path):
+    cfg = make_local_config(work_repo)
+    first = run(manager.sync(cfg, None))
+    plan = run(manager.sync(cfg, first.commit))
+    assert plan.empty
+    assert plan.commit == first.commit
+
+
+def test_local_amend_without_content_change_is_empty_plan(
+    manager: GitManager, work_repo: Path
+):
+    cfg = make_local_config(work_repo)
+    first = run(manager.sync(cfg, None))
+    git(work_repo, "commit", "-q", "--amend", "-m", "rewritten")
+    plan = run(manager.sync(cfg, first.commit))
+    assert plan.empty
+    assert plan.commit != first.commit  # SHA moved, content did not
+
+
+def test_local_missing_last_commit_falls_back_to_full(
+    manager: GitManager, work_repo: Path
+):
+    cfg = make_local_config(work_repo)
+    run(manager.sync(cfg, None))
+    # The last indexed commit is gone (history rewrite / force push).
+    plan = run(manager.sync(cfg, "deadbeef" * 5))
+    assert plan.full
+    assert plan.commit == git(work_repo, "rev-parse", "HEAD")
+
+
+def test_local_invalid_path_rejected(manager: GitManager, tmp_path: Path):
+    not_git = tmp_path / "not_git"
+    not_git.mkdir()
+    with pytest.raises(GitError, match="not a Git repository"):
+        run(manager.sync(RepositoryConfig(name="repo", path=not_git), None))
+    with pytest.raises(GitError, match="does not exist"):
+        run(manager.sync(RepositoryConfig(name="repo", path=tmp_path / "gone"), None))
+
+
+def test_local_read_file_and_tree_untouched(manager: GitManager, work_repo: Path):
+    cfg = make_local_config(work_repo)
+    run(manager.sync(cfg, None))
+    assert manager.read_file(cfg, "rtl/fifo.vhd") == "entity fifo is end;\n"
+    # Untracked files are part of the index and readable.
+    (work_repo / "new.py").write_text("x = 1\n")
+    assert manager.read_file(cfg, "new.py") == "x = 1\n"
+    # The user's tree is never cloned into the managed repos directory.
+    assert not (manager._repos_dir / "repo").exists()
+
+
 # -- routing -----------------------------------------------------------------
 
 

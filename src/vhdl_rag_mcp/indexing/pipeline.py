@@ -90,7 +90,7 @@ class IndexPipeline:
             logger.info(
                 "%s: ref %r did not move (still at %s)",
                 cfg.name,
-                cfg.ref,
+                plan.ref,
                 plan.commit[:12],
             )
             self._states.record_sync(cfg.name, None)
@@ -152,11 +152,15 @@ class IndexPipeline:
                 content = self._git.read_file(cfg, f)
                 if kind.collection is CollectionName.DOCS:
                     chunks.extend(
-                        chunk_doc_file(cfg, f, content, plan.commit, kind.language)
+                        chunk_doc_file(
+                            cfg, f, content, plan.commit, kind.language, branch=plan.ref
+                        )
                     )
                 else:
                     chunks.extend(
-                        chunk_code_file(cfg, f, content, plan.commit, kind.language)
+                        chunk_code_file(
+                            cfg, f, content, plan.commit, kind.language, branch=plan.ref
+                        )
                     )
 
         if chunks:
@@ -172,7 +176,7 @@ class IndexPipeline:
         the quiet window is not paid per file. Files with syntax errors
         get the structural fallback (the LSP tree is partial there).
         """
-        repo_dir = self._git.repo_dir(cfg.name)
+        repo_dir = self._git.repo_dir(cfg)
         lsp = VhdlLsp(
             self._config.vhdl_ls_path,
             repo_dir,
@@ -197,7 +201,14 @@ class IndexPipeline:
                 else:
                     symbols = await lsp.document_symbols(path)
                 chunks.extend(
-                    chunk_vhdl_file(cfg, f, content, plan.commit, lsp_symbols=symbols)
+                    chunk_vhdl_file(
+                        cfg,
+                        f,
+                        content,
+                        plan.commit,
+                        lsp_symbols=symbols,
+                        branch=plan.ref,
+                    )
                 )
         finally:
             await lsp.shutdown()

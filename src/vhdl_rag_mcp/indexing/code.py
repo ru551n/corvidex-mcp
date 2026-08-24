@@ -199,7 +199,12 @@ def _fallback_units(lines: list[str], stem: str) -> list[CodeUnit]:
 
 
 def chunk_code_file(
-    cfg: RepositoryConfig, file: str, content: str, commit: str, language: str
+    cfg: RepositoryConfig,
+    file: str,
+    content: str,
+    commit: str,
+    language: str,
+    branch: str | None = None,
 ) -> list[Chunk]:
     """Chunk one source file into :class:`Chunk` objects (tree-sitter)."""
     if not content.strip():
@@ -227,7 +232,7 @@ def chunk_code_file(
         chunks.append(
             Chunk(
                 repository=cfg.name,
-                branch=cfg.ref,
+                branch=branch if branch is not None else cfg.ref,
                 commit=commit,
                 file=file,
                 content_type=ContentType.CODE,

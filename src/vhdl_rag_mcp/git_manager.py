@@ -1,10 +1,13 @@
 """Git repository management: clone, fetch, incremental change detection.
 
-The manager owns the local clones (under ``<data_dir>/repos/<name>``) and
-computes, for one configured repository, what changed between the last
+For remote repositories the manager owns the local clones (under
+``<data_dir>/repos/<name>``) and computes what changed between the last
 indexed commit and the commit the configured ``ref`` resolves to:
-added/modified files, renamed files, and deleted files. Nothing here
-touches Qdrant or embeddings — the indexing pipeline consumes the
+added/modified files, renamed files, and deleted files. For local
+working repositories (configured with ``path``) the user's own checkout
+is indexed in place — HEAD plus uncommitted changes and untracked files
+— without ever cloning, fetching, or mutating the tree. Nothing here
+touches Qdrant or embeddings; the indexing pipeline consumes the
 :class:`SyncPlan`.
 
 Refs
@@ -107,8 +110,12 @@ class GitManager:
     def __init__(self, repos_dir: Path) -> None:
         self._repos_dir = repos_dir
 
-    def repo_dir(self, name: str) -> Path:
-        return self._repos_dir / name
+    def repo_dir(self, cfg: RepositoryConfig) -> Path:
+        """Working tree for ``cfg``: the user's checkout for local
+        repositories, the managed clone for remote ones."""
+        if cfg.path is not None:
+            return cfg.path
+        return self._repos_dir / cfg.name
 
     # -- low-level git ----------------------------------------------------
 
@@ -157,7 +164,8 @@ class GitManager:
 
     async def ensure_clone(self, cfg: RepositoryConfig) -> None:
         """Clone the repository on first use (idempotent)."""
-        repo_dir = self.repo_dir(cfg.name)
+        assert cfg.url is not None  # remote repositories only
+        repo_dir = self.repo_dir(cfg)
         if (repo_dir / ".git").exists():
             return
         if repo_dir.exists():
@@ -211,19 +219,24 @@ class GitManager:
     async def _list_files_at(
         self, cfg: RepositoryConfig, commit: str
     ) -> tuple[str, ...]:
-        repo_dir = self.repo_dir(cfg.name)
+        repo_dir = self.repo_dir(cfg)
         out = await self._run(repo_dir, "ls-tree", "-r", "-z", "--name-only", commit)
         return tuple(path for path in out.split("\0") if path)
 
     async def sync(self, cfg: RepositoryConfig, last_commit: str | None) -> SyncPlan:
-        """Synchronize the clone and report the changes vs ``last_commit``.
+        """Synchronize the repository and report the changes vs
+        ``last_commit``.
 
         ``last_commit`` is the last fully indexed commit (``None`` before
-        the first index run). The working tree is left at the target
-        commit.
+        the first index run). Remote repositories have their working
+        tree left at the target commit; local working repositories
+        (``path``) are indexed in place — HEAD plus uncommitted changes
+        and untracked files — and are never modified.
         """
+        if cfg.is_local:
+            return await self._sync_local(cfg, last_commit)
         await self.ensure_clone(cfg)
-        repo_dir = self.repo_dir(cfg.name)
+        repo_dir = self.repo_dir(cfg)
         commit = await self._resolve(cfg, repo_dir)
         head = await self._try(repo_dir, "rev-parse", "--verify", "HEAD")
         if head is None or head.strip() != commit:
@@ -275,14 +288,120 @@ class GitManager:
             deleted=deleted,
         )
 
+    # -- local working repositories -----------------------------------------
+
+    async def _sync_local(
+        self, cfg: RepositoryConfig, last_commit: str | None
+    ) -> SyncPlan:
+        """Index the user's working repository in place (no clone/fetch).
+
+        The index covers HEAD plus uncommitted changes (staged and
+        unstaged) and untracked files (honoring ``.gitignore``);
+        attribution is the current HEAD commit. Deleting an untracked
+        file is not tracked between syncs — ``reindex`` repairs it.
+        """
+        assert cfg.path is not None
+        repo_dir = cfg.path
+        if not repo_dir.is_dir():
+            raise GitError(
+                f"repository {cfg.name!r}: path {repo_dir} does not exist "
+                "or is not a directory"
+            )
+        if await self._try(repo_dir, "rev-parse", "--git-dir") is None:
+            raise GitError(
+                f"repository {cfg.name!r}: path {repo_dir} is not a Git repository"
+            )
+        commit = (await self._run(repo_dir, "rev-parse", "HEAD")).strip()
+        branch = (
+            await self._run(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+        ).strip()
+        if last_commit is None:
+            files = await self._list_working_files(repo_dir)
+            logger.info(
+                "%s: first sync, full index of %d files at %s (%s)",
+                cfg.name,
+                len(files),
+                commit[:12],
+                branch,
+            )
+            return SyncPlan(
+                cfg.name, branch, commit, full=True, added_or_modified=files
+            )
+        added: set[str] = set()
+        deleted: set[str] = set()
+        if last_commit != commit:
+            diff = await self._try(
+                repo_dir, "diff", "-z", "--name-status", last_commit, commit
+            )
+            if diff is None:
+                # The last indexed commit is gone (history rewrite):
+                # a full reindex is the safe fallback.
+                logger.warning(
+                    "%s: cannot diff %s..%s; falling back to full reindex",
+                    cfg.name,
+                    last_commit[:12],
+                    commit[:12],
+                )
+                files = await self._list_working_files(repo_dir)
+                return SyncPlan(
+                    cfg.name, branch, commit, full=True, added_or_modified=files
+                )
+            a, d = parse_name_status_z(diff)
+            added.update(a)
+            deleted.update(d)
+        # Uncommitted work: index/worktree-vs-HEAD (staged + unstaged)
+        # plus untracked files (honoring .gitignore).
+        worktree = await self._try(repo_dir, "diff", "-z", "--name-status", "HEAD")
+        if worktree is not None:
+            a, d = parse_name_status_z(worktree)
+            added.update(a)
+            deleted.update(d)
+        untracked = await self._run(
+            repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
+        )
+        added.update(p for p in untracked.split("\0") if p)
+        added.difference_update(deleted)
+        plan_added = tuple(sorted(added))
+        plan_deleted = tuple(sorted(deleted))
+        if not plan_added and not plan_deleted:
+            logger.info("%s: working tree unchanged at %s", cfg.name, commit[:12])
+            return SyncPlan(cfg.name, branch, commit, full=False)
+        logger.info(
+            "%s: %d added/modified, %d deleted (working tree at %s)",
+            cfg.name,
+            len(plan_added),
+            len(plan_deleted),
+            commit[:12],
+        )
+        return SyncPlan(
+            cfg.name,
+            branch,
+            commit,
+            full=False,
+            added_or_modified=plan_added,
+            deleted=plan_deleted,
+        )
+
+    async def _list_working_files(self, repo_dir: Path) -> tuple[str, ...]:
+        """Everything to index in a working repository: tracked (index)
+        plus git-respected untracked files."""
+        tracked = await self._run(repo_dir, "ls-files", "-z")
+        untracked = await self._run(
+            repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
+        )
+        files = {p for p in tracked.split("\0") if p}
+        files.update(p for p in untracked.split("\0") if p)
+        return tuple(sorted(files))
+
     # -- file access --------------------------------------------------------
 
     def read_file(self, cfg: RepositoryConfig, relpath: str) -> str:
-        """Read a file from the working tree (the tree sits at the last
-        synced commit)."""
+        """Read a file from the working tree (remote repositories sit
+        at the last synced commit; local working repositories at the
+        user's current working tree)."""
         if ".." in Path(relpath).parts or relpath.startswith("/"):
             raise GitError(f"invalid repository file path: {relpath!r}")
-        path = self.repo_dir(cfg.name) / relpath
+        path = self.repo_dir(cfg) / relpath
         if not path.is_file():
             raise GitError(f"file {relpath!r} not found in {cfg.name!r}")
         return path.read_text(encoding="utf-8", errors="replace")

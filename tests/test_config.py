@@ -47,6 +47,10 @@ ref = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 name = "proj"
 url = "https://gitlab.example.com/co/proj.git"
 domains = ["code"]
+
+[[repositories]]
+name = "worktree"
+path = "~/work/current-project"
 """
 
 
@@ -81,8 +85,9 @@ def test_full_config_parsing(tmp_path: Path) -> None:
         "ip",
         "pinned",
         "proj",
+        "worktree",
     ]
-    std, ip, pinned, proj = cfg.repositories
+    std, ip, pinned, proj, worktree = cfg.repositories
     assert std.ref == "main"
     assert std.domains == [CollectionName.VHDL, CollectionName.DOCS]
     assert std.enabled_collections == frozenset(
@@ -100,6 +105,30 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert not ip.is_pinned_sha
     assert proj.domains == [CollectionName.CODE]
     assert cfg.repository("ip").url == "git@github.com:co/ip.git"
+    # Local working repository: path instead of url, ref defaults away.
+    assert worktree.url is None
+    assert worktree.path == Path("~/work/current-project").expanduser()
+    assert worktree.is_local
+    assert not std.is_local and not ip.is_local
+
+
+def test_repository_url_xor_path() -> None:
+    remote = RepositoryConfig(name="r", url="u")
+    local = RepositoryConfig(name="r", path=Path("/tmp/work"))
+    assert remote.path is None and not remote.is_local
+    assert local.url is None and local.is_local
+    assert local.path == Path("/tmp/work")
+    with pytest.raises(ValidationError, match="exactly one of 'url' or 'path'"):
+        RepositoryConfig(name="r", url="u", path=Path("/tmp/work"))
+    with pytest.raises(ValidationError, match="exactly one of 'url' or 'path'"):
+        RepositoryConfig(name="r")
+    with pytest.raises(ValidationError, match="url must not be empty"):
+        RepositoryConfig(name="r", url="   ")
+    with pytest.raises(ValidationError, match="path must not be empty"):
+        RepositoryConfig(name="r", path="   ")
+    # Tilde in the path is expanded at validation time.
+    tilde = RepositoryConfig(name="r", path="~/projects/x")
+    assert tilde.path == Path("~/projects/x").expanduser()
 
 
 def test_domains_validation() -> None:

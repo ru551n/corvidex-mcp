@@ -246,7 +246,12 @@ def _paragraph_sections(lines: list[str]) -> list[DocSection]:
 
 
 def chunk_doc_file(
-    cfg: RepositoryConfig, file: str, content: str, commit: str, language: str
+    cfg: RepositoryConfig,
+    file: str,
+    content: str,
+    commit: str,
+    language: str,
+    branch: str | None = None,
 ) -> list[Chunk]:
     """Chunk one documentation file into :class:`Chunk` objects.
 
@@ -288,7 +293,7 @@ def chunk_doc_file(
         chunks.append(
             Chunk(
                 repository=cfg.name,
-                branch=cfg.ref,
+                branch=branch if branch is not None else cfg.ref,
                 commit=commit,
                 file=file,
                 content_type=ContentType.DOCUMENTATION,

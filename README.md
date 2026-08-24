@@ -144,6 +144,11 @@ ref = "main"                           # branch (tracked on every sync),
 # domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]# glob path excludes ('*' crosses '/');
                                        # wildcard-free patterns exclude the subtree
+
+# ... or index your own active checkout instead of a remote:
+[[repositories]]
+name = "current-project"
+path = "~/work/current-project"        # local working repository
 ```
 
 Notes:
@@ -155,9 +160,20 @@ Notes:
   options also have command-line overrides (`--data-dir`,
   `--sync-interval`, `--vhdl-ls-path`, `--log-level`); the command
   line wins.
+- **`url` or `path`** (exactly one): `url` is a remote Git repository,
+  cloned and kept in sync by the server under `data_dir/repos`.
+  `path` is a **local working repository** — your own checkout, indexed
+  in place and never modified (no clone, fetch, or checkout by the
+  server).
 - **`ref`**: a branch name is fetched and tracked on every sync. A tag
   or commit SHA pins the repository (a full 40-hex SHA skips the
-  network fetch entirely).
+  network fetch entirely). `ref` is ignored for local working
+  repositories.
+- **Local working repositories** index the working tree: HEAD plus
+  uncommitted changes (staged and unstaged) and untracked files
+  (honoring `.gitignore`); chunks are attributed to the current HEAD
+  commit. Deleting an untracked file is not tracked between syncs —
+  `reindex` repairs it.
 - **Per-repository domains/excludes**: index only what a repository
   should contribute — e.g. `domains = ["vhdl"]` for a pure IP
   repository, `exclude = ["sim"]` to skip simulation-only files.
