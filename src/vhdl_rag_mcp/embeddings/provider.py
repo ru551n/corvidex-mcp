@@ -109,16 +109,21 @@ class FastEmbedProvider:
         self._sparse: SparseModelLike | None = sparse
         self._cache_dir = cache_dir
 
-    def _load(self) -> None:
-        if self._dense is not None and self._sparse is not None:
-            return
-        from fastembed import SparseTextEmbedding, TextEmbedding
-
-        cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
+    def _ensure_dense(self) -> None:
+        """Lazily load the dense model (and only the dense model)."""
         if self._dense is None:
+            from fastembed import TextEmbedding
+
+            cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
             logger.info("loading dense model %s", self._dense_model)
             self._dense = TextEmbedding(self._dense_model, cache_dir=cache_dir)
+
+    def _ensure_sparse(self) -> None:
+        """Lazily load the sparse model (and only the sparse model)."""
         if self._sparse is None:
+            from fastembed import SparseTextEmbedding
+
+            cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
             logger.info("loading sparse model %s", self._sparse_model)
             self._sparse = SparseTextEmbedding(self._sparse_model, cache_dir=cache_dir)
 
@@ -128,14 +133,14 @@ class FastEmbedProvider:
 
     @property
     def dimension(self) -> int:
-        self._load()
+        self._ensure_dense()
         assert self._dense is not None
         return int(self._dense.embedding_size)
 
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        self._load()
+        self._ensure_dense()
         assert self._dense is not None
         vectors = [
             np.asarray(v, dtype=np.float32).ravel()
@@ -149,7 +154,7 @@ class FastEmbedProvider:
         return [[float(x) for x in v] for v in vectors]
 
     def embed_query(self, text: str) -> list[float]:
-        self._load()
+        self._ensure_dense()
         assert self._dense is not None
         vectors = [
             np.asarray(v, dtype=np.float32).ravel()
@@ -162,7 +167,7 @@ class FastEmbedProvider:
     def embed_sparse_passages(self, texts: list[str]) -> list[SparseVectorData]:
         if not texts:
             return []
-        self._load()
+        self._ensure_sparse()
         assert self._sparse is not None
         results = [
             _sparse_from(r)
@@ -175,7 +180,7 @@ class FastEmbedProvider:
         return results
 
     def embed_sparse_query(self, text: str) -> SparseVectorData:
-        self._load()
+        self._ensure_sparse()
         assert self._sparse is not None
         results = list(self._sparse.query_embed(text, mode="query"))
         if not results:
