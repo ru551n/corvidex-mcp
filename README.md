@@ -10,6 +10,42 @@ repository with `uvx`, see [Installation](#installation)). No
 external services required: Qdrant runs embedded and the embedding
 models run locally (ONNX via FastEmbed).
 
+## Intended use
+
+This project is the **knowledge layer for coding agents that work on
+VHDL**. When an agent (Claude Code, Maki, or any MCP client)
+implements or modifies hardware, the work is bounded by institutional
+knowledge that lives *outside* the file it currently edits: the
+company's coding standards, reference IP from earlier projects,
+conventions documented in design guides, and the test/simulation code
+that exercises the RTL. `vhdl-rag-mcp` makes that knowledge
+retrievable, so an agent can:
+
+- **Follow the house style before writing RTL** — search the
+  standards repository for reset, clocking, or naming conventions and
+  read the exact section, instead of inventing a plausible-but-wrong
+  pattern.
+- **Reuse proven designs** — find a reference FIFO, AXI slave, or FSM
+  implementation (with its entity, architecture, and processes as
+  discrete results) and pull the exact lines into new code.
+- **Stay consistent across the stack** — trace an identifier such as
+  `wr_ptr` through the standard, the VHDL that implements it, and the
+  C testbench that checks it, so a rename or a protocol change
+  doesn't leave the domains out of sync.
+- **Work from exact sources, not paraphrases** — every result
+  names the repository, file, line range, and commit, and
+  `get_source` returns the verbatim text at that commit; an agent
+  can quote or copy code it has actually verified.
+- **Scale to many repositories** — one server covers all of the
+  organization's Git repositories (branch-tracked or pinned to a
+  tag/SHA), keeping the index current automatically while an agent
+  session is in progress.
+
+In short: it turns "where is our standard for asynchronous resets,
+and who implements it" from a human-driven codebase archaeology task
+into a few fast, attributable tool calls — while the agent does the
+implementation.
+
 ## Capabilities
 
 - **Three indexed domains, one server.** VHDL source, documentation
