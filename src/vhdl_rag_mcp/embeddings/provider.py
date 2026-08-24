@@ -1,0 +1,183 @@
+"""Embedding layer: local dense + sparse (BM25) embeddings via FastEmbed.
+
+Hides the concrete implementation (FastEmbed ONNX models, no server)
+behind a small interface. The vector store and retrieval only deal in
+plain floats and :class:`~vhdl_rag_mcp.models.SparseVectorData`.
+
+Two model families are used per collection:
+
+- dense  ``jinaai/jina-embeddings-v2-*`` — semantic similarity
+- sparse ``Qdrant/bm25`` — exact token matching (identifier search),
+  fused with the dense leg by Qdrant's native hybrid (RRF) query.
+
+Queries and indexed passages use different entry points: jina v2 models
+require task prefixes ("query:"/"passage:"), which FastEmbed applies
+through ``query_embed``/``passage_embed``; ``Qdrant/bm25`` likewise takes
+a ``mode`` argument.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+import numpy as np
+
+from ..models import SparseVectorData
+
+logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class DenseModelLike(Protocol):
+    """The FastEmbed dense-model subset this provider relies on."""
+
+    @property
+    def embedding_size(self) -> int: ...
+
+    def passage_embed(self, texts: list[str], **kwargs: Any) -> Iterable[object]: ...
+
+    def query_embed(self, query: str, **kwargs: Any) -> Iterable[object]: ...
+
+
+@runtime_checkable
+class SparseVectorResult(Protocol):
+    """Structural type for FastEmbed's sparse output (index/value arrays)."""
+
+    indices: np.ndarray
+    values: np.ndarray
+
+
+@runtime_checkable
+class SparseModelLike(Protocol):
+    """The FastEmbed sparse-model subset this provider relies on."""
+
+    def passage_embed(
+        self, texts: list[str], **kwargs: Any
+    ) -> Iterable[SparseVectorResult]: ...
+
+    def query_embed(
+        self, query: str, **kwargs: Any
+    ) -> Iterable[SparseVectorResult]: ...
+
+
+class EmbeddingProvider(Protocol):
+    """Embeds batches of texts, dense and sparse."""
+
+    @property
+    def model_name(self) -> str: ...
+
+    @property
+    def dimension(self) -> int: ...
+
+    def embed_passages(self, texts: list[str]) -> list[list[float]]: ...
+
+    def embed_query(self, text: str) -> list[float]: ...
+
+    def embed_sparse_passages(self, texts: list[str]) -> list[SparseVectorData]: ...
+
+    def embed_sparse_query(self, text: str) -> SparseVectorData: ...
+
+
+def _sparse_from(result: SparseVectorResult) -> SparseVectorData:
+    indices = np.asarray(result.indices, dtype=np.int32).ravel()
+    values = np.asarray(result.values, dtype=np.float32).ravel()
+    return SparseVectorData(
+        indices=tuple(int(i) for i in indices),
+        values=tuple(float(v) for v in values),
+    )
+
+
+class FastEmbedProvider:
+    """FastEmbed-based provider (dense + sparse); models download on first use."""
+
+    def __init__(
+        self,
+        dense_model: str,
+        sparse_model: str = "Qdrant/bm25",
+        cache_dir: Path | None = None,
+        dense: DenseModelLike | None = None,
+        sparse: SparseModelLike | None = None,
+        batch_size: int = 32,
+    ) -> None:
+        self._dense_model = dense_model
+        self._sparse_model = sparse_model
+        self._batch_size = batch_size
+        self._dense: DenseModelLike | None = dense
+        self._sparse: SparseModelLike | None = sparse
+        self._cache_dir = cache_dir
+
+    def _load(self) -> None:
+        if self._dense is not None and self._sparse is not None:
+            return
+        from fastembed import SparseTextEmbedding, TextEmbedding
+
+        cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
+        if self._dense is None:
+            logger.info("loading dense model %s", self._dense_model)
+            self._dense = TextEmbedding(self._dense_model, cache_dir=cache_dir)
+        if self._sparse is None:
+            logger.info("loading sparse model %s", self._sparse_model)
+            self._sparse = SparseTextEmbedding(self._sparse_model, cache_dir=cache_dir)
+
+    @property
+    def model_name(self) -> str:
+        return self._dense_model
+
+    @property
+    def dimension(self) -> int:
+        self._load()
+        assert self._dense is not None
+        return int(self._dense.embedding_size)
+
+    def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        self._load()
+        assert self._dense is not None
+        vectors = [
+            np.asarray(v, dtype=np.float32).ravel()
+            for v in self._dense.passage_embed(texts, batch_size=self._batch_size)
+        ]
+        if len(vectors) != len(texts):
+            raise RuntimeError(
+                f"embedding model returned {len(vectors)} vectors "
+                f"for {len(texts)} texts"
+            )
+        return [[float(x) for x in v] for v in vectors]
+
+    def embed_query(self, text: str) -> list[float]:
+        self._load()
+        assert self._dense is not None
+        vectors = [
+            np.asarray(v, dtype=np.float32).ravel()
+            for v in self._dense.query_embed(text, batch_size=self._batch_size)
+        ]
+        if not vectors:
+            raise RuntimeError("embedding model returned no query vector")
+        return [float(x) for x in vectors[0]]
+
+    def embed_sparse_passages(self, texts: list[str]) -> list[SparseVectorData]:
+        if not texts:
+            return []
+        self._load()
+        assert self._sparse is not None
+        results = [
+            _sparse_from(r)
+            for r in self._sparse.passage_embed(list(texts), mode="passage")
+        ]
+        if len(results) != len(texts):
+            raise RuntimeError(
+                f"sparse model returned {len(results)} vectors for {len(texts)} texts"
+            )
+        return results
+
+    def embed_sparse_query(self, text: str) -> SparseVectorData:
+        self._load()
+        assert self._sparse is not None
+        results = list(self._sparse.query_embed(text, mode="query"))
+        if not results:
+            return SparseVectorData(indices=(), values=())
+        return _sparse_from(results[0])

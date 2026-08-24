@@ -17,6 +17,10 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: Git refs: branch/tag names or commit SHAs (4-40 hex chars).
+REF_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]{0,255}|[0-9a-f]{4,40})$")
+#: A full commit SHA: sync can skip the network fetch entirely.
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ConfigError(RuntimeError):
@@ -42,22 +46,32 @@ CATEGORY_DEFAULT_PRIORITIES: dict[RepositoryCategory, int] = {
 
 
 class EmbeddingsConfig(BaseModel):
-    """Local embedding models per retrieval domain.
+    """Local embedding models for the three collections.
 
-    Both collections may use different models; the vector store keeps them
-    separate. The jina-embeddings-v2 models are 768-dimensional with an
-    8192-token context window, which suits long VHDL constructs.
+    Each collection has a dense model (semantic) and they all share one
+    sparse BM25 model (exact token/identifier matching, fused with the
+    dense leg by Qdrant's native hybrid RRF query). The jina v2 models are
+    768-dimensional with an 8192-token context, which suits long VHDL
+    constructs.
     """
 
     model_config = ConfigDict(frozen=True)
 
     vhdl_model: str = Field(
         default="jinaai/jina-embeddings-v2-base-code",
-        description="Code-oriented model used to embed VHDL chunks.",
+        description="Code-oriented dense model used to embed VHDL chunks.",
     )
     docs_model: str = Field(
         default="jinaai/jina-embeddings-v2-base-en",
-        description="Text-oriented model used to embed documentation chunks.",
+        description="Text-oriented dense model used to embed documentation.",
+    )
+    code_model: str = Field(
+        default="jinaai/jina-embeddings-v2-base-code",
+        description="Code-oriented dense model used to embed general code.",
+    )
+    sparse_model: str = Field(
+        default="Qdrant/bm25",
+        description="Sparse (BM25) model for exact token/identifier matching.",
     )
 
 
@@ -87,16 +101,23 @@ class QdrantConfig(BaseModel):
 class RepositoryConfig(BaseModel):
     """One configured Git repository.
 
-    Authentication for private repositories uses the ambient Git/SSH setup
-    (SSH agent, ``~/.ssh/config``, deploy keys); no credentials are stored
-    by this application.
+    ``ref`` is any resolvable Git ref — a branch name, a tag, or a commit
+    SHA (full or abbreviated). A branch tracks the remote branch and is
+    updated on every sync; a tag or a commit SHA pins the repository, and
+    sync only verifies the pin (a full-SHA pin skips the network fetch
+    entirely). Authentication for private repositories uses the ambient
+    Git/SSH setup (SSH agent, ``~/.ssh/config``, deploy keys); no
+    credentials are stored by this application.
     """
 
     model_config = ConfigDict(frozen=True)
 
     name: str
     url: str
-    branch: str = "main"
+    ref: str = Field(
+        default="main",
+        description="Branch, tag, or commit SHA (full or 4-40 hex) to index.",
+    )
     category: RepositoryCategory = RepositoryCategory.PROJECT
     priority: int | None = Field(
         default=None,
@@ -121,15 +142,30 @@ class RepositoryConfig(BaseModel):
     @field_validator("url")
     @classmethod
     def _validate_url(cls, value: str) -> str:
-        if " " in value or not value.strip():
-            raise ValueError("repository url must not contain whitespace")
+        if not value.strip():
+            raise ValueError("repository url must not be empty")
         return value.strip()
+
+    @field_validator("ref")
+    @classmethod
+    def _validate_ref(cls, value: str) -> str:
+        if not REF_RE.fullmatch(value):
+            raise ValueError(
+                "repository ref must be a branch/tag name or a commit SHA "
+                f"(4-40 hex chars); got {value!r}"
+            )
+        return value
 
     @property
     def effective_priority(self) -> int:
         if self.priority is not None:
             return self.priority
         return CATEGORY_DEFAULT_PRIORITIES[self.category]
+
+    @property
+    def is_pinned_sha(self) -> bool:
+        """True when the ref is a full commit SHA (no fetch needed)."""
+        return bool(FULL_SHA_RE.fullmatch(self.ref))
 
 
 class AppConfig(BaseModel):
@@ -212,8 +248,14 @@ def default_config_path() -> Path:
 _DEFAULT_TEMPLATE = """\
 # vhdl-rag-mcp configuration.
 #
-# Repositories are indexed in priority order; private repositories work
-# with your normal Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys).
+# Indexed domains: VHDL (via vhdl_ls), VHDL-related documentation, and
+# general source code (C/C++, Python, ...). Repositories are indexed with
+# a bounded priority bonus per category; private repositories work with
+# your normal Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys).
+#
+# "ref" is any resolvable Git ref: a branch name (tracked on every sync),
+# a tag, or a commit SHA (full or abbreviated). Tags and SHAs pin the
+# repository to a fixed version — sync only verifies the pin.
 
 data_dir = "~/.local/share/vhdl-rag"
 sync_interval = 300
@@ -222,7 +264,6 @@ log_level = "INFO"
 
 [embeddings]
 vhdl_model = "jinaai/jina-embeddings-v2-base-code"
-docs_model = "jinaai/jina-embeddings-v2-base-en"
 
 # [qdrant]
 # mode = "local"
@@ -234,14 +275,20 @@ docs_model = "jinaai/jina-embeddings-v2-base-en"
 [[repositories]]
 name = "company-standards"
 url = "git@github.com:company/vhdl-standards.git"
-branch = "main"
-category = "golden"    # golden | approved | project | legacy
+ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
+category = "golden"        # golden | approved | project | legacy
 priority = 100
+
+[[repositories]]
+name = "common-ip"
+url = "git@github.com:company/common-ip.git"
+ref = "v2.1"               # pinned to a release tag
+category = "approved"
 
 [[repositories]]
 name = "current-project"
 url = "git@github.com:company/current-project.git"
-branch = "main"
+ref = "main"
 category = "project"
 """
 

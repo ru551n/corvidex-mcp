@@ -7,13 +7,17 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP(
     "vhdl_rag_mcp",
     instructions=(
-        "Semantic search over an organization's VHDL code and VHDL-related "
-        "documentation. Use search_vhdl for reference VHDL implementations, "
-        "search_docs for coding standards and design documentation, and "
-        "search_knowledge when the answer may span both. Every result "
-        "carries exact source attribution (repository, file, line range). "
-        "Use repository_status to see what is indexed and when it was last "
-        "synchronized."
+        "Semantic search over an organization's VHDL code, VHDL-related "
+        "documentation, and general source code. Use search_vhdl for "
+        "reference VHDL implementations (entities, architectures, processes, "
+        "packages, functions, reset/clock/FSM patterns), search_docs for "
+        "standards and design documentation, search_code for general "
+        "C/C++/Python code, and search_knowledge when the answer may span "
+        "any of them. Use get_source for the full text of a known file. "
+        "Every result carries exact source attribution (repository, file, "
+        "line range, commit) and cross-referenced related chunks. Use "
+        "repository_status to see what is indexed; sync_repositories to "
+        "force an update."
     ),
 )
 

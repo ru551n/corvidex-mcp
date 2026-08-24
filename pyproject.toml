@@ -3,7 +3,7 @@ name = "vhdl-rag-mcp"
 version = "0.1.0"
 description = "MCP server providing semantic RAG search over VHDL Git repositories and VHDL-related documentation"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
     # FastMCP (mcp.server.fastmcp) was removed in mcp 2.x — pin to 1.x.
@@ -37,7 +37,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -53,7 +53,7 @@ select = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 files = ["src"]
 warn_unreachable = true
