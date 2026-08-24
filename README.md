@@ -12,39 +12,42 @@ models run locally (ONNX via FastEmbed).
 
 ## Intended use
 
-This project is the **knowledge layer for coding agents that work on
-VHDL**. When an agent (Claude Code, Maki, or any MCP client)
-implements or modifies hardware, the work is bounded by institutional
-knowledge that lives *outside* the file it currently edits: the
-company's coding standards, reference IP from earlier projects,
-conventions documented in design guides, and the test/simulation code
-that exercises the RTL. `vhdl-rag-mcp` makes that knowledge
-retrievable, so an agent can:
+The main uses are **RAG** and **cross-referencing code against
+documentation**, for coding agents (Claude Code, Maki, or any MCP
+client) that implement or modify VHDL.
 
-- **Follow the house style before writing RTL** — search the
-  standards repository for reset, clocking, or naming conventions and
-  read the exact section, instead of inventing a plausible-but-wrong
-  pattern.
-- **Reuse proven designs** — find a reference FIFO, AXI slave, or FSM
-  implementation (with its entity, architecture, and processes as
-  discrete results) and pull the exact lines into new code.
-- **Stay consistent across the stack** — trace an identifier such as
-  `wr_ptr` through the standard, the VHDL that implements it, and the
-  C testbench that checks it, so a rename or a protocol change
-  doesn't leave the domains out of sync.
-- **Work from exact sources, not paraphrases** — every result
-  names the repository, file, line range, and commit, and
-  `get_source` returns the verbatim text at that commit; an agent
-  can quote or copy code it has actually verified.
-- **Scale to many repositories** — one server covers all of the
-  organization's Git repositories (branch-tracked or pinned to a
-  tag/SHA), keeping the index current automatically while an agent
-  session is in progress.
+**RAG.** When an agent writes or changes hardware, the context it
+needs usually lives *outside* the file it is editing: the company's
+coding standards, design guides, and reference IP from earlier
+projects. `vhdl-rag-mcp` gives the agent retrieval-augmented access to
+that context — semantic + exact-identifier search over VHDL source,
+documentation, and general code, with the verbatim text (and exact
+repository, file, line range, and commit) of every match, so the agent
+grounds its work in what the organization actually wrote instead of
+hallucinating a plausible pattern.
 
-In short: it turns "where is our standard for asynchronous resets,
-and who implements it" from a human-driven codebase archaeology task
-into a few fast, attributable tool calls — while the agent does the
-implementation.
+**Cross-referencing code against documentation.** This is what makes
+the search more than three separate indexes: every chunk stores the
+identifiers it defines or references (`symbols`), so the agent can
+bridge the domains. A standard that says "asynchronous resets are
+named `rst_n`" can be checked against the VHDL that actually uses
+`rst_n` and the C testbench that drives it; a signal renamed in the
+RTL can be found in every doc section and test function that still
+references the old name. In practice that means:
+
+- **Docs → code.** Follow a convention from the standard to every
+  VHDL construct and test function that implements it.
+- **Code → docs.** Find the design rationale behind an implementation:
+  given a process or function, which documentation section explains
+  its convention.
+- **Consistency.** Trace one identifier (e.g. `wr_ptr`) across
+  standard, RTL, and testbench so a rename or protocol change doesn't
+  leave the domains out of sync.
+
+Both uses rely on the index staying current: repositories are Git
+synced (branch-tracked or pinned to a tag/SHA) automatically in the
+background, so the context an agent retrieves reflects the code as it
+is, not a stale snapshot.
 
 ## Capabilities
 
