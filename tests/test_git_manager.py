@@ -222,3 +222,30 @@ def test_routing_code_and_unknown():
         assert kind.language == lang
     assert classify_file("Makefile") is None
     assert classify_file("src/script.sh") is None
+
+
+def test_routing_domains_restriction():
+    from vhdl_rag_mcp.models import CollectionName
+
+    domains = frozenset({CollectionName.VHDL})
+    assert classify_file("rtl/fifo.vhd", domains=domains) is not None
+    assert classify_file("docs/guide.md", domains=domains) is None
+    assert classify_file("src/fifo.c", domains=domains) is None
+    # unrestricted
+    assert classify_file("src/fifo.c") is not None
+
+
+def test_routing_excludes():
+    excludes = ["sim/*", "*.log", "build/sub"]
+    assert classify_file("rtl/fifo.vhd", exclude=excludes) is not None
+    assert classify_file("sim/run.vhd", exclude=excludes) is None
+    assert classify_file("sim/deep/nested/top.vhd", exclude=excludes) is None
+    assert classify_file("rtl/debug.log", exclude=excludes) is None
+    assert classify_file("src/debug.log", exclude=excludes) is None
+    assert classify_file("build/sub/fifo.vhd", exclude=excludes) is None
+    # wildcard-free patterns exclude the whole subtree (gitignore-style)
+    assert classify_file("build/sub/deep/file.vhd", exclude=excludes) is None
+    assert classify_file("build/fifo.vhd", exclude=excludes) is not None
+    # exclude wins over domains
+    assert classify_file("rtl/fifo.vhd", domains=None, exclude=["*"]) is None
+    assert classify_file("rtl/fifo.vhd", exclude=["rtl"]) is None

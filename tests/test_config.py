@@ -8,13 +8,16 @@ import pytest
 from pydantic import ValidationError
 
 from vhdl_rag_mcp.config import (
+    ALL_DOMAINS,
     CATEGORY_DEFAULT_PRIORITIES,
     AppConfig,
     ConfigError,
     QdrantConfig,
     RepositoryCategory,
+    RepositoryConfig,
     load_config,
 )
+from vhdl_rag_mcp.models import CollectionName
 
 FULL_CONFIG = """\
 data_dir = "~/vhdl-rag-data"
@@ -35,6 +38,8 @@ url = "git@github.com:co/standards.git"
 ref = "main"
 category = "golden"
 priority = 100
+domains = ["vhdl", "docs"]
+exclude = ["sim/*", "*.log"]
 
 [[repositories]]
 name = "ip"
@@ -51,6 +56,7 @@ ref = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 name = "proj"
 url = "https://gitlab.example.com/co/proj.git"
 category = "legacy"
+domains = ["code"]
 """
 
 
@@ -95,7 +101,16 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert std.ref == "main"
     assert std.category is RepositoryCategory.GOLDEN
     assert std.effective_priority == 100
+    assert std.domains == [CollectionName.VHDL, CollectionName.DOCS]
+    assert std.enabled_collections == frozenset(
+        {CollectionName.VHDL, CollectionName.DOCS}
+    )
+    assert std.exclude == ["sim/*", "*.log"]
     assert ip.ref == "v2.1"
+    # domains default to all three; exclude defaults to empty
+    assert ip.domains == list(ALL_DOMAINS)
+    assert ip.enabled_collections == frozenset(ALL_DOMAINS)
+    assert ip.exclude == []
     assert (
         ip.effective_priority
         == CATEGORY_DEFAULT_PRIORITIES[RepositoryCategory.APPROVED]
@@ -106,7 +121,17 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert not ip.is_pinned_sha
     assert proj.category is RepositoryCategory.LEGACY
     assert proj.effective_priority == 20
+    assert proj.domains == [CollectionName.CODE]
     assert cfg.repository("ip").url == "git@github.com:co/ip.git"
+
+
+def test_domains_validation() -> None:
+    repo = RepositoryConfig(name="r", url="u", domains=["vhdl", "docs"])
+    assert repo.domains == [CollectionName.VHDL, CollectionName.DOCS]
+    with pytest.raises(ValidationError, match="duplicate domain"):
+        RepositoryConfig(name="r", url="u", domains=["vhdl", "vhdl"])
+    with pytest.raises(ValidationError, match="Input should be"):
+        RepositoryConfig(name="r", url="u", domains=["vhdl", "nope"])
 
 
 def test_data_dir_expanded(tmp_path: Path) -> None:

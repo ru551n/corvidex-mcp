@@ -16,11 +16,20 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .models import CollectionName
+
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: Git refs: branch/tag names or commit SHAs (4-40 hex chars).
 REF_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]{0,255}|[0-9a-f]{4,40})$")
 #: A full commit SHA: sync can skip the network fetch entirely.
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: Every indexable domain; the default per-repository selection.
+ALL_DOMAINS: tuple[CollectionName, ...] = (
+    CollectionName.VHDL,
+    CollectionName.DOCS,
+    CollectionName.CODE,
+)
 
 
 class ConfigError(RuntimeError):
@@ -106,8 +115,12 @@ class RepositoryConfig(BaseModel):
     updated on every sync; a tag or a commit SHA pins the repository, and
     sync only verifies the pin (a full-SHA pin skips the network fetch
     entirely). Authentication for private repositories uses the ambient
-    Git/SSH setup (SSH agent, ``~/.ssh/config``, deploy keys); no
+    Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys); no
     credentials are stored by this application.
+
+    ``domains`` selects which of the three indexed domains (VHDL,
+    documentation, general code) are loaded from this repository; the
+    default is all of them.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -117,6 +130,22 @@ class RepositoryConfig(BaseModel):
     ref: str = Field(
         default="main",
         description="Branch, tag, or commit SHA (full or 4-40 hex) to index.",
+    )
+    domains: list[CollectionName] = Field(
+        default_factory=lambda: list(ALL_DOMAINS),
+        description=(
+            "Domains to index from this repository: any of 'vhdl', 'docs', "
+            "'code'. Default: all three."
+        ),
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Glob patterns (matched against the repository-relative path, "
+            "'*' crosses '/') whose files are not indexed; wildcard-free "
+            "patterns exclude the whole subtree. E.g. "
+            "['sim', 'build/*', '*.log']."
+        ),
     )
     category: RepositoryCategory = RepositoryCategory.PROJECT
     priority: int | None = Field(
@@ -156,6 +185,16 @@ class RepositoryConfig(BaseModel):
             )
         return value
 
+    @field_validator("domains")
+    @classmethod
+    def _validate_domains(cls, value: list[CollectionName]) -> list[CollectionName]:
+        seen: set[CollectionName] = set()
+        for domain in value:
+            if domain in seen:
+                raise ValueError(f"duplicate domain: {domain.value!r}")
+            seen.add(domain)
+        return value
+
     @property
     def effective_priority(self) -> int:
         if self.priority is not None:
@@ -166,6 +205,11 @@ class RepositoryConfig(BaseModel):
     def is_pinned_sha(self) -> bool:
         """True when the ref is a full commit SHA (no fetch needed)."""
         return bool(FULL_SHA_RE.fullmatch(self.ref))
+
+    @property
+    def enabled_collections(self) -> frozenset[CollectionName]:
+        """The collections this repository contributes to (from ``domains``)."""
+        return frozenset(self.domains)
 
 
 class AppConfig(BaseModel):
@@ -256,6 +300,13 @@ _DEFAULT_TEMPLATE = """\
 # "ref" is any resolvable Git ref: a branch name (tracked on every sync),
 # a tag, or a commit SHA (full or abbreviated). Tags and SHAs pin the
 # repository to a fixed version — sync only verifies the pin.
+#
+# "domains" selects which domains are indexed from a repository: any
+# subset of ["vhdl", "docs", "code"]. Default: all three.
+#
+# "exclude" lists glob patterns (matched against the repository-relative
+# path, '*' crosses '/') whose files are not indexed; wildcard-free
+# patterns exclude the whole subtree.
 
 data_dir = "~/.local/share/vhdl-rag"
 sync_interval = 300
@@ -278,6 +329,8 @@ url = "git@github.com:company/vhdl-standards.git"
 ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
 category = "golden"        # golden | approved | project | legacy
 priority = 100
+# domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
+# exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 
 [[repositories]]
 name = "common-ip"
