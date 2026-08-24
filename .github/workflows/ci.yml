@@ -50,25 +50,32 @@ jobs:
   test-almalinux-9:
     name: Tests (AlmaLinux 9, py3.12)
     needs: quality
-    # Alma 9 has no hosted runner; run it as a container on Ubuntu. The
-    # container's glibc (2.34) is the strictest floor in the locked wheel
-    # set, so a green run here verifies RHEL 9-compatible Linux in general.
+    # Alma 9 has no hosted runner; run it as a container on Ubuntu.
+    # The floating :9 tag tracks the newest 9.z (9.6+ at the time of
+    # writing). The container's glibc (2.34) is the strictest floor in
+    # the locked wheel set, so a green run here verifies RHEL 9-
+    # compatible Linux in general. Python is not taken from the distro
+    # repos: uv provisions its own standalone CPython (the same way a
+    # fresh user install works), so the job only needs git + curl.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     container:
       image: quay.io/almalinux/almalinux:9
     env:
       UV_PYTHON: "3.12"
-      UV_INSTALL_DIR: /opt/uv
     steps:
       - name: Install system packages
         run: |
-          microdnf install -y git curl ca-certificates python3.12
-          ln -sf /usr/bin/python3.12 /usr/local/bin/python3
+          set -e
+          if command -v microdnf >/dev/null 2>&1; then
+            microdnf install -y git curl ca-certificates
+          else
+            dnf install -y git curl ca-certificates
+          fi
       - uses: actions/checkout@v4
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - name: Install dependencies
-        run: /opt/uv/bin/uv sync --frozen
+      - name: Install dependencies (uv provisions CPython 3.12)
+        run: "$HOME/.local/bin/uv" sync --frozen
       - name: Run tests
-        run: /opt/uv/bin/uv run pytest -q
+        run: "$HOME/.local/bin/uv" run pytest -q
