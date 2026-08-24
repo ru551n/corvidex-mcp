@@ -1,17 +1,19 @@
 """Typed TOML configuration for vhdl-rag-mcp.
 
-The configuration lives at ``~/.config/vhdl-rag/config.toml`` by default.
-On first start a commented default template is written there if no file
-exists. All validation happens at load time; callers receive either a
-valid :class:`AppConfig` or a :class:`ConfigError` with an actionable
-message.
+The configuration lives at ``~/.config/vhdl-rag/config.toml`` by
+default; the ``VHDL_RAG_MCP_CONFIG`` environment variable or the
+``--config`` command-line flag select an alternate file. On first start
+a commented default template is written to the default location if no
+file exists. All validation happens at load time; callers receive
+either a valid :class:`AppConfig` or a :class:`ConfigError` with an
+actionable message.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
-from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,67 +38,18 @@ class ConfigError(RuntimeError):
     """Raised when the configuration cannot be loaded or validated."""
 
 
-class RepositoryCategory(StrEnum):
-    """Authority level of a repository; influences ranking via a bounded bonus."""
-
-    GOLDEN = "golden"
-    APPROVED = "approved"
-    PROJECT = "project"
-    LEGACY = "legacy"
-
-
-#: Fallback priorities used when a repository does not set ``priority``.
-CATEGORY_DEFAULT_PRIORITIES: dict[RepositoryCategory, int] = {
-    RepositoryCategory.GOLDEN: 100,
-    RepositoryCategory.APPROVED: 90,
-    RepositoryCategory.PROJECT: 70,
-    RepositoryCategory.LEGACY: 20,
-}
-
-
-class EmbeddingsConfig(BaseModel):
-    """Local embedding models for the three collections.
-
-    Each collection has a dense model (semantic) and they all share one
-    sparse BM25 model (exact token/identifier matching, fused with the
-    dense leg by Qdrant's native hybrid RRF query). The jina v2 models are
-    768-dimensional with an 8192-token context, which suits long VHDL
-    constructs.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    vhdl_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-code",
-        description="Code-oriented dense model used to embed VHDL chunks.",
-    )
-    docs_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-en",
-        description="Text-oriented dense model used to embed documentation.",
-    )
-    code_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-code",
-        description="Code-oriented dense model used to embed general code.",
-    )
-    sparse_model: str = Field(
-        default="Qdrant/bm25",
-        description="Sparse (BM25) model for exact token/identifier matching.",
-    )
-
-
 class QdrantConfig(BaseModel):
     """Qdrant connection settings.
 
     Local (embedded) mode is the default: no separate Qdrant server is
-    required. Server mode is supported for the future; only this module
-    and the vector-store layer know about Qdrant.
+    required; data lives under ``<data_dir>/qdrant``. Server mode is
+    supported for the future; only this module and the vector-store
+    layer know about Qdrant.
     """
 
     model_config = ConfigDict(frozen=True)
 
     mode: str = Field(default="local", pattern="^(local|server)$")
-    #: Embedded-mode storage directory; resolved relative to ``data_dir``.
-    path: Path | None = None
     #: Server-mode endpoint, e.g. ``http://qdrant:6333``.
     url: str | None = None
 
@@ -147,16 +100,6 @@ class RepositoryConfig(BaseModel):
             "['sim', 'build/*', '*.log']."
         ),
     )
-    category: RepositoryCategory = RepositoryCategory.PROJECT
-    priority: int | None = Field(
-        default=None,
-        ge=0,
-        le=100,
-        description=(
-            "Ranking bonus weight. Defaults to the category default "
-            "(golden=100, approved=90, project=70, legacy=20)."
-        ),
-    )
 
     @field_validator("name")
     @classmethod
@@ -196,12 +139,6 @@ class RepositoryConfig(BaseModel):
         return value
 
     @property
-    def effective_priority(self) -> int:
-        if self.priority is not None:
-            return self.priority
-        return CATEGORY_DEFAULT_PRIORITIES[self.category]
-
-    @property
     def is_pinned_sha(self) -> bool:
         """True when the ref is a full commit SHA (no fetch needed)."""
         return bool(FULL_SHA_RE.fullmatch(self.ref))
@@ -227,7 +164,6 @@ class AppConfig(BaseModel):
     log_level: str = Field(
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
-    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
 
@@ -267,8 +203,6 @@ class AppConfig(BaseModel):
 
     @property
     def qdrant_local_path(self) -> Path:
-        if self.qdrant.path is not None:
-            return self.qdrant.path.expanduser().resolve()
         return self.resolved_data_dir / "qdrant"
 
     @property
@@ -307,18 +241,19 @@ _DEFAULT_TEMPLATE = """\
 # "exclude" lists glob patterns (matched against the repository-relative
 # path, '*' crosses '/') whose files are not indexed; wildcard-free
 # patterns exclude the whole subtree.
+#
+# This file can be selected with the VHDL_RAG_MCP_CONFIG environment
+# variable or the --config command-line flag. The top-level scalar
+# options also have command-line overrides: --data-dir, --sync-interval,
+# --vhdl-ls-path, --log-level (command line wins).
 
 data_dir = "~/.local/share/vhdl-rag"
 sync_interval = 300
 vhdl_ls_path = "vhdl_ls"
 log_level = "INFO"
 
-[embeddings]
-vhdl_model = "jinaai/jina-embeddings-v2-base-code"
-
 # [qdrant]
 # mode = "local"
-# path = "~/.local/share/vhdl-rag/qdrant"
 # # or, for a remote Qdrant server:
 # # mode = "server"
 # # url = "http://qdrant:6333"
@@ -327,8 +262,6 @@ vhdl_model = "jinaai/jina-embeddings-v2-base-code"
 name = "company-standards"
 url = "git@github.com:company/vhdl-standards.git"
 ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
-category = "golden"        # golden | approved | project | legacy
-priority = 100
 # domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 
@@ -336,13 +269,11 @@ priority = 100
 name = "common-ip"
 url = "git@github.com:company/common-ip.git"
 ref = "v2.1"               # pinned to a release tag
-category = "approved"
 
 [[repositories]]
 name = "current-project"
 url = "git@github.com:company/current-project.git"
 ref = "main"
-category = "project"
 """
 
 
@@ -353,6 +284,9 @@ def load_config(path: Path | None = None, write_default: bool = True) -> AppConf
     default template is written and the built-in defaults are returned.
     Raises :class:`ConfigError` on unreadable or invalid configuration.
     """
+    if path is None:
+        env_path = os.environ.get("VHDL_RAG_MCP_CONFIG")
+        path = Path(env_path) if env_path else None
     config_path = (path or default_config_path()).expanduser()
     if not config_path.exists():
         if not write_default:

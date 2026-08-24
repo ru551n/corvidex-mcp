@@ -279,7 +279,6 @@ def config(tmp_path: Path, remote: Path, fake_lsp: Path) -> AppConfig:
                 name="repo",
                 url=str(remote),
                 ref="main",
-                category="approved",
             )
         ],
     )
@@ -433,7 +432,6 @@ async def test_domains_and_excludes(
                 name="repo",
                 url=str(remote),
                 ref="main",
-                category="approved",
                 domains=["vhdl", "code"],
                 exclude=["sim"],
             )

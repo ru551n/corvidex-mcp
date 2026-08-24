@@ -395,8 +395,6 @@ def _make_chunk(
     text = "\n".join(lines[start - 1 : end])
     return Chunk(
         repository=cfg.name,
-        repository_category=cfg.category.value,
-        repository_priority=cfg.effective_priority,
         branch=cfg.ref,
         commit=commit,
         file=file,

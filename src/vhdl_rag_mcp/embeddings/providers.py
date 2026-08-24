@@ -12,6 +12,13 @@ from ..config import AppConfig
 from ..models import CollectionName, SparseVectorData
 from .provider import FastEmbedProvider
 
+#: Fixed local embedding models (no configuration surface): per-collection
+#: dense (jina v2, 768 dimensions) + one shared sparse BM25 model.
+VHDL_MODEL = "jinaai/jina-embeddings-v2-base-code"
+DOCS_MODEL = "jinaai/jina-embeddings-v2-base-en"
+CODE_MODEL = "jinaai/jina-embeddings-v2-base-code"
+SPARSE_MODEL = "Qdrant/bm25"
+
 
 class EmbeddingProviders:
     """Dense model per collection + one shared sparse model, lazy."""
@@ -22,11 +29,10 @@ class EmbeddingProviders:
         self._sparse: FastEmbedProvider | None = None
 
     def _dense_model_name(self, collection: CollectionName) -> str:
-        emb = self._config.embeddings
         return {
-            CollectionName.VHDL: emb.vhdl_model,
-            CollectionName.DOCS: emb.docs_model,
-            CollectionName.CODE: emb.code_model,
+            CollectionName.VHDL: VHDL_MODEL,
+            CollectionName.DOCS: DOCS_MODEL,
+            CollectionName.CODE: CODE_MODEL,
         }[collection]
 
     def _dense_provider(self, collection: CollectionName) -> FastEmbedProvider:
@@ -35,7 +41,7 @@ class EmbeddingProviders:
         if provider is None:
             provider = FastEmbedProvider(
                 name,
-                sparse_model=self._config.embeddings.sparse_model,
+                sparse_model=SPARSE_MODEL,
                 cache_dir=self._config.embed_cache_dir,
             )
             self._dense[name] = provider
@@ -46,8 +52,8 @@ class EmbeddingProviders:
             # Sparse-only provider: with independent lazy loading the dense
             # model is never touched.
             self._sparse = FastEmbedProvider(
-                self._config.embeddings.sparse_model,
-                self._config.embeddings.sparse_model,
+                SPARSE_MODEL,
+                SPARSE_MODEL,
                 cache_dir=self._config.embed_cache_dir,
             )
         return self._sparse

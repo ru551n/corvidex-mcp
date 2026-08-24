@@ -24,18 +24,21 @@ others or stop the server.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import fcntl
 import functools
 import logging
 import os
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import ValidationError
 
 from .config import AppConfig, ConfigError, RepositoryConfig, load_config
 from .embeddings.providers import EmbeddingProviders
@@ -105,6 +108,7 @@ class VhdlRagApp:
         self.retrieval = RetrievalService(
             config, self.git, self.store, self.providers, self.states
         )
+        self._closed = False
 
     # -- collections ---------------------------------------------------------
 
@@ -197,6 +201,9 @@ class VhdlRagApp:
             raise RetrievalError(str(exc)) from exc
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self.store.close()
 
 
@@ -249,21 +256,19 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         query: str,
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
-        category: str | None = None,
         symbols: list[str] | None = None,
     ) -> str:
         """Search VHDL source: entities, architectures, processes, packages,
         functions — semantic + exact-identifier hybrid search.
         `symbols` restricts to chunks referencing the given identifiers
-        (e.g. ["fifo_write", "rst_n"]). `category`: golden/approved/
-        project/legacy. `repository` restricts to one repository name."""
+        (e.g. ["fifo_write", "rst_n"]). `repository` restricts to one
+        repository name."""
         return _render(
             retrieval.search(
                 CollectionName.VHDL,
                 query,
                 limit,
                 repository,
-                category,
                 tuple(symbols) if symbols else None,
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
@@ -275,7 +280,6 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         query: str,
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
-        category: str | None = None,
         symbols: list[str] | None = None,
     ) -> str:
         """Search VHDL-related documentation: coding standards, design
@@ -287,7 +291,6 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 query,
                 limit,
                 repository,
-                category,
                 tuple(symbols) if symbols else None,
             ),
             "No documentation results. Try a broader query, or check "
@@ -300,7 +303,6 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         query: str,
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
-        category: str | None = None,
         symbols: list[str] | None = None,
     ) -> str:
         """Search general source code (C/C++, Python, ...): one result per
@@ -312,7 +314,6 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 query,
                 limit,
                 repository,
-                category,
                 tuple(symbols) if symbols else None,
             ),
             "No code results. Try a broader query, or check repository_status.",
@@ -324,7 +325,6 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         query: str,
         limit: int = KNOWLEDGE_LIMIT,
         repository: str | None = None,
-        category: str | None = None,
         symbols: list[str] | None = None,
     ) -> str:
         """Search ALL domains (VHDL, documentation, code) at once, fused
@@ -333,7 +333,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         implemented in VHDL and tested in C)."""
         return _render(
             retrieval.search_knowledge(
-                query, limit, repository, category, tuple(symbols) if symbols else None
+                query,
+                limit,
+                repository,
+                tuple(symbols) if symbols else None,
             ),
             "No results in any domain. Try a broader query, or check "
             "repository_status.",
@@ -355,8 +358,8 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def repository_status() -> str:
-        """Show every configured repository: category, ref, enabled
-        domains, last indexed commit, last sync time, and any sync error."""
+        """Show every configured repository: ref, enabled domains, last
+        indexed commit, last sync time, and any sync error."""
         lines: list[str] = []
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
@@ -368,8 +371,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 else ""
             )
             lines.append(
-                f"- {status.name} ({status.category}, ref {status.ref}, "
-                f"domains: {domains})\n"
+                f"- {status.name} (ref {status.ref}, domains: {domains})\n"
                 f"  indexed: {commit}, synced: {synced}{error}"
             )
         if not lines:
@@ -445,9 +447,77 @@ async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
     await _serve(app, mcp)
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="vhdl-rag-mcp",
+        description="MCP server: semantic search over VHDL repositories.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "config file (default: $VHDL_RAG_MCP_CONFIG or "
+            "~/.config/vhdl-rag/config.toml)"
+        ),
+    )
+    parser.add_argument(
+        "--data-dir", default=None, metavar="PATH", help="override data_dir"
+    )
+    parser.add_argument(
+        "--sync-interval",
+        default=None,
+        type=int,
+        metavar="SECONDS",
+        help="override sync_interval",
+    )
+    parser.add_argument(
+        "--vhdl-ls-path",
+        default=None,
+        metavar="PATH",
+        help="override vhdl_ls_path",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="override log_level",
+    )
+    return parser.parse_args(argv)
+
+
+def config_from_args(argv: list[str] | None = None) -> AppConfig:
+    """Parse CLI arguments and load the config with overrides applied.
+
+    The config file is selected by ``--config`` or
+    ``VHDL_RAG_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
+    ``--vhdl-ls-path``/``--log-level`` override the file's values.
+    """
+    args = _parse_args(argv)
+    config = load_config(Path(args.config) if args.config else None)
+    overrides: dict[str, Any] = {}
+    if args.data_dir is not None:
+        overrides["data_dir"] = Path(args.data_dir)
+    if args.sync_interval is not None:
+        overrides["sync_interval"] = args.sync_interval
+    if args.vhdl_ls_path is not None:
+        overrides["vhdl_ls_path"] = args.vhdl_ls_path
+    if args.log_level is not None:
+        overrides["log_level"] = args.log_level
+    if overrides:
+        raw = config.model_dump()
+        raw.update(overrides)
+        config = AppConfig.model_validate(raw)
+    return config
+
+
+def main(argv: list[str] | None = None) -> None:
     """Run the MCP server over stdio (uvx entry point)."""
-    config = load_config()
+    try:
+        config = config_from_args(argv)
+    except (ConfigError, ValidationError) as exc:
+        print(f"vhdl-rag-mcp: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
     setup_logging(config.log_level, config.log_file)
     logger.info(
         "vhdl-rag-mcp starting (data_dir=%s, %d repositories)",

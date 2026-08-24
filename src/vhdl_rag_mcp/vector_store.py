@@ -76,7 +76,6 @@ _ID_PREFIX = "vhdl-rag-mcp::"
 _FILTER_KEYS = frozenset(
     {
         "repository",
-        "repository_category",
         "file",
         "symbol_kind",
         "symbol",
@@ -149,8 +148,6 @@ def chunk_from_payload(payload: dict[str, Any]) -> Chunk:
     symbols_raw = payload.get("symbols") or []
     return Chunk(
         repository=payload["repository"],
-        repository_category=payload["repository_category"],
-        repository_priority=payload["repository_priority"],
         branch=payload["branch"],
         commit=payload["commit"],
         file=payload["file"],

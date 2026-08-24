@@ -33,8 +33,6 @@ def make_chunk(
 ) -> Chunk:
     return Chunk(
         repository=repo,
-        repository_category="approved",
-        repository_priority=90,
         branch="main",
         commit="abc123",
         file=file,
@@ -413,8 +411,6 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
     assert got.symbols == ("wr_ptr", "C_FIFO_DEPTH")
     assert (
         got.repository,
-        got.repository_category,
-        got.repository_priority,
         got.branch,
         got.commit,
         got.file,
@@ -424,8 +420,6 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
         got.end_line,
     ) == (
         "repoA",
-        "approved",
-        90,
         "main",
         "abc123",
         "rtl/fifo.vhd",
@@ -438,13 +432,10 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
     sr = SearchResult(
         result_type="vhdl",
         repository=got.repository,
-        repository_category=got.repository_category,
-        repository_priority=got.repository_priority,
         commit=got.commit,
         file=got.file,
         content=got.content,
-        store_score=0.9,
-        final_score=0.91,
+        score=0.9,
         symbol=got.symbol,
         symbol_kind=got.symbol_kind,
         start_line=got.start_line,

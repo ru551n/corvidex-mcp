@@ -1,12 +1,7 @@
 """Retrieval service: hybrid search, cross-domain fusion, source access.
 
 Search is Qdrant's native hybrid query (dense + sparse BM25, RRF
-fusion) with payload filters. Repository priority then adds a
-*bounded* bonus to the fused score so category authority (golden >
-approved > project > legacy, or an explicit ``priority``) breaks
-relevance ties without drowning out true similarity: priority 100
-yields at most +0.01 fused-score units, while adjacent ranks in the
-RRF scale differ by ~0.0006.
+fusion) with payload filters.
 
 Cross-domain search (``search_knowledge``) fuses the per-collection
 rank lists with RRF again (one list per collection, rank-based, so
@@ -34,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 #: RRF rank constant (Qdrant's own FusionQuery default).
 RRF_K = 60
-#: Maximum priority bonus in fused-score units (priority 100 -> +max).
-PRIORITY_BONUS_MAX = 0.01
 
 
 class RetrievalError(Exception):
@@ -47,7 +40,6 @@ class RepositoryStatus:
     """Indexing/sync state of one configured repository."""
 
     name: str
-    category: str
     ref: str
     domains: tuple[str, ...]
     indexed_commit: str | None
@@ -55,11 +47,6 @@ class RepositoryStatus:
     last_sync_at: str | None
     last_sync_error: str | None
     file_count: int
-
-
-def _priority_bonus(priority: int) -> float:
-    """Bounded priority bonus: priority 0..100 -> 0..PRIORITY_BONUS_MAX."""
-    return PRIORITY_BONUS_MAX * max(0, min(100, priority)) / 100.0
 
 
 class RetrievalService:
@@ -106,7 +93,6 @@ class RetrievalService:
         query: str,
         limit: int,
         repository: str | None,
-        category: str | None,
         symbols: tuple[str, ...] | None,
     ) -> list[tuple[float, Chunk]]:
         """Hybrid query of one collection: (fused score, chunk) pairs."""
@@ -115,8 +101,6 @@ class RetrievalService:
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
-        if category is not None:
-            must["repository_category"] = category
         should = {"symbols": symbols} if symbols else None
         scored = self._store.query(
             collection,
@@ -136,19 +120,16 @@ class RetrievalService:
         query: str,
         limit: int = 8,
         repository: str | None = None,
-        category: str | None = None,
         symbols: tuple[str, ...] | None = None,
     ) -> list[SearchResult]:
-        """Hybrid search in one collection, priority-bonus ranked.
+        """Hybrid search in one collection.
 
         ``symbols`` restricts results to chunks referencing any of the
         given identifiers (cross-referencing).
         """
         query = self._check_query(query)
         self._repository(repository)
-        pairs = self._search_collection(
-            collection, query, limit, repository, category, symbols
-        )
+        pairs = self._search_collection(collection, query, limit, repository, symbols)
         return [self._to_result(score, chunk) for score, chunk in pairs]
 
     def search_knowledge(
@@ -156,21 +137,19 @@ class RetrievalService:
         query: str,
         limit: int = 10,
         repository: str | None = None,
-        category: str | None = None,
         symbols: tuple[str, ...] | None = None,
     ) -> list[SearchResult]:
         """Hybrid search over all three collections, RRF-fused.
 
         Each collection contributes a rank list; the fused score is the
-        sum of ``1/(RRF_K + rank)`` over the lists, then the bounded
-        priority bonus applies as in :meth:`search`.
+        sum of ``1/(RRF_K + rank)`` over the lists.
         """
         query = self._check_query(query)
         self._repository(repository)
         fused: dict[tuple[str, str, int], tuple[float, Chunk]] = {}
         for collection in ALL_COLLECTIONS:
             pairs = self._search_collection(
-                collection, query, limit, repository, category, symbols
+                collection, query, limit, repository, symbols
             )
             # Rank, not the per-list score, is what fusion uses.
             for rank, (_score, chunk) in enumerate(pairs, start=1):
@@ -184,7 +163,7 @@ class RetrievalService:
         ranked = sorted(
             fused.values(),
             key=lambda item: (
-                -(item[0] + _priority_bonus(item[1].repository_priority)),
+                -item[0],
                 item[1].repository,
                 item[1].file,
                 item[1].start_line,
@@ -240,7 +219,6 @@ class RetrievalService:
             statuses.append(
                 RepositoryStatus(
                     name=cfg.name,
-                    category=cfg.category.value,
                     ref=cfg.ref,
                     domains=tuple(d.value for d in cfg.domains),
                     indexed_commit=state.indexed_commit,
@@ -262,18 +240,14 @@ class RetrievalService:
 
     # -- result assembly ------------------------------------------------------------
 
-    def _to_result(self, store_score: float, chunk: Chunk) -> SearchResult:
-        bonus = _priority_bonus(chunk.repository_priority)
+    def _to_result(self, score: float, chunk: Chunk) -> SearchResult:
         return SearchResult(
             result_type=chunk.collection.value,
             repository=chunk.repository,
-            repository_category=chunk.repository_category,
-            repository_priority=chunk.repository_priority,
             commit=chunk.commit,
             file=chunk.file,
             content=chunk.content,
-            store_score=store_score,
-            final_score=store_score + bonus,
+            score=score,
             symbol=chunk.symbol,
             symbol_kind=chunk.symbol_kind,
             start_line=chunk.start_line,

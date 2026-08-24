@@ -189,11 +189,7 @@ def make_config(tmp_path: Path, remote: Path, lsp_binary: str) -> AppConfig:
         data_dir=tmp_path / "data",
         sync_interval=10,
         vhdl_ls_path=lsp_binary,
-        repositories=[
-            RepositoryConfig(
-                name="repo", url=str(remote), ref="main", category="approved"
-            )
-        ],
+        repositories=[RepositoryConfig(name="repo", url=str(remote), ref="main")],
     )
 
 

@@ -227,8 +227,6 @@ def chunk_code_file(
         chunks.append(
             Chunk(
                 repository=cfg.name,
-                repository_category=cfg.category.value,
-                repository_priority=cfg.effective_priority,
                 branch=cfg.ref,
                 commit=commit,
                 file=file,

@@ -14,11 +14,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.server import VhdlRagApp, _acquire_lock, create_mcp
+from vhdl_rag_mcp.server import (
+    VhdlRagApp,
+    _acquire_lock,
+    config_from_args,
+    create_mcp,
+)
 
 ENV = {
     **os.environ,
@@ -102,7 +108,7 @@ async def env(tmp_path: Path):
         data_dir=tmp_path / "data",
         sync_interval=10,
         repositories=[
-            RepositoryConfig(name="repo", url=str(up), ref="main", category="approved"),
+            RepositoryConfig(name="repo", url=str(up), ref="main"),
             RepositoryConfig(name="broken", url=str(up), ref="no-such-branch"),
         ],
     )
@@ -194,7 +200,7 @@ async def test_repository_status_tool(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool("repository_status", {})
     text = tool_text(result)
-    assert "- repo (approved, ref main, domains: vhdl, docs, code)" in text
+    assert "- repo (ref main, domains: vhdl, docs, code)" in text
     assert "indexed:" in text
     # The healthy repo has no error; the broken one does.
     repo_block = text.split("- repo (")[1].split("- broken")[0]
@@ -269,3 +275,51 @@ async def test_drop_unconfigured_repositories(env) -> None:
         assert app2.drop_unconfigured_repositories() == []
     finally:
         app2.close()
+
+
+CLI_CONFIG = """\
+data_dir = "~/.local/share/vhdl-rag"
+sync_interval = 120
+log_level = "WARNING"
+
+[[repositories]]
+name = "cli-repo"
+url = "git@github.com:co/cli.git"
+ref = "main"
+"""
+
+
+async def test_cli_config_flag_and_overrides(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(CLI_CONFIG, encoding="utf-8")
+    cfg = config_from_args(["--config", str(path)])
+    assert cfg.sync_interval == 120
+    assert cfg.log_level == "WARNING"
+    assert [r.name for r in cfg.repositories] == ["cli-repo"]
+    # Command-line overrides win over the file.
+    cfg = config_from_args(
+        ["--config", str(path), "--sync-interval", "60", "--log-level", "DEBUG"]
+    )
+    assert cfg.sync_interval == 60
+    assert cfg.log_level == "DEBUG"
+    assert [r.name for r in cfg.repositories] == ["cli-repo"]
+
+
+async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "alt.toml"
+    path.write_text(CLI_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("VHDL_RAG_MCP_CONFIG", str(path))
+    cfg = config_from_args([])
+    assert [r.name for r in cfg.repositories] == ["cli-repo"]
+    # --config beats the env var.
+    other = tmp_path / "other.toml"
+    other.write_text('data_dir = "d2"\n', encoding="utf-8")
+    cfg = config_from_args(["--config", str(other)])
+    assert cfg.repositories == []
+
+
+async def test_cli_overrides_are_revalidated(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(CLI_CONFIG, encoding="utf-8")
+    with pytest.raises(ValidationError):
+        config_from_args(["--config", str(path), "--sync-interval", "5"])

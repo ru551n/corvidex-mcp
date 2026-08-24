@@ -9,11 +9,9 @@ from pydantic import ValidationError
 
 from vhdl_rag_mcp.config import (
     ALL_DOMAINS,
-    CATEGORY_DEFAULT_PRIORITIES,
     AppConfig,
     ConfigError,
     QdrantConfig,
-    RepositoryCategory,
     RepositoryConfig,
     load_config,
 )
@@ -25,19 +23,13 @@ sync_interval = 60
 vhdl_ls_path = "/opt/vhdl_ls/bin/vhdl_ls"
 log_level = "DEBUG"
 
-[embeddings]
-vhdl_model = "model-a"
-
 [qdrant]
 mode = "local"
-path = "~/qdata"
 
 [[repositories]]
 name = "standards"
 url = "git@github.com:co/standards.git"
 ref = "main"
-category = "golden"
-priority = 100
 domains = ["vhdl", "docs"]
 exclude = ["sim/*", "*.log"]
 
@@ -45,7 +37,6 @@ exclude = ["sim/*", "*.log"]
 name = "ip"
 url = "git@github.com:co/ip.git"
 ref = "v2.1"
-category = "approved"
 
 [[repositories]]
 name = "pinned"
@@ -55,7 +46,6 @@ ref = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 [[repositories]]
 name = "proj"
 url = "https://gitlab.example.com/co/proj.git"
-category = "legacy"
 domains = ["code"]
 """
 
@@ -69,10 +59,6 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.repositories == []
     assert cfg.qdrant.mode == "local"
     assert cfg.qdrant.url is None
-    assert cfg.embeddings.vhdl_model == "jinaai/jina-embeddings-v2-base-code"
-    assert cfg.embeddings.docs_model == "jinaai/jina-embeddings-v2-base-en"
-    assert cfg.embeddings.code_model == "jinaai/jina-embeddings-v2-base-code"
-    assert cfg.embeddings.sparse_model == "Qdrant/bm25"
 
 
 def test_default_template_written(tmp_path: Path) -> None:
@@ -89,8 +75,7 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.sync_interval == 60
     assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
     assert cfg.log_level == "DEBUG"
-    assert cfg.embeddings.vhdl_model == "model-a"
-    assert cfg.qdrant.path == Path("~/qdata")
+    assert cfg.qdrant.mode == "local"
     assert [r.name for r in cfg.repositories] == [
         "standards",
         "ip",
@@ -99,8 +84,6 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     ]
     std, ip, pinned, proj = cfg.repositories
     assert std.ref == "main"
-    assert std.category is RepositoryCategory.GOLDEN
-    assert std.effective_priority == 100
     assert std.domains == [CollectionName.VHDL, CollectionName.DOCS]
     assert std.enabled_collections == frozenset(
         {CollectionName.VHDL, CollectionName.DOCS}
@@ -111,16 +94,10 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert ip.domains == list(ALL_DOMAINS)
     assert ip.enabled_collections == frozenset(ALL_DOMAINS)
     assert ip.exclude == []
-    assert (
-        ip.effective_priority
-        == CATEGORY_DEFAULT_PRIORITIES[RepositoryCategory.APPROVED]
-    )
     assert pinned.ref == "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
     assert pinned.is_pinned_sha
     assert not std.is_pinned_sha
     assert not ip.is_pinned_sha
-    assert proj.category is RepositoryCategory.LEGACY
-    assert proj.effective_priority == 20
     assert proj.domains == [CollectionName.CODE]
     assert cfg.repository("ip").url == "git@github.com:co/ip.git"
 
@@ -147,7 +124,6 @@ def test_data_dir_expanded(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "patch",
     [
-        "category = 'not-a-category'\n",
         "sync_interval = 5\n",
         "log_level = 'LOUD'\n",
         "name = 'has space'\n",

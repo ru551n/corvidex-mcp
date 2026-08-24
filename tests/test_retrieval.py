@@ -19,11 +19,7 @@ from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
 from vhdl_rag_mcp.git_manager import GitManager
 from vhdl_rag_mcp.models import Chunk, CollectionName, ContentType
-from vhdl_rag_mcp.retrieval import (
-    PRIORITY_BONUS_MAX,
-    RetrievalError,
-    RetrievalService,
-)
+from vhdl_rag_mcp.retrieval import RetrievalError, RetrievalService
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
 
@@ -37,8 +33,6 @@ ENV = {
 
 ENTITY_CONTENT = "entity fifo is\n  port (clk : in std_logic);\nend entity fifo;\n"
 ARCH_CONTENT = "architecture rtl of fifo is\nbegin\nend architecture rtl;\n"
-GOLDEN_ARCH_CONTENT = "architecture golden_arch of fifo is begin end;\n"
-
 FIFO_VHDL = ENTITY_CONTENT + "\n" + ARCH_CONTENT
 STD_MD = "# Standard\n\n## Reset conventions\n\nAsync resets are named rst_n.\n"
 FIFO_C = "int fifo_write(int *mem) {\n    return 0;\n}\n"
@@ -79,7 +73,7 @@ class FakeSparseVec:
 class FakeSparse:
     def passage_embed(self, texts, mode="passage"):
         for text in texts:
-            yield FakeSparseVec([len(text), 42], [1.0, 2.0])
+            yield FakeSparseVec([len(text), len(text) + 7], [1.0, 2.0])
 
     def query_embed(self, query, mode="query"):
         yield FakeSparseVec([len(query)], [1.0])
@@ -105,7 +99,6 @@ def make_chunk(
     end: int,
     content: str,
     commit: str,
-    priority: int = 90,
     symbols: tuple[str, ...] = (),
 ) -> Chunk:
     content_type = {
@@ -120,8 +113,6 @@ def make_chunk(
     }[collection]
     return Chunk(
         repository="repo",
-        repository_category="approved",
-        repository_priority=priority,
         branch="main",
         commit=commit,
         file=file,
@@ -154,9 +145,7 @@ async def env(tmp_path: Path):
 
     config = AppConfig(
         data_dir=tmp_path / "data",
-        repositories=[
-            RepositoryConfig(name="repo", url=str(up), ref="main", category="approved")
-        ],
+        repositories=[RepositoryConfig(name="repo", url=str(up), ref="main")],
     )
     store = VectorStore(config)
     store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
@@ -178,7 +167,6 @@ async def env(tmp_path: Path):
             3,
             ENTITY_CONTENT,
             plan.commit,
-            priority=90,
             symbols=("fifo", "clk", "std_logic"),
         ),
         make_chunk(
@@ -190,34 +178,7 @@ async def env(tmp_path: Path):
             7,
             ARCH_CONTENT,
             plan.commit,
-            priority=90,
             symbols=("fifo", "rtl"),
-        ),
-        make_chunk(
-            CollectionName.VHDL,
-            "rtl/golden.vhd",
-            "golden_arch",
-            "architecture",
-            1,
-            4,
-            GOLDEN_ARCH_CONTENT,
-            plan.commit,
-            priority=100,
-            symbols=("fifo", "golden_arch"),
-        ),
-        # Identical content to golden_arch but priority 0: store scores are
-        # (nearly) equal, so the bounded bonus alone decides the order.
-        make_chunk(
-            CollectionName.VHDL,
-            "rtl/legacy.vhd",
-            "legacy_arch",
-            "architecture",
-            1,
-            4,
-            GOLDEN_ARCH_CONTENT,
-            plan.commit,
-            priority=0,
-            symbols=("fifo", "legacy_arch"),
         ),
         make_chunk(
             CollectionName.DOCS,
@@ -263,25 +224,8 @@ async def test_search_returns_ranked_results(env) -> None:
     assert top.repository == "repo"
     assert top.commit
     assert top.content
-    # The bounded bonus is applied per chunk's own priority.
-    for r in results:
-        bonus = PRIORITY_BONUS_MAX * r.repository_priority / 100
-        assert r.final_score == pytest.approx(r.store_score + bonus, abs=1e-9)
-        assert r.final_score >= r.store_score
+    assert top.score > 0
     assert all(r.result_type == "vhdl" for r in results)
-
-
-async def test_priority_bonus_orders_golden_above_legacy(env) -> None:
-    _store, retrieval = env
-    results = retrieval.search(CollectionName.VHDL, "architecture", limit=10)
-    by_symbol = {r.symbol: r for r in results}
-    # golden_arch and legacy_arch carry identical content, so their store
-    # scores are (nearly) equal; the bounded bonus (100 vs 0) decides.
-    golden = by_symbol["golden_arch"]
-    legacy = by_symbol["legacy_arch"]
-    assert golden.final_score > legacy.final_score
-    assert golden.final_score - golden.store_score == pytest.approx(PRIORITY_BONUS_MAX)
-    assert legacy.final_score - legacy.store_score == pytest.approx(0.0, abs=1e-9)
 
 
 async def test_search_symbol_cross_reference(env) -> None:
@@ -311,7 +255,7 @@ async def test_search_knowledge_fuses_domains(env) -> None:
     _store, retrieval = env
     results = retrieval.search_knowledge("fifo", limit=20)
     assert {r.result_type for r in results} == {"vhdl", "docs", "code"}
-    scores = [r.final_score for r in results]
+    scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
 
 
@@ -346,7 +290,6 @@ async def test_repository_status(env) -> None:
     assert len(statuses) == 1
     st = statuses[0]
     assert st.name == "repo"
-    assert st.category == "approved"
     assert st.ref == "main"
     assert st.domains == ("vhdl", "docs", "code")
     assert st.indexed_commit is not None

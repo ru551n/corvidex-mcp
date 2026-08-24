@@ -5,9 +5,10 @@ high-quality semantic search over an organization's VHDL code,
 VHDL-related documentation, and general source code (C/C++, Python,
 ...) — all cross-referenced, all with exact source attribution.
 
-Runs as `uvx vhdl-rag-mcp` over stdio. No external services required:
-Qdrant runs embedded and the embedding models run locally (ONNX via
-FastEmbed).
+Runs as an MCP server over stdio (installed from this Git
+repository with `uvx`, see [Installation](#installation)). No
+external services required: Qdrant runs embedded and the embedding
+models run locally (ONNX via FastEmbed).
 
 ## Capabilities
 
@@ -33,11 +34,6 @@ FastEmbed).
   filter that matches chunks referencing the given identifiers —
   bridging docs ↔ VHDL ↔ test code (e.g. find every VHDL process and C
   function that touch `fifo_write`).
-- **Priority-aware ranking.** Repositories carry a category
-  (`golden` > `approved` > `project` > `legacy`, or an explicit
-  `priority` 0–100) that applies a *bounded* bonus to the fused score:
-  reference repositories win relevance ties without drowning out true
-  similarity.
 - **Exact source attribution.** Every result names repository, file,
   line range, and commit; `get_source` returns the exact current file
   (or a line range) from the synced working tree.
@@ -63,9 +59,19 @@ Requirements:
   `vhdl_ls_path` at the binary. The `vhdl_libraries` directory shipped
   next to the binary is auto-detected.
 
+The package is installed from this Git repository (it is not on
+PyPI):
+
 ```console
-$ uvx vhdl-rag-mcp --help
-# (the server speaks MCP over stdio; --help is not a flag — see "Usage")
+$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
+```
+
+`uvx` supports branch/tag pins in the same syntax:
+`git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git@v1.0`. The server
+accepts `--help`:
+
+```console
+$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp --help
 ```
 
 On first start the server creates its data directory, downloads the
@@ -83,14 +89,8 @@ sync_interval = 300                    # seconds between periodic syncs
 vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path
 log_level = "INFO"
 
-[embeddings]
-vhdl_model = "jinaai/jina-embeddings-v2-base-code"  # per-collection dense models
-docs_model = "jinaai/jina-embeddings-v2-base-en"
-code_model = "jinaai/jina-embeddings-v2-base-code"
-sparse_model = "Qdrant/bm25"           # one shared sparse model
-
-[qdrant]
-mode = "local"                         # embedded (default) — or "server" with url
+# [qdrant]
+# mode = "local"                       # embedded (default) — or "server" with url
 # url = "http://qdrant:6333"
 
 [[repositories]]
@@ -98,9 +98,6 @@ name = "company-standards"             # unique, [A-Za-z0-9._-]
 url = "git@github.com:company/vhdl-standards.git"
 ref = "main"                           # branch (tracked on every sync),
                                        # tag, or commit SHA (pinned)
-category = "golden"                    # golden | approved | project | legacy
-priority = 100                         # optional 0-100 (defaults by category:
-                                       # golden=100, approved=90, project=70, legacy=20)
 # domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]# glob path excludes ('*' crosses '/');
                                        # wildcard-free patterns exclude the subtree
@@ -108,6 +105,13 @@ priority = 100                         # optional 0-100 (defaults by category:
 
 Notes:
 
+- **Config file selection**: the default location is
+  `~/.config/vhdl-rag/config.toml` (a commented template is written
+  there on first run). Select another file with the `VHDL_RAG_MCP_CONFIG`
+  environment variable or the `--config PATH` flag. The top-level scalar
+  options also have command-line overrides (`--data-dir`,
+  `--sync-interval`, `--vhdl-ls-path`, `--log-level`); the command
+  line wins.
 - **`ref`**: a branch name is fetched and tracked on every sync. A tag
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely).
@@ -124,7 +128,7 @@ Notes:
 ### Run the server
 
 ```console
-$ uvx vhdl-rag-mcp
+$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
 ```
 
 It serves MCP over stdio until the host closes the connection; a
@@ -137,7 +141,7 @@ from sharing one data directory.
 Claude Code:
 
 ```console
-$ claude mcp add vhdl-rag-mcp -- uvx vhdl-rag-mcp
+$ claude mcp add vhdl-rag-mcp -- uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
 ```
 
 Maki (TOML config — verify the exact table names against your Maki
@@ -146,25 +150,25 @@ version's docs):
 ```toml
 [mcp_servers.vhdl_rag_mcp]
 command = "uvx"
-args = ["vhdl-rag-mcp"]
+args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-mcp"]
 ```
 
 ### Tools
 
 | Tool | What it does |
 | --- | --- |
-| `search_vhdl(query, limit, repository, category, symbols)` | Hybrid search over VHDL source (entities, architectures, processes, packages, functions). |
+| `search_vhdl(query, limit, repository, symbols)` | Hybrid search over VHDL source (entities, architectures, processes, packages, functions). |
 | `search_docs(...)` | Same over documentation sections. |
 | `search_code(...)` | Same over general code units (functions/classes). |
 | `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
 | `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
-| `repository_status()` | Per repository: category, ref, domains, last indexed commit, last sync, last error. |
+| `repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error. |
 | `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
 | `reindex_repository(repository)` | Drop and rebuild one repository's index. |
 
-All search tools take optional `repository` (name) and `category`
-(golden/approved/project/legacy) filters, plus `symbols: list[str]` —
-restrict results to chunks referencing any of the given identifiers.
+All search tools take an optional `repository` (name) filter plus
+`symbols: list[str]` — restrict results to chunks referencing any of
+the given identifiers.
 Results are rendered as markdown with source attribution, score, and
 referenced identifiers; content is fenced by domain.
 
@@ -219,6 +223,6 @@ src/vhdl_rag_mcp/
   vector_store.py  Qdrant wrapper: hybrid RRF query, payload filters
   indexing/        vhdl (LSP-primary), docs (sections), code (tree-sitter),
                    pipeline (incremental sync driver)
-  retrieval.py     search service: fusion, priority bonus, source access
+  retrieval.py     search service: fusion, source access
   server.py        FastMCP tools + startup + periodic sync + lock
 ```

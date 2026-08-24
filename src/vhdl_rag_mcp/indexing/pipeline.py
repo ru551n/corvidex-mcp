@@ -21,6 +21,7 @@ its error in the state store and does not affect the others.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -57,14 +58,26 @@ class IndexPipeline:
         self._store = store
         self._providers = providers
         self._states = states
+        # One sync per repository at a time: concurrent syncs would race
+        # on the same git working tree (checkout/read interleaving).
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, name: str) -> asyncio.Lock:
+        lock = self._locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[name] = lock
+        return lock
 
     async def sync_repository(self, cfg: RepositoryConfig) -> None:
         """Synchronize one repository from its last indexed commit."""
-        await self._sync(cfg, self._states.get(cfg.name).indexed_commit)
+        async with self._lock_for(cfg.name):
+            await self._sync(cfg, self._states.get(cfg.name).indexed_commit)
 
     async def reindex_repository(self, cfg: RepositoryConfig) -> None:
         """Force a full reindex of one repository (ignores last commit)."""
-        await self._sync(cfg, None)
+        async with self._lock_for(cfg.name):
+            await self._sync(cfg, None)
 
     async def _sync(self, cfg: RepositoryConfig, last_commit: str | None) -> None:
         try:
