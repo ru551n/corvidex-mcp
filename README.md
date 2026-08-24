@@ -16,15 +16,19 @@ The main uses are **RAG** and **cross-referencing code against
 documentation**, for coding agents (Claude Code, Maki, or any MCP
 client) that implement or modify VHDL.
 
-**RAG.** When an agent writes or changes hardware, the context it
-needs usually lives *outside* the file it is editing: the company's
-coding standards, design guides, and reference IP from earlier
-projects. `vhdl-rag-mcp` gives the agent retrieval-augmented access to
-that context — semantic + exact-identifier search over VHDL source,
-documentation, and general code, with the verbatim text (and exact
-repository, file, line range, and commit) of every match, so the agent
-grounds its work in what the organization actually wrote instead of
-hallucinating a plausible pattern.
+**RAG (Retrieval-Augmented Generation).** RAG is a technique for
+keeping a language model grounded in *your* material instead of only
+its training data: before (or while) the model generates an answer, it
+first *retrieves* relevant chunks from a knowledge base and uses those
+as context. For a coding agent, that means the context it needs
+usually lives *outside* the file it is editing — the company's coding
+standards, design guides, and reference IP from earlier projects.
+`vhdl-rag-mcp` is that retrieval layer: it maintains an up-to-date,
+semantically searchable index of your repositories and hands the
+agent the verbatim text (with exact repository, file, line range, and
+commit) of every match, so the agent grounds its work in what the
+organization actually wrote instead of hallucinating a plausible
+pattern.
 
 **Cross-referencing code against documentation.** This is what makes
 the search more than three separate indexes: every chunk stores the
