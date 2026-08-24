@@ -1,0 +1,59 @@
+[project]
+name = "vhdl-rag-mcp"
+version = "0.1.0"
+description = "MCP server providing semantic RAG search over VHDL Git repositories and VHDL-related documentation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    # FastMCP (mcp.server.fastmcp) was removed in mcp 2.x — pin to 1.x.
+    "mcp>=1.29,<2",
+    "qdrant-client>=1.19",
+    "fastembed>=0.8",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+vhdl-rag-mcp = "vhdl_rag_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "C4",
+    "RUF",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+warn_unreachable = true
