@@ -458,3 +458,53 @@ async def test_deleted_repository_cleanup(config: AppConfig, env) -> None:
     assert store.count() == 11
     pipeline.delete_repository("repo")
     assert store.count() == 0
+
+
+async def test_local_amend_without_content_change_advances_commit(
+    tmp_path: Path, fake_lsp: Path
+) -> None:
+    """A content-identical HEAD move must advance the indexed commit.
+
+    Otherwise the rewritten-away commit cannot be diffed on the next
+    sync and the pipeline falls back to a full reindex of a working
+    repository that did not change.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    (work / "fifo.vhd").write_text(FIFO_VHDL)
+    (work / "notes.md").write_text("# N\n")
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "first")
+    head1 = git(work, "rev-parse", "HEAD")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        vhdl_ls_path=str(fake_lsp),
+        repositories=[RepositoryConfig(name="work", path=work)],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    states = StateStore(config.state_dir / "repositories.json")
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        fake_providers(config),
+        states,
+    )
+    await pipeline.sync_repository(config.repository("work"))
+    assert states.get("work").indexed_commit == head1
+    before = store.count()
+
+    # Amend without a content change: HEAD moves, the tree does not.
+    git(work, "commit", "-q", "--amend", "-m", "rewritten")
+    head2 = git(work, "rev-parse", "HEAD")
+    assert head2 != head1
+    await pipeline.sync_repository(config.repository("work"))
+    assert store.count() == before
+    # The indexed commit advanced with HEAD ...
+    assert states.get("work").indexed_commit == head2
+    # ... and an unchanged tree at the same commit advances nothing.
+    await pipeline.sync_repository(config.repository("work"))
+    assert states.get("work").indexed_commit == head2
+    store.close()

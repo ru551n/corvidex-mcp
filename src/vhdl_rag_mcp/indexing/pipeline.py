@@ -87,12 +87,31 @@ class IndexPipeline:
             self._states.record_sync(cfg.name, str(exc))
             raise
         if plan.empty:
-            logger.info(
-                "%s: ref %r did not move (still at %s)",
-                cfg.name,
-                plan.ref,
-                plan.commit[:12],
-            )
+            if last_commit is not None and plan.commit != last_commit:
+                # HEAD/ref moved without a content change (an amend or
+                # a force-push of an identical tree): the chunks are
+                # still current, only the attribution commit changed.
+                # Advance the indexed commit — otherwise the next sync
+                # cannot diff against the rewritten-away commit and
+                # falls back to a full reindex.
+                logger.info(
+                    "%s: commit moved %s -> %s without content change",
+                    cfg.name,
+                    last_commit[:12],
+                    plan.commit[:12],
+                )
+                self._states.set_indexed(
+                    cfg.name,
+                    plan.commit,
+                    file_count=self._states.get(cfg.name).last_indexed_file_count,
+                )
+            else:
+                logger.info(
+                    "%s: ref %r did not move (still at %s)",
+                    cfg.name,
+                    plan.ref,
+                    plan.commit[:12],
+                )
             self._states.record_sync(cfg.name, None)
             return
         logger.info(
