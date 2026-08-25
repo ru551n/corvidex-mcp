@@ -3,7 +3,9 @@
 Repositories are indexed for three domains — HDL (VHDL, Verilog, and
 SystemVerilog), HDL-related documentation, and general source code. A
 file's extension decides its domain (and therefore its collection,
-content type, and language).
+content type, and language): the HDL domain covers ``.vhd``/``.vhdl``
+(VHDL), ``.v`` (Verilog), and ``.sv``/``.svh`` (SystemVerilog); the
+language metadata stays distinct per language.
 Per-repository ``domains`` select which of the three are loaded, and
 ``exclude`` patterns (fnmatch-style globs over the repository-relative
 path) skip whole subtrees or file types. Files with no recognized
@@ -20,6 +22,8 @@ from pathlib import Path
 from .models import CollectionName, ContentType
 
 VHDL_EXTENSIONS: frozenset[str] = frozenset({".vhd", ".vhdl"})
+VERILOG_EXTENSIONS: frozenset[str] = frozenset({".v"})
+SYSTEMVERILOG_EXTENSIONS: frozenset[str] = frozenset({".sv", ".svh"})
 DOC_EXTENSIONS: frozenset[str] = frozenset({".md", ".markdown", ".rst", ".txt"})
 CODE_EXTENSIONS: frozenset[str] = frozenset(
     {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".cuh", ".py"}
@@ -57,6 +61,10 @@ def _build_table() -> dict[str, FileKind]:
     table: dict[str, FileKind] = {}
     for ext in VHDL_EXTENSIONS:
         table[ext] = FileKind(ContentType.SOURCE, CollectionName.HDL, "vhdl")
+    for ext in VERILOG_EXTENSIONS:
+        table[ext] = FileKind(ContentType.SOURCE, CollectionName.HDL, "verilog")
+    for ext in SYSTEMVERILOG_EXTENSIONS:
+        table[ext] = FileKind(ContentType.SOURCE, CollectionName.HDL, "systemverilog")
     for ext in DOC_EXTENSIONS:
         table[ext] = FileKind(
             ContentType.DOCUMENTATION, CollectionName.DOCS, _DOC_LANGUAGES[ext]

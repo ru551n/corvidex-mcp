@@ -331,6 +331,31 @@ def test_routing_vhdl():
     assert classify_file("X.VHDL") is not None
 
 
+def test_routing_verilog():
+    from vhdl_rag_mcp.models import CollectionName, ContentType
+
+    for path, lang in (
+        ("rtl/fifo.v", "verilog"),
+        ("rtl/pkg.sv", "systemverilog"),
+        ("inc/defs.svh", "systemverilog"),
+    ):
+        kind = classify_file(path)
+        assert kind is not None
+        assert kind.content_type is ContentType.SOURCE
+        assert kind.collection is CollectionName.HDL
+        assert kind.language == lang
+    # The HDL domain admits all three languages together...
+    hdl_only = frozenset({CollectionName.HDL})
+    assert classify_file("rtl/fifo.v", domains=hdl_only) is not None
+    assert classify_file("rtl/fifo.sv", domains=hdl_only) is not None
+    assert classify_file("rtl/fifo.vhd", domains=hdl_only) is not None
+    # ...while a code-only selection admits none of them.
+    code_only = frozenset({CollectionName.CODE})
+    assert classify_file("rtl/fifo.v", domains=code_only) is None
+    # Upper-case extensions route the same.
+    assert classify_file("RTL/FIFO.SV").language == "systemverilog"
+
+
 def test_routing_docs():
     from vhdl_rag_mcp.models import CollectionName, ContentType
 
