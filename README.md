@@ -293,8 +293,10 @@ and the full test suite on a matrix of Python 3.12/3.13/3.14 across
 Ubuntu, Windows, and macOS, plus RHEL 9 and RHEL 10 container jobs
 (official UBI images; UBI 9's glibc 2.34 is the strictest floor in
 the dependency wheel set), and linux/arm64 jobs that run the suite
-in an arm64 container under QEMU user-mode emulation (no hosted
-arm64 runners; this verifies the aarch64 wheels and execution).
+in manylinux aarch64 containers (glibc 2.34 and 2.39 floors,
+mirroring the RHEL jobs) under QEMU user-mode emulation (no hosted
+arm64 runners; this verifies the aarch64 wheels and execution on the
+architecture).
 
 Layout:
 
