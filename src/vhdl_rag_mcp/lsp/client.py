@@ -202,6 +202,7 @@ class LspClient:
         self._quiet_event = asyncio.Event()
         self._supports_document_symbol = False
         self._owns_workspace_config = False
+        self._stream_closed = False
 
     # -- server-specific surface ------------------------------------------
 
@@ -363,20 +364,29 @@ class LspClient:
     # -- document flow --------------------------------------------------------
 
     async def open_document(self, path: Path) -> None:
-        """didOpen one file (content is read from the working tree)."""
+        """didOpen one file (content is read from the working tree).
+
+        Never raises: a server that has died mid-session (some servers
+        crash on malformed files) simply loses this file — its symbols
+        come back empty and the chunker falls back to structural
+        parsing.
+        """
         uri = path_to_uri(path)
         text = path.read_text(encoding="utf-8", errors="replace")
-        await self._notify(
-            "textDocument/didOpen",
-            {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": self.language_id,
-                    "version": 1,
-                    "text": text,
-                }
-            },
-        )
+        try:
+            await self._notify(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": self.language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                },
+            )
+        except LspError as exc:
+            logger.warning("could not open %s (server unavailable): %s", path, exc)
 
     async def close_document(self, path: Path) -> None:
         await self._notify(
@@ -392,6 +402,11 @@ class LspClient:
         have arrived for ``QUIET_WINDOW`` seconds (bounded by
         ``timeout``).
         """
+        if self._stream_closed:
+            logger.warning(
+                "language server gone before analysis in %s", self._workspace
+            )
+            return
         self._quiet_event.clear()
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
@@ -419,6 +434,11 @@ class LspClient:
     @property
     def supports_document_symbol(self) -> bool:
         return self._supports_document_symbol
+
+    @property
+    def server_alive(self) -> bool:
+        """False once the server's stdout stream has closed."""
+        return not self._stream_closed
 
     async def document_symbols(self, path: Path) -> tuple[SymbolInfo, ...]:
         """Hierarchical document symbols for one file; () when unavailable."""
@@ -505,6 +525,7 @@ class LspClient:
                     continue
                 self._dispatch(message)
         finally:
+            self._stream_closed = True
             self._fail_pending(LspError("language server connection closed"))
 
     def _dispatch(self, message: Any) -> None:

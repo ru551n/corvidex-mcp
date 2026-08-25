@@ -220,3 +220,26 @@ def test_repository_lookup_error() -> None:
     cfg = AppConfig()
     with pytest.raises(ConfigError, match="unknown repository"):
         cfg.repository("nope")
+
+
+def test_analyzer_path_defaults() -> None:
+    cfg = AppConfig()
+    assert cfg.vhdl_ls_path == "vhdl_ls"
+    assert cfg.veridian_path == "veridian"
+
+
+def test_veridian_hook_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'veridian_path = "/opt/veridian/veridian"\n'
+        "[[repositories]]\n"
+        'name = "r"\n'
+        'url = "u"\n'
+        'veridian_hook = "make veridian-config"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.veridian_path == "/opt/veridian/veridian"
+    assert cfg.repositories[0].veridian_hook == "make veridian-config"
+    # Default is None (no hook) when unset.
+    assert RepositoryConfig(name="r", url="u").veridian_hook is None

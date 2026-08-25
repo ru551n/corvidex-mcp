@@ -125,6 +125,15 @@ class RepositoryConfig(BaseModel):
             "hook: the server never removes them."
         ),
     )
+    veridian_hook: str | None = Field(
+        default=None,
+        description=(
+            "Shell command, run at the repository root, that produces "
+            "veridian.yaml when it is missing (invoked before the "
+            "Veridian session starts). Same precedence and ownership "
+            "semantics as vhdl_ls_hook."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -226,6 +235,11 @@ class AppConfig(BaseModel):
     vhdl_ls_path: str = Field(
         default="vhdl_ls", description="Path to the vhdl_ls binary (or a PATH name)"
     )
+    veridian_path: str = Field(
+        default="veridian",
+        description="Path to the Veridian binary (or a PATH name); Verilog/"
+        "SystemVerilog fall back to structural parsing when unavailable",
+    )
     log_level: str = Field(
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
@@ -304,9 +318,10 @@ _DEFAULT_TEMPLATE = """\
 # ignored for local working repositories (path): HEAD plus uncommitted
 # changes and untracked files are indexed.
 #
-# "vhdl_ls_hook" is a shell command run at the repository root that
-# generates vhdl_ls.toml when it is missing; without a hook (or if it
-# fails) the server writes a built-in default instead.
+# "vhdl_ls_hook" / "veridian_hook" are shell commands run at the
+# repository root that generate vhdl_ls.toml / veridian.yaml when they
+# are missing; without a hook (or if it fails) the server writes a
+# built-in default instead.
 #
 # "domains" selects which domains are indexed from a repository: any
 # subset of ["hdl", "docs", "code"]. The hdl domain covers VHDL, Verilog,
@@ -324,6 +339,7 @@ _DEFAULT_TEMPLATE = """\
 data_dir = "~/.local/share/vhdl-rag"
 sync_interval = 300
 vhdl_ls_path = "vhdl_ls"
+veridian_path = "veridian"
 log_level = "INFO"
 
 # [qdrant]
@@ -339,6 +355,7 @@ ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
 # domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 # vhdl_ls_hook = "make vhdl-ls-config"  # command to generate vhdl_ls.toml
+# veridian_hook = "make veridian-config"  # command to generate veridian.yaml
 
 [[repositories]]
 name = "common-ip"
