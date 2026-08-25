@@ -204,9 +204,16 @@ def chunk_code_file(
     content: str,
     commit: str,
     language: str,
+    content_type: ContentType = ContentType.CODE,
+    collection: CollectionName = CollectionName.CODE,
     branch: str | None = None,
 ) -> list[Chunk]:
-    """Chunk one source file into :class:`Chunk` objects (tree-sitter)."""
+    """Chunk one source file into :class:`Chunk` objects (tree-sitter).
+
+    ``content_type``/``collection`` default to general code but are
+    overridable so the same generic parser can index HDL files (the
+    graceful fallback when their dedicated analyzer is unavailable).
+    """
     if not content.strip():
         return []
     lines = content.splitlines()
@@ -235,9 +242,9 @@ def chunk_code_file(
                 branch=branch if branch is not None else cfg.ref,
                 commit=commit,
                 file=file,
-                content_type=ContentType.CODE,
+                content_type=content_type,
                 language=language,
-                collection=CollectionName.CODE,
+                collection=collection,
                 symbol=unit.name,
                 symbol_kind=unit.kind,
                 start_line=start,
