@@ -47,6 +47,8 @@ def make_chunk(
         library=extra.get("library"),
         entity=extra.get("entity"),
         architecture=extra.get("architecture"),
+        module=extra.get("module"),
+        native_symbol_kind=extra.get("native_symbol_kind"),
         heading=extra.get("heading"),
         section=extra.get("section"),
         symbols=symbols,
@@ -414,6 +416,8 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
         entity="fifo",
         architecture="rtl",
         library="work",
+        module="fifo",
+        native_symbol_kind="entity",
         symbols=("wr_ptr", "C_FIFO_DEPTH"),
         content="p_write : process (clk, rst_n)\nbegin\nend process;\n",
     )
@@ -423,6 +427,8 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
     got = results[0].chunk
     assert got.content == chunk.content
     assert got.symbols == ("wr_ptr", "C_FIFO_DEPTH")
+    assert got.language == "vhdl"
+    assert (got.module, got.native_symbol_kind) == ("fifo", "entity")
     assert (
         got.repository,
         got.branch,

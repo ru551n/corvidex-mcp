@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 #: RRF rank constant (Qdrant's own FusionQuery default).
 RRF_K = 60
 
+#: Languages indexed into the hdl collection (routing-derived).
+HDL_LANGUAGES = ("vhdl", "verilog", "systemverilog")
+
 
 class RetrievalError(Exception):
     """A user-facing retrieval failure (bad arguments, missing data)."""
@@ -85,6 +88,15 @@ class RetrievalService:
             raise RetrievalError("query must not be empty")
         return query
 
+    @staticmethod
+    def _check_language_value(language: str | None) -> str | None:
+        if language is None:
+            return None
+        language = language.strip()
+        if not language:
+            raise RetrievalError("language must not be empty")
+        return language
+
     # -- store-level search ------------------------------------------------------
 
     def _search_collection(
@@ -94,6 +106,7 @@ class RetrievalService:
         limit: int,
         repository: str | None,
         symbols: tuple[str, ...] | None,
+        language: str | None,
     ) -> list[tuple[float, Chunk]]:
         """Hybrid query of one collection: (fused score, chunk) pairs."""
         dense = self._providers.embed_query(collection, query)
@@ -101,6 +114,8 @@ class RetrievalService:
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
+        if language is not None:
+            must["language"] = language
         should = {"symbols": symbols} if symbols else None
         scored = self._store.query(
             collection,
@@ -121,15 +136,31 @@ class RetrievalService:
         limit: int = 8,
         repository: str | None = None,
         symbols: tuple[str, ...] | None = None,
+        language: str | None = None,
     ) -> list[SearchResult]:
         """Hybrid search in one collection.
 
         ``symbols`` restricts results to chunks referencing any of the
-        given identifiers (cross-referencing).
+        given identifiers (cross-referencing). ``language`` restricts
+        results to one payload language (e.g. ``verilog`` within the
+        hdl collection); for the hdl collection the value is validated
+        against :data:`HDL_LANGUAGES`.
         """
         query = self._check_query(query)
         self._repository(repository)
-        pairs = self._search_collection(collection, query, limit, repository, symbols)
+        language = self._check_language_value(language)
+        if (
+            language is not None
+            and collection is CollectionName.HDL
+            and language not in HDL_LANGUAGES
+        ):
+            raise RetrievalError(
+                f"unknown HDL language {language!r}; expected one of: "
+                + ", ".join(HDL_LANGUAGES)
+            )
+        pairs = self._search_collection(
+            collection, query, limit, repository, symbols, language
+        )
         return [self._to_result(score, chunk) for score, chunk in pairs]
 
     def search_knowledge(
@@ -138,18 +169,22 @@ class RetrievalService:
         limit: int = 10,
         repository: str | None = None,
         symbols: tuple[str, ...] | None = None,
+        language: str | None = None,
     ) -> list[SearchResult]:
         """Hybrid search over all three collections, RRF-fused.
 
         Each collection contributes a rank list; the fused score is the
-        sum of ``1/(RRF_K + rank)`` over the lists.
+        sum of ``1/(RRF_K + rank)`` over the lists. ``language`` filters
+        every collection (collections without that language simply
+        contribute nothing).
         """
         query = self._check_query(query)
         self._repository(repository)
+        language = self._check_language_value(language)
         fused: dict[tuple[str, str, int], tuple[float, Chunk]] = {}
         for collection in ALL_COLLECTIONS:
             pairs = self._search_collection(
-                collection, query, limit, repository, symbols
+                collection, query, limit, repository, symbols, language
             )
             # Rank, not the per-list score, is what fusion uses.
             for rank, (_score, chunk) in enumerate(pairs, start=1):
@@ -248,13 +283,16 @@ class RetrievalService:
             file=chunk.file,
             content=chunk.content,
             score=score,
+            language=chunk.language,
             symbol=chunk.symbol,
             symbol_kind=chunk.symbol_kind,
+            native_symbol_kind=chunk.native_symbol_kind,
             start_line=chunk.start_line,
             end_line=chunk.end_line,
             library=chunk.library,
             entity=chunk.entity,
             architecture=chunk.architecture,
+            module=chunk.module,
             heading=chunk.heading,
             section=chunk.section,
             symbols=chunk.symbols,

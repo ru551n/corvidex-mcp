@@ -36,6 +36,11 @@ ARCH_CONTENT = "architecture rtl of fifo is\nbegin\nend architecture rtl;\n"
 FIFO_VHDL = ENTITY_CONTENT + "\n" + ARCH_CONTENT
 STD_MD = "# Standard\n\n## Reset conventions\n\nAsync resets are named rst_n.\n"
 FIFO_C = "int fifo_write(int *mem) {\n    return 0;\n}\n"
+FIFO_TB_V = (
+    "module fifo_tb (\n  input logic clk,\n"
+    "  output logic [FIFO_DEPTH-1:0] dout\n);\nendmodule"
+)
+FIFO_PKG_SV = "package fifo_pkg;\n  localparam int FIFO_DEPTH = 8;\nendpackage"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -100,17 +105,19 @@ def make_chunk(
     content: str,
     commit: str,
     symbols: tuple[str, ...] = (),
+    language: str | None = None,
 ) -> Chunk:
     content_type = {
         CollectionName.HDL: ContentType.SOURCE,
         CollectionName.DOCS: ContentType.DOCUMENTATION,
         CollectionName.CODE: ContentType.CODE,
     }[collection]
-    language = {
-        CollectionName.HDL: "vhdl",
-        CollectionName.DOCS: "markdown",
-        CollectionName.CODE: "c",
-    }[collection]
+    if language is None:
+        language = {
+            CollectionName.HDL: "vhdl",
+            CollectionName.DOCS: "markdown",
+            CollectionName.CODE: "c",
+        }[collection]
     return Chunk(
         repository="repo",
         branch="main",
@@ -192,6 +199,30 @@ async def env(tmp_path: Path):
             symbols=("rst_n",),
         ),
         make_chunk(
+            CollectionName.HDL,
+            "tb/fifo_tb.v",
+            "fifo_tb",
+            "design_unit",
+            1,
+            6,
+            FIFO_TB_V,
+            plan.commit,
+            symbols=("fifo_tb", "FIFO_DEPTH", "clk"),
+            language="verilog",
+        ),
+        make_chunk(
+            CollectionName.HDL,
+            "rtl/fifo_pkg.sv",
+            "fifo_pkg",
+            "package",
+            1,
+            4,
+            FIFO_PKG_SV,
+            plan.commit,
+            symbols=("fifo_pkg", "FIFO_DEPTH"),
+            language="systemverilog",
+        ),
+        make_chunk(
             CollectionName.CODE,
             "src/fifo.c",
             "fifo_write",
@@ -262,6 +293,53 @@ async def test_search_knowledge_fuses_domains(env) -> None:
 async def test_search_knowledge_respects_limit(env) -> None:
     _store, retrieval = env
     assert len(retrieval.search_knowledge("fifo", limit=2)) <= 2
+
+
+async def test_search_language_filter_per_language(env) -> None:
+    _store, retrieval = env
+    for language in ("vhdl", "verilog", "systemverilog"):
+        results = retrieval.search(CollectionName.HDL, "fifo", language=language)
+        assert results, language
+        assert all(r.language == language for r in results), language
+
+
+async def test_search_language_filter_is_exact(env) -> None:
+    _store, retrieval = env
+    # 'verilog' must not match the systemverilog or vhdl chunks.
+    results = retrieval.search(CollectionName.HDL, "fifo", language="verilog")
+    assert all(r.language == "verilog" for r in results)
+    files = {r.file for r in results}
+    assert "rtl/fifo_pkg.sv" not in files
+    assert "rtl/fifo.vhd" not in files
+
+
+async def test_search_language_validation(env) -> None:
+    _store, retrieval = env
+    with pytest.raises(RetrievalError, match="unknown HDL language"):
+        retrieval.search(CollectionName.HDL, "fifo", language="verilog-2005")
+    with pytest.raises(RetrievalError, match="must not be empty"):
+        retrieval.search(CollectionName.HDL, "fifo", language="  ")
+    # Non-hdl collections accept pass-through languages.
+    assert retrieval.search(CollectionName.CODE, "fifo", language="c")
+
+
+async def test_search_knowledge_language_filter(env) -> None:
+    _store, retrieval = env
+    results = retrieval.search_knowledge("fifo", limit=20, language="c")
+    assert results
+    assert all(r.language == "c" for r in results)
+    # The hdl domain simply contributes nothing for a code language.
+    assert all(r.result_type != "hdl" for r in results)
+
+
+async def test_results_carry_language_metadata(env) -> None:
+    _store, retrieval = env
+    results = retrieval.search(CollectionName.HDL, "fifo", limit=10)
+    assert results
+    assert {r.language for r in results} <= {"vhdl", "verilog", "systemverilog"}
+    # Every hdl result has a language; cross-domain too.
+    knowledge = retrieval.search_knowledge("fifo", limit=20)
+    assert all(r.language for r in knowledge)
 
 
 async def test_get_source(env) -> None:

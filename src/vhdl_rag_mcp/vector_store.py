@@ -165,6 +165,8 @@ def chunk_from_payload(payload: dict[str, Any]) -> Chunk:
         library=payload.get("library"),
         entity=payload.get("entity"),
         architecture=payload.get("architecture"),
+        module=payload.get("module"),
+        native_symbol_kind=payload.get("native_symbol_kind"),
         heading=payload.get("heading"),
         section=payload.get("section"),
         symbols=tuple(symbols_raw),
