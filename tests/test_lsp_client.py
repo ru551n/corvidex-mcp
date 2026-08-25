@@ -23,6 +23,7 @@ from vhdl_rag_mcp.lsp import (
     SymbolInfo,
     VhdlLsp,
     default_libraries_dir,
+    path_to_uri,
 )
 
 FAKE_SERVER = r"""#!/usr/bin/env python3
@@ -337,14 +338,15 @@ def test_dispatch_response_completes_pending():
         loop.close()
 
 
-def test_dispatch_diagnostics_notification():
-    lsp = VhdlLsp("vhdl_ls", Path("/tmp"))
+def test_dispatch_diagnostics_notification(tmp_path: Path):
+    lsp = VhdlLsp("vhdl_ls", tmp_path)
+    target = tmp_path / "x.vhd"
     lsp._dispatch(
         {
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
             "params": {
-                "uri": "file:///x.vhd",
+                "uri": path_to_uri(target),
                 "diagnostics": [
                     {
                         "code": "unresolved",
@@ -360,7 +362,7 @@ def test_dispatch_diagnostics_notification():
             },
         }
     )
-    diags = lsp.diagnostics_for(Path("/x.vhd"))
+    diags = lsp.diagnostics_for(target)
     assert len(diags) == 1
     assert diags[0] == DiagnosticInfo(
         code="unresolved",

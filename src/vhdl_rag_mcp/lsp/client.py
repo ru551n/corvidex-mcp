@@ -120,6 +120,21 @@ def _parse_symbols(items: Any) -> tuple[SymbolInfo, ...]:
     return tuple(out)
 
 
+def path_to_uri(path: Path) -> str:
+    """The ``file://`` URI for ``path`` (one stable URI per path).
+
+    Absolute paths convert directly; paths ``as_uri`` cannot express
+    (relative, or rooted without a drive on Windows) are resolved
+    first. Both the open requests and the diagnostics lookups go
+    through this helper, so a lookup always reproduces exactly the
+    URI the server echoed.
+    """
+    try:
+        return path.as_uri()
+    except ValueError:
+        return path.resolve().as_uri()
+
+
 class VhdlLsp:
     """Async client for one vhdl_ls process rooted at one workspace."""
 
@@ -162,7 +177,7 @@ class VhdlLsp:
                 "initialize",
                 {
                     "processId": None,
-                    "rootUri": self._workspace.as_uri(),
+                    "rootUri": path_to_uri(self._workspace),
                     "capabilities": {
                         "textDocument": {
                             "documentSymbol": {
@@ -171,7 +186,10 @@ class VhdlLsp:
                         }
                     },
                     "workspaceFolders": [
-                        {"uri": self._workspace.as_uri(), "name": self._workspace.name}
+                        {
+                            "uri": path_to_uri(self._workspace),
+                            "name": self._workspace.name,
+                        }
                     ],
                 },
                 timeout=INITIALIZE_TIMEOUT,
@@ -241,7 +259,7 @@ class VhdlLsp:
 
     async def open_document(self, path: Path) -> None:
         """didOpen one file (content is read from the working tree)."""
-        uri = path.as_uri()
+        uri = path_to_uri(path)
         text = path.read_text(encoding="utf-8", errors="replace")
         await self._notify(
             "textDocument/didOpen",
@@ -257,7 +275,7 @@ class VhdlLsp:
 
     async def close_document(self, path: Path) -> None:
         await self._notify(
-            "textDocument/didClose", {"textDocument": {"uri": path.as_uri()}}
+            "textDocument/didClose", {"textDocument": {"uri": path_to_uri(path)}}
         )
 
     async def wait_until_quiet(self, timeout: float = QUIET_TIMEOUT) -> None:
@@ -290,7 +308,7 @@ class VhdlLsp:
 
     def diagnostics_for(self, path: Path) -> tuple[DiagnosticInfo, ...]:
         """Diagnostics collected so far for one file (empty when clean)."""
-        return tuple(self._diagnostics.get(path.as_uri(), ()))
+        return tuple(self._diagnostics.get(path_to_uri(path), ()))
 
     def has_syntax_error(self, path: Path) -> bool:
         return any(d.code == "syntax_error" for d in self.diagnostics_for(path))
@@ -306,7 +324,7 @@ class VhdlLsp:
         try:
             result = await self._request(
                 "textDocument/documentSymbol",
-                {"textDocument": {"uri": path.as_uri()}},
+                {"textDocument": {"uri": path_to_uri(path)}},
             )
         except LspError as exc:
             logger.warning("documentSymbol failed for %s: %s", path, exc)
@@ -452,4 +470,5 @@ __all__ = [
     "SymbolInfo",
     "VhdlLsp",
     "default_libraries_dir",
+    "path_to_uri",
 ]

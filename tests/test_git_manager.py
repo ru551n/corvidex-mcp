@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -63,6 +65,25 @@ def manager(tmp_path: Path) -> GitManager:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def rmtree_with_retry(path: Path, attempts: int = 12) -> None:
+    """``shutil.rmtree`` that retries through transient Windows locks.
+
+    Files created seconds ago can still be briefly locked on Windows
+    (e.g. Defender real-time scanning), where a plain rmtree raises
+    PermissionError. If the lock outlives the retries, fall back to
+    best effort: the assertion that follows does not depend on the
+    deletion (the pinned-SHA code path never touches the remote,
+    whether it exists or not).
+    """
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError:
+            time.sleep(0.5)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def test_parse_name_status_z():
@@ -138,9 +159,7 @@ def test_pinned_sha_never_fetches(manager: GitManager, remote: Path):
     first = run(manager.sync(cfg, None))
     assert first.commit == sha
     # The upstream vanishes entirely: a full-SHA pin must not need it.
-    import shutil
-
-    shutil.rmtree(remote)
+    rmtree_with_retry(remote)
     plan = run(manager.sync(cfg, first.commit))
     assert plan.empty
 

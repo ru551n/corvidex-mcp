@@ -7,6 +7,7 @@ from .client import (
     SymbolInfo,
     VhdlLsp,
     default_libraries_dir,
+    path_to_uri,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "SymbolInfo",
     "VhdlLsp",
     "default_libraries_dir",
+    "path_to_uri",
 ]

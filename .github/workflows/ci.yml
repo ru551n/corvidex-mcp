@@ -48,7 +48,7 @@ jobs:
         run: uv run pytest -q
 
   test-almalinux-9:
-    name: Tests (AlmaLinux 9, py3.12)
+    name: Tests (AlmaLinux 9, py${{ matrix.python-version }})
     needs: quality
     # Alma 9 has no hosted runner; run it as a container on Ubuntu.
     # The floating :9 tag tracks the newest 9.z (9.6+ at the time of
@@ -59,23 +59,30 @@ jobs:
     # fresh user install works), so the job only needs git + curl.
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     container:
       image: quay.io/almalinux/almalinux:9
     env:
-      UV_PYTHON: "3.12"
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Install system packages
         run: |
           set -e
+          # The image ships curl-minimal, which conflicts with the full
+          # curl package: only git is missing and needs installing.
           if command -v microdnf >/dev/null 2>&1; then
-            microdnf install -y git curl ca-certificates
+            microdnf install -y git
           else
-            dnf install -y git curl ca-certificates
+            dnf install -y git
           fi
+          command -v git
+          command -v curl
       - uses: actions/checkout@v4
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - name: Install dependencies (uv provisions CPython 3.12)
+      - name: Install dependencies (uv provisions CPython ${{ matrix.python-version }})
         run: $HOME/.local/bin/uv sync --frozen
       - name: Run tests
         run: $HOME/.local/bin/uv run pytest -q
