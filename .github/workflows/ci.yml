@@ -79,4 +79,3 @@ jobs:
         run: $HOME/.local/bin/uv sync --frozen
       - name: Run tests
         run: $HOME/.local/bin/uv run pytest -q
-
