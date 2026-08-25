@@ -284,7 +284,7 @@ def config(tmp_path: Path, remote: Path, fake_lsp: Path) -> AppConfig:
 @pytest.fixture
 def env(tmp_path: Path, config: AppConfig):
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     pipeline = IndexPipeline(
         config,
         GitManager(config.repos_dir),
@@ -304,7 +304,7 @@ async def test_full_sync_indexes_all_domains(config: AppConfig, env) -> None:
     cfg = config.repository("repo")
     await pipeline.sync_repository(cfg)
     assert store.count() == 11  # 3+1+3 VHDL, 2 docs, 2 code
-    assert store.count(CollectionName.VHDL) == 7
+    assert store.count(CollectionName.HDL) == 7
     assert store.count(CollectionName.DOCS) == 2
     assert store.count(CollectionName.CODE) == 2
     # LSP path: the fake server's entity/architecture specs.
@@ -415,7 +415,7 @@ async def test_reindex_repository(config: AppConfig, env) -> None:
     before = store.count()
     await pipeline.reindex_repository(cfg)
     assert store.count() == before
-    assert store.count(CollectionName.VHDL) == 7
+    assert store.count(CollectionName.HDL) == 7
 
 
 async def test_domains_and_excludes(
@@ -435,7 +435,7 @@ async def test_domains_and_excludes(
         ],
     )
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     pipeline = IndexPipeline(
         config,
         GitManager(config.repos_dir),
@@ -483,7 +483,7 @@ async def test_local_amend_without_content_change_advances_commit(
         repositories=[RepositoryConfig(name="work", path=work)],
     )
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     states = StateStore(config.state_dir / "repositories.json")
     pipeline = IndexPipeline(
         config,

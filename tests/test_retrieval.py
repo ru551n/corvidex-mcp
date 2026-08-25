@@ -102,12 +102,12 @@ def make_chunk(
     symbols: tuple[str, ...] = (),
 ) -> Chunk:
     content_type = {
-        CollectionName.VHDL: ContentType.SOURCE,
+        CollectionName.HDL: ContentType.SOURCE,
         CollectionName.DOCS: ContentType.DOCUMENTATION,
         CollectionName.CODE: ContentType.CODE,
     }[collection]
     language = {
-        CollectionName.VHDL: "vhdl",
+        CollectionName.HDL: "vhdl",
         CollectionName.DOCS: "markdown",
         CollectionName.CODE: "c",
     }[collection]
@@ -148,7 +148,7 @@ async def env(tmp_path: Path):
         repositories=[RepositoryConfig(name="repo", url=str(up), ref="main")],
     )
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     providers = fake_providers(config)
     git_manager = GitManager(config.repos_dir)
     states = StateStore(config.state_dir / "repositories.json")
@@ -159,7 +159,7 @@ async def env(tmp_path: Path):
 
     chunks = [
         make_chunk(
-            CollectionName.VHDL,
+            CollectionName.HDL,
             "rtl/fifo.vhd",
             "fifo",
             "entity",
@@ -170,7 +170,7 @@ async def env(tmp_path: Path):
             symbols=("fifo", "clk", "std_logic"),
         ),
         make_chunk(
-            CollectionName.VHDL,
+            CollectionName.HDL,
             "rtl/fifo.vhd",
             "rtl",
             "architecture",
@@ -203,7 +203,7 @@ async def env(tmp_path: Path):
             symbols=("fifo_write", "mem"),
         ),
     ]
-    dense = providers.embed_passages(CollectionName.VHDL, [c.content for c in chunks])
+    dense = providers.embed_passages(CollectionName.HDL, [c.content for c in chunks])
     sparse = providers.embed_sparse_passages([c.content for c in chunks])
     store.upsert_chunks(chunks, dense, sparse)
 
@@ -217,20 +217,20 @@ async def env(tmp_path: Path):
 
 async def test_search_returns_ranked_results(env) -> None:
     _store, retrieval = env
-    results = retrieval.search(CollectionName.VHDL, "fifo entity")
+    results = retrieval.search(CollectionName.HDL, "fifo entity")
     assert results
     top = results[0]
-    assert top.result_type == "vhdl"
+    assert top.result_type == "hdl"
     assert top.repository == "repo"
     assert top.commit
     assert top.content
     assert top.score > 0
-    assert all(r.result_type == "vhdl" for r in results)
+    assert all(r.result_type == "hdl" for r in results)
 
 
 async def test_search_symbol_cross_reference(env) -> None:
     _store, retrieval = env
-    results = retrieval.search(CollectionName.VHDL, "reset", symbols=("rst_n",))
+    results = retrieval.search(CollectionName.HDL, "reset", symbols=("rst_n",))
     assert not results  # no VHDL chunk references rst_n
     docs = retrieval.search(
         CollectionName.DOCS, "reset conventions", symbols=("rst_n",)
@@ -243,9 +243,9 @@ async def test_search_symbol_cross_reference(env) -> None:
 async def test_search_repository_filter_and_errors(env) -> None:
     _store, retrieval = env
     with pytest.raises(RetrievalError, match="unknown repository"):
-        retrieval.search(CollectionName.VHDL, "x", repository="nope")
+        retrieval.search(CollectionName.HDL, "x", repository="nope")
     with pytest.raises(RetrievalError, match="must not be empty"):
-        retrieval.search(CollectionName.VHDL, "   ")
+        retrieval.search(CollectionName.HDL, "   ")
     filtered = retrieval.search(CollectionName.CODE, "fifo", repository="repo")
     assert filtered
     assert all(r.repository == "repo" for r in filtered)
@@ -254,7 +254,7 @@ async def test_search_repository_filter_and_errors(env) -> None:
 async def test_search_knowledge_fuses_domains(env) -> None:
     _store, retrieval = env
     results = retrieval.search_knowledge("fifo", limit=20)
-    assert {r.result_type for r in results} == {"vhdl", "docs", "code"}
+    assert {r.result_type for r in results} == {"hdl", "docs", "code"}
     scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
 
@@ -291,6 +291,6 @@ async def test_repository_status(env) -> None:
     st = statuses[0]
     assert st.name == "repo"
     assert st.ref == "main"
-    assert st.domains == ("vhdl", "docs", "code")
+    assert st.domains == ("hdl", "docs", "code")
     assert st.indexed_commit is not None
     assert st.last_sync_error is None

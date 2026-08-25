@@ -124,7 +124,7 @@ class VhdlRagApp:
     def ensure_collections(self) -> None:
         """Create the Qdrant collections (loads the embedding models)."""
         self.store.ensure_collections(
-            vhdl_dim=self.providers.dimension(CollectionName.VHDL),
+            hdl_dim=self.providers.dimension(CollectionName.HDL),
             docs_dim=self.providers.dimension(CollectionName.DOCS),
             code_dim=self.providers.dimension(CollectionName.CODE),
         )
@@ -274,7 +274,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         repository name."""
         return _render(
             retrieval.search(
-                CollectionName.VHDL,
+                CollectionName.HDL,
                 query,
                 limit,
                 repository,

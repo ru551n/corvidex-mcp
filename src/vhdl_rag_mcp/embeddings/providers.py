@@ -14,7 +14,7 @@ from .provider import FastEmbedProvider
 
 #: Fixed local embedding models (no configuration surface): per-collection
 #: dense (jina v2, 768 dimensions) + one shared sparse BM25 model.
-VHDL_MODEL = "jinaai/jina-embeddings-v2-base-code"
+HDL_MODEL = "jinaai/jina-embeddings-v2-base-code"
 DOCS_MODEL = "jinaai/jina-embeddings-v2-base-en"
 CODE_MODEL = "jinaai/jina-embeddings-v2-base-code"
 SPARSE_MODEL = "Qdrant/bm25"
@@ -30,7 +30,7 @@ class EmbeddingProviders:
 
     def _dense_model_name(self, collection: CollectionName) -> str:
         return {
-            CollectionName.VHDL: VHDL_MODEL,
+            CollectionName.HDL: HDL_MODEL,
             CollectionName.DOCS: DOCS_MODEL,
             CollectionName.CODE: CODE_MODEL,
         }[collection]

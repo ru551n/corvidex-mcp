@@ -25,7 +25,7 @@ def make_chunk(
     start: int = 10,
     end: int = 20,
     content: str = "process body",
-    collection: CollectionName = CollectionName.VHDL,
+    collection: CollectionName = CollectionName.HDL,
     content_type: ContentType = ContentType.SOURCE,
     language: str = "vhdl",
     symbols: tuple[str, ...] = (),
@@ -70,15 +70,15 @@ def sparse(
 def store(tmp_path: Path):
     config = AppConfig(data_dir=tmp_path / "data")
     vstore = VectorStore(config)
-    vstore.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    vstore.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     yield vstore
     vstore.close()
 
 
 def test_ensure_collections_idempotent_and_count(store: VectorStore) -> None:
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     assert store.count() == 0
-    assert store.count(CollectionName.VHDL) == 0
+    assert store.count(CollectionName.HDL) == 0
     assert store.count(CollectionName.DOCS) == 0
     assert store.count(CollectionName.CODE) == 0
 
@@ -86,9 +86,9 @@ def test_ensure_collections_idempotent_and_count(store: VectorStore) -> None:
 def test_ensure_collection_dimension_drift(tmp_path: Path) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     with pytest.raises(VectorStoreError, match="dense vector size"):
-        store.ensure_collections(vhdl_dim=8, docs_dim=4, code_dim=4)
+        store.ensure_collections(hdl_dim=8, docs_dim=4, code_dim=4)
     store.close()
 
 
@@ -135,11 +135,9 @@ def test_upsert_across_collections_and_query(store: VectorStore) -> None:
         sparse=[sparse(), sparse(), sparse(), sparse()],
     )
     assert store.count() == 4
-    assert store.count(CollectionName.VHDL) == 3
+    assert store.count(CollectionName.HDL) == 3
     assert store.count(CollectionName.CODE) == 1
-    results = store.query(
-        CollectionName.VHDL, dense=dense(2), sparse=sparse(), limit=10
-    )
+    results = store.query(CollectionName.HDL, dense=dense(2), sparse=sparse(), limit=10)
     assert [r.chunk.symbol for r in results] == ["top", "p_read", "p_write"]
 
 
@@ -179,7 +177,7 @@ def test_query_payload_filters(store: VectorStore) -> None:
         sparse=[sparse(), sparse(), sparse()],
     )
     by_repo = store.query(
-        CollectionName.VHDL,
+        CollectionName.HDL,
         dense=dense(0),
         sparse=sparse(),
         limit=10,
@@ -188,7 +186,7 @@ def test_query_payload_filters(store: VectorStore) -> None:
     assert [r.chunk.symbol for r in by_repo] == ["p_write"]
     assert by_repo[0].chunk.repository == "repoB"
     by_entity = store.query(
-        CollectionName.VHDL,
+        CollectionName.HDL,
         dense=dense(0),
         sparse=sparse(),
         limit=10,
@@ -205,7 +203,7 @@ def test_query_payload_filters(store: VectorStore) -> None:
     assert [r.chunk.symbol for r in by_lang] == ["fifo_write"]
     assert (
         store.query(
-            CollectionName.VHDL,
+            CollectionName.HDL,
             dense=dense(0),
             sparse=sparse(),
             limit=10,
@@ -218,7 +216,7 @@ def test_query_payload_filters(store: VectorStore) -> None:
 def test_query_unknown_filter_key_raises(store: VectorStore) -> None:
     with pytest.raises(VectorStoreError, match="unknown filter key"):
         store.query(
-            CollectionName.VHDL,
+            CollectionName.HDL,
             dense=dense(0),
             sparse=sparse(),
             limit=5,
@@ -288,7 +286,7 @@ def test_sparse_leg_influences_ranking(store: VectorStore) -> None:
     )
     # Sparse query matches only p_write's tokens.
     results = store.query(
-        CollectionName.VHDL,
+        CollectionName.HDL,
         dense=dense(1),  # orthogonal to passages: cosine 0 for both
         sparse=sparse(indices=(7,)),
         limit=10,
@@ -300,7 +298,7 @@ def test_sparse_leg_influences_ranking(store: VectorStore) -> None:
 def test_empty_sparse_falls_back_to_dense(store: VectorStore) -> None:
     store.upsert_chunks([make_chunk()], dense=[dense(0)], sparse=[sparse()])
     results = store.query(
-        CollectionName.VHDL,
+        CollectionName.HDL,
         dense=dense(0),
         sparse=SparseVectorData(indices=(), values=()),
         limit=10,
@@ -404,7 +402,7 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
         content="p_write : process (clk, rst_n)\nbegin\nend process;\n",
     )
     store.upsert_chunks([chunk], dense=[dense(0)], sparse=[sparse()])
-    results = store.query(CollectionName.VHDL, dense=dense(0), sparse=sparse(), limit=1)
+    results = store.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=1)
     assert len(results) == 1
     got = results[0].chunk
     assert got.content == chunk.content
@@ -430,7 +428,7 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
     )
     assert (got.library, got.entity, got.architecture) == ("work", "fifo", "rtl")
     sr = SearchResult(
-        result_type="vhdl",
+        result_type="hdl",
         repository=got.repository,
         commit=got.commit,
         file=got.file,
@@ -454,17 +452,17 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
 def test_persistence_across_reopen(tmp_path: Path) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     store = VectorStore(config)
-    store.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     store.upsert_chunks(
         [make_chunk(symbol="p_write")], dense=[dense(0)], sparse=[sparse()]
     )
     store.close()
 
     reopened = VectorStore(config)
-    reopened.ensure_collections(vhdl_dim=4, docs_dim=4, code_dim=4)
+    reopened.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     assert reopened.count() == 1
     assert (
-        reopened.query(CollectionName.VHDL, dense=dense(0), sparse=sparse(), limit=5)[
+        reopened.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=5)[
             0
         ].chunk.symbol
         == "p_write"
@@ -476,7 +474,7 @@ def test_queries_on_missing_collection_are_safe(tmp_path: Path) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     store = VectorStore(config)
     assert (
-        store.query(CollectionName.VHDL, dense=dense(0), sparse=sparse(), limit=5) == []
+        store.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=5) == []
     )
     assert store.count() == 0
     assert store.delete_file("repoA", "f.vhd") == 0

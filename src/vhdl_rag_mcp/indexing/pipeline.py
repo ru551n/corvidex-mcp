@@ -39,7 +39,7 @@ from .vhdl import chunk_vhdl_file
 
 logger = logging.getLogger(__name__)
 
-VHDL_KIND = FileKind(ContentType.SOURCE, CollectionName.VHDL, "vhdl")
+VHDL_KIND = FileKind(ContentType.SOURCE, CollectionName.HDL, "vhdl")
 
 
 class IndexPipeline:

@@ -91,7 +91,7 @@ def test_structural_fallback_specs():
         assert chunk.branch == "main"
         assert chunk.commit == "abc123"
         assert chunk.content_type is ContentType.SOURCE
-        assert chunk.collection is CollectionName.VHDL
+        assert chunk.collection is CollectionName.HDL
         assert chunk.language == "vhdl"
         assert chunk.file == "rtl/fifo.vhd"
 

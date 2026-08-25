@@ -1,8 +1,9 @@
 """File-type routing: which collection a repository file belongs to.
 
-Repositories are indexed for three domains — VHDL, VHDL-related
-documentation, and general source code. A file's extension decides its
-domain (and therefore its collection, content type, and language).
+Repositories are indexed for three domains — HDL (VHDL, Verilog, and
+SystemVerilog), HDL-related documentation, and general source code. A
+file's extension decides its domain (and therefore its collection,
+content type, and language).
 Per-repository ``domains`` select which of the three are loaded, and
 ``exclude`` patterns (fnmatch-style globs over the repository-relative
 path) skip whole subtrees or file types. Files with no recognized
@@ -55,7 +56,7 @@ class FileKind:
 def _build_table() -> dict[str, FileKind]:
     table: dict[str, FileKind] = {}
     for ext in VHDL_EXTENSIONS:
-        table[ext] = FileKind(ContentType.SOURCE, CollectionName.VHDL, "vhdl")
+        table[ext] = FileKind(ContentType.SOURCE, CollectionName.HDL, "vhdl")
     for ext in DOC_EXTENSIONS:
         table[ext] = FileKind(
             ContentType.DOCUMENTATION, CollectionName.DOCS, _DOC_LANGUAGES[ext]

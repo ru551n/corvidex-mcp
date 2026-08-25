@@ -401,7 +401,7 @@ def _make_chunk(
         file=file,
         content_type=ContentType.SOURCE,
         language="vhdl",
-        collection=CollectionName.VHDL,
+        collection=CollectionName.HDL,
         symbol=spec.symbol,
         symbol_kind=spec.symbol_kind,
         start_line=start,

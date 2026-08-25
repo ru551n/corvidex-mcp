@@ -208,7 +208,7 @@ async def test_full_lifecycle_with_restart(
     app = make_app(config)
     await app.sync_all()
     assert app.store.count() == 7  # 3 VHDL + 2 docs + 2 code
-    assert app.store.count(CollectionName.VHDL) == 3
+    assert app.store.count(CollectionName.HDL) == 3
     commit1 = app.states.get("repo").indexed_commit
     assert commit1 == git(remote, "rev-parse", "HEAD")
     app.close()
@@ -218,7 +218,7 @@ async def test_full_lifecycle_with_restart(
     app = make_app(config)
     assert app.store.count() == 7
     assert app.states.get("repo").indexed_commit == commit1
-    results = app.retrieval.search(CollectionName.VHDL, "fifo write pointer")
+    results = app.retrieval.search(CollectionName.HDL, "fifo write pointer")
     assert results and results[0].repository == "repo"
 
     # Advance the remote: modify (new line ranges -> new chunk IDs), add,

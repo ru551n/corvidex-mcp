@@ -200,7 +200,7 @@ async def test_repository_status_tool(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool("repository_status", {})
     text = tool_text(result)
-    assert "- repo (ref main, domains: vhdl, docs, code)" in text
+    assert "- repo (ref main, domains: hdl, docs, code)" in text
     assert "indexed:" in text
     # The healthy repo has no error; the broken one does.
     repo_block = text.split("- repo (")[1].split("- broken")[0]

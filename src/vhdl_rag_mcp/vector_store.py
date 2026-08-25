@@ -7,11 +7,14 @@ Design notes
   same interface. No separate Qdrant server is required and no second
   instance is run.
 - Three collections in that single instance:
-    ``vhdl``  — semantically chunked VHDL
-    ``docs``  — VHDL-related documentation
+    ``hdl``   — semantically chunked HDL (VHDL, Verilog, SystemVerilog)
+    ``docs``  — HDL-related documentation
     ``code``  — general source code (C/C++, Python, ...)
   Collections may use different dense embedding models; the store keeps
-  them isolated.
+  them isolated. Upgrading from the v1 layout (a ``vhdl`` collection)
+  is a deterministic full reindex; :meth:`VectorStore.delete_legacy_vhdl`
+  drops the old collection safely because every chunk is reproducible
+  from the git history.
 - Every collection carries two named vectors:
     ``dense``  — dense vector from the domain's embedding model
     ``sparse`` — BM25 sparse vector (Qdrant-native sparse index)
@@ -56,11 +59,11 @@ from .models import Chunk, CollectionName, SparseVectorData
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_VHDL = "vhdl"
+COLLECTION_HDL = "hdl"
 COLLECTION_DOCS = "docs"
 COLLECTION_CODE = "code"
 ALL_COLLECTIONS: tuple[CollectionName, ...] = (
-    CollectionName.VHDL,
+    CollectionName.HDL,
     CollectionName.DOCS,
     CollectionName.CODE,
 )
@@ -211,7 +214,7 @@ class VectorStore:
             return dense.size if isinstance(dense, VectorParams) else None
         return None
 
-    def ensure_collections(self, vhdl_dim: int, docs_dim: int, code_dim: int) -> None:
+    def ensure_collections(self, hdl_dim: int, docs_dim: int, code_dim: int) -> None:
         """Create the collections if missing; fail loudly on dimension drift.
 
         A changed embedding model changes the dense vector size; silently
@@ -219,7 +222,7 @@ class VectorStore:
         an actionable message.
         """
         for name, dim in (
-            (COLLECTION_VHDL, vhdl_dim),
+            (COLLECTION_HDL, hdl_dim),
             (COLLECTION_DOCS, docs_dim),
             (COLLECTION_CODE, code_dim),
         ):
@@ -245,6 +248,20 @@ class VectorStore:
             if self._existing is not None:
                 self._existing.add(name)
             logger.info("created qdrant collection %r (dim=%d)", name, dim)
+
+    def delete_legacy_vhdl(self) -> bool:
+        """Drop the v1-layout ``vhdl`` collection (safe: reproducible).
+
+        Returns True when a legacy collection was removed.
+        """
+        name = "vhdl"
+        if name not in self._collections():
+            return False
+        self._client.delete_collection(name)
+        if self._existing is not None:
+            self._existing.discard(name)
+        logger.info("deleted legacy qdrant collection %r (v1 layout)", name)
+        return True
 
     # -- writes ---------------------------------------------------------
 
@@ -409,8 +426,8 @@ class VectorStore:
     def get_by_symbol(
         self, repository: str, symbol: str, symbol_kind: str
     ) -> list[Chunk]:
-        """VHDL chunks of one kind named ``symbol`` in ``repository``."""
-        name = COLLECTION_VHDL
+        """HDL chunks of one kind named ``symbol`` in ``repository``."""
+        name = COLLECTION_HDL
         if name not in self._collections():
             return []
         records, _ = self._client.scroll(

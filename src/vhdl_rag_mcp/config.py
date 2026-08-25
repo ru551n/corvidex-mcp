@@ -28,7 +28,7 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 #: Every indexable domain; the default per-repository selection.
 ALL_DOMAINS: tuple[CollectionName, ...] = (
-    CollectionName.VHDL,
+    CollectionName.HDL,
     CollectionName.DOCS,
     CollectionName.CODE,
 )
@@ -81,9 +81,11 @@ class RepositoryConfig(BaseModel):
     working tree (uncommitted changes and git-respected untracked
     files) are indexed, attributed to the current HEAD commit.
 
-    ``domains`` selects which of the three indexed domains (VHDL,
+    ``domains`` selects which of the three indexed domains (HDL,
     documentation, general code) are loaded from this repository; the
-    default is all of them.
+    default is all of them. The HDL domain covers VHDL, Verilog, and
+    SystemVerilog; the legacy name "vhdl" is accepted as an alias for
+    "hdl".
     """
 
     model_config = ConfigDict(frozen=True)
@@ -98,8 +100,9 @@ class RepositoryConfig(BaseModel):
     domains: list[CollectionName] = Field(
         default_factory=lambda: list(ALL_DOMAINS),
         description=(
-            "Domains to index from this repository: any of 'vhdl', 'docs', "
-            "'code'. Default: all three."
+            "Domains to index from this repository: any of 'hdl' (VHDL, "
+            "Verilog, SystemVerilog; 'vhdl' is accepted as a legacy alias), "
+            "'docs', 'code'. Default: all three."
         ),
     )
     exclude: list[str] = Field(
@@ -159,6 +162,17 @@ class RepositoryConfig(BaseModel):
                 "repository ref must be a branch/tag name or a commit SHA "
                 f"(4-40 hex chars); got {value!r}"
             )
+        return value
+
+    @field_validator("domains", mode="before")
+    @classmethod
+    def _normalize_domains(cls, value: object) -> object:
+        # Legacy configs name the HDL domain "vhdl"; accept it as an alias.
+        if isinstance(value, list):
+            return [
+                "hdl" if item in ("vhdl", "hdl", CollectionName.HDL) else item
+                for item in value
+            ]
         return value
 
     @field_validator("domains")
@@ -295,7 +309,8 @@ _DEFAULT_TEMPLATE = """\
 # fails) the server writes a built-in default instead.
 #
 # "domains" selects which domains are indexed from a repository: any
-# subset of ["vhdl", "docs", "code"]. Default: all three.
+# subset of ["hdl", "docs", "code"]. The hdl domain covers VHDL, Verilog,
+# and SystemVerilog ("vhdl" is accepted as a legacy alias). Default: all.
 #
 # "exclude" lists glob patterns (matched against the repository-relative
 # path, '*' crosses '/') whose files are not indexed; wildcard-free
@@ -321,7 +336,7 @@ log_level = "INFO"
 name = "company-standards"
 url = "git@github.com:company/vhdl-standards.git"
 ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
-# domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
+# domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 # vhdl_ls_hook = "make vhdl-ls-config"  # command to generate vhdl_ls.toml
 
@@ -337,7 +352,7 @@ name = "current-project"
 path = "~/work/current-project"
 # ref = "main"               # tracked branch, tag, or SHA (pinned);
 #                             # ignored for path repositories
-# domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
+# domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 """
 

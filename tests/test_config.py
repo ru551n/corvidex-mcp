@@ -90,9 +90,9 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     ]
     std, ip, pinned, proj, worktree = cfg.repositories
     assert std.ref == "main"
-    assert std.domains == [CollectionName.VHDL, CollectionName.DOCS]
+    assert std.domains == [CollectionName.HDL, CollectionName.DOCS]
     assert std.enabled_collections == frozenset(
-        {CollectionName.VHDL, CollectionName.DOCS}
+        {CollectionName.HDL, CollectionName.DOCS}
     )
     assert std.exclude == ["sim/*", "*.log"]
     assert std.vhdl_ls_hook == "scripts/gen.sh"
@@ -136,7 +136,7 @@ def test_repository_url_xor_path() -> None:
 
 def test_domains_validation() -> None:
     repo = RepositoryConfig(name="r", url="u", domains=["vhdl", "docs"])
-    assert repo.domains == [CollectionName.VHDL, CollectionName.DOCS]
+    assert repo.domains == [CollectionName.HDL, CollectionName.DOCS]
     with pytest.raises(ValidationError, match="duplicate domain"):
         RepositoryConfig(name="r", url="u", domains=["vhdl", "vhdl"])
     with pytest.raises(ValidationError, match="Input should be"):

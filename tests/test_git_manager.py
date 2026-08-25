@@ -325,7 +325,7 @@ def test_routing_vhdl():
     from vhdl_rag_mcp.models import CollectionName, ContentType
 
     assert kind.content_type is ContentType.SOURCE
-    assert kind.collection is CollectionName.VHDL
+    assert kind.collection is CollectionName.HDL
     assert kind.language == "vhdl"
     assert classify_file("UPPER/FIFO.VHDL").language == "vhdl"
     assert classify_file("X.VHDL") is not None
@@ -368,7 +368,7 @@ def test_routing_code_and_unknown():
 def test_routing_domains_restriction():
     from vhdl_rag_mcp.models import CollectionName
 
-    domains = frozenset({CollectionName.VHDL})
+    domains = frozenset({CollectionName.HDL})
     assert classify_file("rtl/fifo.vhd", domains=domains) is not None
     assert classify_file("docs/guide.md", domains=domains) is None
     assert classify_file("src/fifo.c", domains=domains) is None
