@@ -76,6 +76,7 @@ jobs:
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
       - name: Install dependencies (uv provisions CPython 3.12)
-        run: "$HOME/.local/bin/uv" sync --frozen
+        run: $HOME/.local/bin/uv sync --frozen
       - name: Run tests
-        run: "$HOME/.local/bin/uv" run pytest -q
+        run: $HOME/.local/bin/uv run pytest -q
+
