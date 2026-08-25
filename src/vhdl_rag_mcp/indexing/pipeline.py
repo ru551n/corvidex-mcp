@@ -200,6 +200,7 @@ class IndexPipeline:
             self._config.vhdl_ls_path,
             repo_dir,
             libraries_dir=default_libraries_dir(self._config.vhdl_ls_path),
+            vhdl_ls_hook=cfg.vhdl_ls_hook,
         )
         chunks: list[Chunk] = []
         try:

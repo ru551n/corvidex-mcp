@@ -100,7 +100,9 @@ Requirements:
   VHDL): install a release from
   <https://vhdl-lang.org/> so `vhdl_ls` is on your `PATH`, or point
   `vhdl_ls_path` at the binary. The `vhdl_libraries` directory shipped
-  next to the binary is auto-detected.
+  next to the binary is auto-detected. Per repository, `vhdl_ls_hook`
+  may generate the `vhdl_ls.toml` workspace config (below); otherwise
+  the server writes a built-in default.
 
 The package is installed from this Git repository (it is not on
 PyPI):
@@ -144,6 +146,8 @@ ref = "main"                           # branch (tracked on every sync),
 # domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]# glob path excludes ('*' crosses '/');
                                        # wildcard-free patterns exclude the subtree
+# vhdl_ls_hook = "make vhdl-ls-config" # command run at the repo root to
+                                       # generate vhdl_ls.toml when missing
 
 # ... or index your own active checkout instead of a remote:
 [[repositories]]
@@ -169,6 +173,15 @@ Notes:
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely). `ref` is ignored for local working
   repositories.
+- **`vhdl_ls_hook`**: shell command run at the repository root that
+  generates `vhdl_ls.toml` when the file is missing (before the
+  `vhdl_ls` session for that repository). When no hook is set, the hook
+  fails, or it leaves no file behind, the server writes a built-in
+  default (a `defaultlib` glob for all `.vhd`/`.vhdl` files plus the
+  standard libraries shipped with `vhdl_ls`) and removes it after the
+  session; files a hook creates are owned by the hook and are never
+  removed by the server. For local working repositories the hook runs
+  inside your own checkout.
 - **Local working repositories** index the working tree: HEAD plus
   uncommitted changes (staged and unstaged) and untracked files
   (honoring `.gitignore`); chunks are attributed to the current HEAD

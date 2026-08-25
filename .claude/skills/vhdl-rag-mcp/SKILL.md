@@ -25,7 +25,10 @@ file, lines, commit) and the identifiers the chunk references
    `exclude = [...]` select what gets indexed.
 2. `vhdl_ls` binary on `PATH` (or `vhdl_ls_path` in config) — required
    for repositories containing VHDL; without it those repositories
-   fail their sync (visible in `repository_status`).
+   fail their sync (visible in `repository_status`). Per repo,
+   `vhdl_ls_hook` (a command run at the repo root) can generate the
+   workspace `vhdl_ls.toml` when it is missing; without a working hook
+   the server writes a built-in default.
 3. Register the server (Claude Code): `claude mcp add vhdl-rag-mcp -- uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp`
 4. Verify: call `repository_status` — each repo should show an indexed
    commit and no `last error`. If empty or stale, call

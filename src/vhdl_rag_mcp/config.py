@@ -111,6 +111,17 @@ class RepositoryConfig(BaseModel):
             "['sim', 'build/*', '*.log']."
         ),
     )
+    vhdl_ls_hook: str | None = Field(
+        default=None,
+        description=(
+            "Shell command, run at the repository root, that produces "
+            "vhdl_ls.toml when it is missing (invoked before the vhdl_ls "
+            "session starts). When no hook is set, the hook fails, or it "
+            "leaves no file behind, the built-in default config is "
+            "generated instead. Files the hook creates are owned by the "
+            "hook: the server never removes them."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -279,6 +290,10 @@ _DEFAULT_TEMPLATE = """\
 # ignored for local working repositories (path): HEAD plus uncommitted
 # changes and untracked files are indexed.
 #
+# "vhdl_ls_hook" is a shell command run at the repository root that
+# generates vhdl_ls.toml when it is missing; without a hook (or if it
+# fails) the server writes a built-in default instead.
+#
 # "domains" selects which domains are indexed from a repository: any
 # subset of ["vhdl", "docs", "code"]. Default: all three.
 #
@@ -308,6 +323,7 @@ url = "git@github.com:company/vhdl-standards.git"
 ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
 # domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
+# vhdl_ls_hook = "make vhdl-ls-config"  # command to generate vhdl_ls.toml
 
 [[repositories]]
 name = "common-ip"

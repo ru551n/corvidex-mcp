@@ -32,6 +32,7 @@ url = "git@github.com:co/standards.git"
 ref = "main"
 domains = ["vhdl", "docs"]
 exclude = ["sim/*", "*.log"]
+vhdl_ls_hook = "scripts/gen.sh"
 
 [[repositories]]
 name = "ip"
@@ -94,6 +95,8 @@ def test_full_config_parsing(tmp_path: Path) -> None:
         {CollectionName.VHDL, CollectionName.DOCS}
     )
     assert std.exclude == ["sim/*", "*.log"]
+    assert std.vhdl_ls_hook == "scripts/gen.sh"
+    assert ip.vhdl_ls_hook is None
     assert ip.ref == "v2.1"
     # domains default to all three; exclude defaults to empty
     assert ip.domains == list(ALL_DOMAINS)

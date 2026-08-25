@@ -4,9 +4,11 @@ One :class:`VhdlLsp` instance per repository, for one sync run:
 
 - the workspace is the repository working tree (checked out at the target
   commit by :mod:`vhdl_rag_mcp.git_manager`);
-- a ``vhdl_ls.toml`` is generated in the workspace root unless the
-  repository already provides its own (in which case it is respected and
-  left in place);
+- a ``vhdl_ls.toml`` must exist in the workspace root before the
+  session starts: an existing one is respected and left in place, then
+  the repository's ``vhdl_ls_hook`` (a shell command run at the root) is
+  tried and its output is owned by the hook, and only as a fallback the
+  client generates a default config itself (removing it on shutdown);
 - after opening the changed files the client waits for the server to go
   quiet (vhdl_ls pushes ``publishDiagnostics`` for every workspace file it
   analyzes, but sends nothing for clean files, so a per-file wait is not
@@ -25,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,8 @@ QUIET_WINDOW = 1.5
 REQUEST_TIMEOUT = 30.0
 #: Timeout for the initialize handshake.
 INITIALIZE_TIMEOUT = 60.0
+#: Timeout for a repository's vhdl_ls.toml generation hook.
+HOOK_TIMEOUT = 120.0
 
 DEFAULTLIB_GLOBS = ["**/*.vhd", "**/*.vhdl"]
 
@@ -139,11 +144,16 @@ class VhdlLsp:
     """Async client for one vhdl_ls process rooted at one workspace."""
 
     def __init__(
-        self, binary: str, workspace: Path, libraries_dir: Path | None = None
+        self,
+        binary: str,
+        workspace: Path,
+        libraries_dir: Path | None = None,
+        vhdl_ls_hook: str | None = None,
     ) -> None:
         self._binary = binary
         self._workspace = workspace
         self._libraries = libraries_dir
+        self._hook = vhdl_ls_hook
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
@@ -159,7 +169,7 @@ class VhdlLsp:
 
     async def start(self) -> None:
         """Spawn vhdl_ls, perform the LSP handshake, and open the workspace."""
-        self._ensure_workspace_config()
+        await self._ensure_workspace_config()
         args = [self._binary]
         if self._libraries is not None and self._libraries.is_dir():
             args += ["-l", str(self._libraries)]
@@ -230,11 +240,20 @@ class VhdlLsp:
         if self._owns_workspace_config:
             self._workspace.joinpath("vhdl_ls.toml").unlink(missing_ok=True)
 
-    def _ensure_workspace_config(self) -> None:
+    async def _ensure_workspace_config(self) -> None:
         config_path = self._workspace / "vhdl_ls.toml"
         if config_path.exists():
             logger.info("using repository-provided vhdl_ls.toml in %s", self._workspace)
             return
+        if self._hook is not None:
+            if await self._run_hook():
+                logger.info("vhdl_ls_hook generated %s", config_path)
+                return
+            logger.warning(
+                "vhdl_ls_hook completed but %s is still missing; "
+                "generating the default config",
+                config_path.name,
+            )
         self._owns_workspace_config = True
         files_list = ", ".join(f"'{glob}'" for glob in DEFAULTLIB_GLOBS)
         lines = ["[libraries.defaultlib]", f"files = [{files_list}]", ""]
@@ -254,6 +273,46 @@ class VhdlLsp:
                 "is_third_party = true",
             ]
         config_path.write_text("\n".join(lines), encoding="utf-8")
+
+    async def _run_hook(self) -> bool:
+        """Run the repository's config hook at the workspace root.
+
+        The hook is a shell command that must leave a ``vhdl_ls.toml``
+        at the repository root. Returns True when it exits successfully
+        and the file now exists. Its output is owned by the hook, so
+        the server never removes it.
+        """
+        assert self._hook is not None
+        if sys.platform == "win32":
+            shell_args = ["cmd", "/c", self._hook]
+        else:
+            shell_args = ["sh", "-c", self._hook]
+        proc = await asyncio.create_subprocess_exec(
+            *shell_args,
+            cwd=str(self._workspace),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _out, err = await asyncio.wait_for(proc.communicate(), HOOK_TIMEOUT)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning(
+                "vhdl_ls_hook timed out after %.0fs in %s",
+                HOOK_TIMEOUT,
+                self._workspace,
+            )
+            return False
+        if proc.returncode != 0:
+            logger.warning(
+                "vhdl_ls_hook failed (exit %s) in %s: %s",
+                proc.returncode,
+                self._workspace,
+                err.decode(errors="replace").strip()[-500:],
+            )
+            return False
+        return (self._workspace / "vhdl_ls.toml").exists()
 
     # -- document flow --------------------------------------------------------
 

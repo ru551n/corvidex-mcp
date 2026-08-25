@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -283,6 +284,72 @@ async def test_repository_config_respected(fake_server: Path, workspace: Path):
         await lsp.shutdown()
     # A repository-provided config must be left in place.
     assert (workspace / "vhdl_ls.toml").exists()
+
+
+# -- vhdl_ls_hook ------------------------------------------------------------
+
+
+HOOK_GENERATOR = (
+    "import pathlib\n"
+    'pathlib.Path("vhdl_ls.toml").write_text(\n'
+    "    \"[libraries.defaultlib]\\nfiles = ['hook']\\n\"\n"
+    ")\n"
+)
+
+
+def hook_command(tmp_path: Path) -> str:
+    script = tmp_path / "hook.py"
+    script.write_text(HOOK_GENERATOR, encoding="utf-8")
+    return f"{sys.executable} {script}"
+
+
+async def test_hook_generates_config_when_missing(
+    fake_server: Path, workspace: Path, tmp_path: Path
+) -> None:
+    lsp = VhdlLsp(str(fake_server), workspace, vhdl_ls_hook=hook_command(tmp_path))
+    try:
+        await lsp.start()
+        assert (workspace / "vhdl_ls.toml").read_text() == (
+            "[libraries.defaultlib]\nfiles = ['hook']\n"
+        )
+    finally:
+        await lsp.shutdown()
+    # Hook output is owned by the hook: the server never removes it.
+    assert (workspace / "vhdl_ls.toml").exists()
+
+
+async def test_hook_failure_falls_back_to_default(
+    fake_server: Path, workspace: Path
+) -> None:
+    lsp = VhdlLsp(str(fake_server), workspace, vhdl_ls_hook="exit 1")
+    try:
+        await lsp.start()
+        assert "[libraries.defaultlib]" in (workspace / "vhdl_ls.toml").read_text()
+    finally:
+        await lsp.shutdown()
+    # The fallback config is server-generated and cleaned up on shutdown.
+    assert not (workspace / "vhdl_ls.toml").exists()
+
+
+async def test_hook_not_called_when_config_present(
+    fake_server: Path, workspace: Path, tmp_path: Path
+) -> None:
+    marker = tmp_path / "hook-ran"
+    script = tmp_path / "marker_hook.py"
+    script.write_text(
+        f"import pathlib\npathlib.Path({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    (workspace / "vhdl_ls.toml").write_text("[libraries.defaultlib]\n")
+    lsp = VhdlLsp(
+        str(fake_server), workspace, vhdl_ls_hook=f"{sys.executable} {script}"
+    )
+    try:
+        await lsp.start()
+    finally:
+        await lsp.shutdown()
+    assert not marker.exists()
+    assert (workspace / "vhdl_ls.toml").read_text() == "[libraries.defaultlib]\n"
 
 
 async def test_wait_until_quiet_is_bounded(fake_server: Path, workspace: Path):
