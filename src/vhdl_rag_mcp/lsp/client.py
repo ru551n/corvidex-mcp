@@ -1,17 +1,19 @@
-"""vhdl_ls language-server client (LSP over stdio, Content-Length framing).
+"""Language-server client (LSP over stdio, Content-Length framing).
 
-One :class:`VhdlLsp` instance per repository, for one sync run:
+One :class:`LspClient` instance per repository, for one sync run:
 
 - the workspace is the repository working tree (checked out at the target
   commit by :mod:`vhdl_rag_mcp.git_manager`);
-- a ``vhdl_ls.toml`` must exist in the workspace root before the
-  session starts: an existing one is respected and left in place, then
-  the repository's ``vhdl_ls_hook`` (a shell command run at the root) is
-  tried and its output is owned by the hook, and only as a fallback the
-  client generates a default config itself (removing it on shutdown);
+- when the server reads a workspace config file (vhdl_ls's
+  ``vhdl_ls.toml``, Veridian's ``veridian.yaml``), the file must exist
+  before the session starts: an existing one is respected and left in
+  place, then the repository's config hook (a shell command run at the
+  root) is tried and its output is owned by the hook, and only as a
+  fallback the client generates a default config itself (removing it on
+  shutdown);
 - after opening the changed files the client waits for the server to go
-  quiet (vhdl_ls pushes ``publishDiagnostics`` for every workspace file it
-  analyzes, but sends nothing for clean files, so a per-file wait is not
+  quiet (servers push ``publishDiagnostics`` for the files they analyze
+  but may send nothing for clean files, so a per-file wait is not
   possible);
 - ``documentSymbol`` results are parsed into a plain
   :class:`SymbolInfo` tree (hierarchical, as advertised during
@@ -19,6 +21,13 @@ One :class:`VhdlLsp` instance per repository, for one sync run:
 
 All failures are contained: a hung or broken language server surfaces as
 :class:`LspError` and the chunker falls back to structural parsing.
+
+Server-specific behavior is supplied by subclasses: the extra
+command-line arguments (:meth:`LspClient.build_args`), the LSP
+``languageId`` of opened documents (:attr:`LspClient.language_id`), the
+workspace config handling (:attr:`LspClient.config_name` +
+:meth:`LspClient.default_config_text`), and which diagnostics mark a
+file as syntactically broken (:meth:`LspClient.is_syntax_error`).
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,10 +52,10 @@ QUIET_WINDOW = 1.5
 REQUEST_TIMEOUT = 30.0
 #: Timeout for the initialize handshake.
 INITIALIZE_TIMEOUT = 60.0
-#: Timeout for a repository's vhdl_ls.toml generation hook.
+#: Timeout for a repository's workspace-config generation hook.
 HOOK_TIMEOUT = 120.0
-
-DEFAULTLIB_GLOBS = ["**/*.vhd", "**/*.vhdl"]
+#: Timeout for a language server's version probe.
+VERSION_TIMEOUT = 5.0
 
 
 class LspError(RuntimeError):
@@ -95,6 +105,29 @@ def default_libraries_dir(binary: str) -> Path | None:
     return None
 
 
+def server_version(binary: str, timeout: float = VERSION_TIMEOUT) -> str | None:
+    """The language server's self-reported version, or None.
+
+    Tries ``--version`` and then ``-V``; the first non-empty line of the
+    output is returned. Never raises: a missing or broken binary simply
+    yields None (the caller records the error instead).
+    """
+    for flag in ("--version", "-V"):
+        try:
+            proc = subprocess.run(
+                [str(binary), flag],
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        output = (proc.stdout or proc.stderr).decode("utf-8", "replace").strip()
+        if output:
+            return output.splitlines()[0].strip()
+    return None
+
+
 def _parse_symbols(items: Any) -> tuple[SymbolInfo, ...]:
     if not isinstance(items, list):
         return ()
@@ -140,20 +173,25 @@ def path_to_uri(path: Path) -> str:
         return path.resolve().as_uri()
 
 
-class VhdlLsp:
-    """Async client for one vhdl_ls process rooted at one workspace."""
+class LspClient:
+    """Async client for one language-server process rooted at one workspace."""
+
+    #: LSP ``languageId`` for ``textDocument/didOpen``.
+    language_id: str = "vhdl"
+    #: Workspace config file the server reads (None: no config handling).
+    config_name: str | None = None
 
     def __init__(
         self,
         binary: str,
         workspace: Path,
-        libraries_dir: Path | None = None,
-        vhdl_ls_hook: str | None = None,
+        *,
+        config_hook: str | None = None,
     ) -> None:
         self._binary = binary
         self._workspace = workspace
-        self._libraries = libraries_dir
-        self._hook = vhdl_ls_hook
+        self._config_name = self.config_name
+        self._hook = config_hook
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
@@ -165,15 +203,29 @@ class VhdlLsp:
         self._supports_document_symbol = False
         self._owns_workspace_config = False
 
+    # -- server-specific surface ------------------------------------------
+
+    def build_args(self) -> list[str]:
+        """Extra command-line arguments (after the binary)."""
+        return []
+
+    def default_config_text(self) -> str | None:
+        """Built-in workspace config written when none exists (None: skip)."""
+        return None
+
+    def is_syntax_error(self, diagnostic: DiagnosticInfo) -> bool:
+        """Whether one diagnostic marks its file as syntactically broken."""
+        return diagnostic.severity == 1
+
+    def has_syntax_error(self, path: Path) -> bool:
+        return any(self.is_syntax_error(d) for d in self.diagnostics_for(path))
+
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
-        """Spawn vhdl_ls, perform the LSP handshake, and open the workspace."""
+        """Spawn the server, perform the LSP handshake, and open the workspace."""
         await self._ensure_workspace_config()
-        args = [self._binary]
-        if self._libraries is not None and self._libraries.is_dir():
-            args += ["-l", str(self._libraries)]
-        args.append("--silent")
+        args = [str(self._binary), *self.build_args()]
         self._proc = await asyncio.create_subprocess_exec(
             *args,
             cwd=str(self._workspace),
@@ -209,7 +261,9 @@ class VhdlLsp:
                 (caps or {}).get("documentSymbolProvider")
             )
             await self._notify("initialized", {})
-            logger.info("vhdl_ls started for %s", self._workspace)
+            logger.info(
+                "language server %s started for %s", self._binary, self._workspace
+            )
         except BaseException:
             await self.shutdown()
             raise
@@ -237,52 +291,44 @@ class VhdlLsp:
                 await self._reader
             self._reader = None
         self._fail_pending(LspError("language server shut down"))
-        if self._owns_workspace_config:
-            self._workspace.joinpath("vhdl_ls.toml").unlink(missing_ok=True)
+        if self._owns_workspace_config and self._config_name is not None:
+            self._workspace.joinpath(self._config_name).unlink(missing_ok=True)
 
     async def _ensure_workspace_config(self) -> None:
-        config_path = self._workspace / "vhdl_ls.toml"
+        if self._config_name is None:
+            return
+        config_path = self._workspace / self._config_name
         if config_path.exists():
-            logger.info("using repository-provided vhdl_ls.toml in %s", self._workspace)
+            logger.info(
+                "using repository-provided %s in %s",
+                self._config_name,
+                self._workspace,
+            )
             return
         if self._hook is not None:
             if await self._run_hook():
-                logger.info("vhdl_ls_hook generated %s", config_path)
+                logger.info("config hook generated %s", config_path)
                 return
             logger.warning(
-                "vhdl_ls_hook completed but %s is still missing; "
+                "config hook completed but %s is still missing; "
                 "generating the default config",
                 config_path.name,
             )
+        text = self.default_config_text()
+        if text is None:
+            return
         self._owns_workspace_config = True
-        files_list = ", ".join(f"'{glob}'" for glob in DEFAULTLIB_GLOBS)
-        lines = ["[libraries.defaultlib]", f"files = [{files_list}]", ""]
-        if self._libraries is not None and self._libraries.is_dir():
-            lib = str(self._libraries)
-            ieee_files = ", ".join(
-                f"'{lib}/{name}/*.vhdl'"
-                for name in ("ieee2008", "synopsys", "vital2000")
-            )
-            lines += [
-                "[libraries.std]",
-                f"files = ['{lib}/std/*.vhd']",
-                "is_third_party = true",
-                "",
-                "[libraries.ieee]",
-                f"files = [{ieee_files}]",
-                "is_third_party = true",
-            ]
-        config_path.write_text("\n".join(lines), encoding="utf-8")
+        config_path.write_text(text, encoding="utf-8")
 
     async def _run_hook(self) -> bool:
         """Run the repository's config hook at the workspace root.
 
-        The hook is a shell command that must leave a ``vhdl_ls.toml``
-        at the repository root. Returns True when it exits successfully
-        and the file now exists. Its output is owned by the hook, so
-        the server never removes it.
+        The hook is a shell command that must leave the workspace config
+        file at the repository root. Returns True when it exits
+        successfully and the file now exists. Its output is owned by the
+        hook, so the server never removes it.
         """
-        assert self._hook is not None
+        assert self._hook is not None and self._config_name is not None
         if sys.platform == "win32":
             shell_args = ["cmd", "/c", self._hook]
         else:
@@ -299,20 +345,20 @@ class VhdlLsp:
             proc.kill()
             await proc.wait()
             logger.warning(
-                "vhdl_ls_hook timed out after %.0fs in %s",
+                "config hook timed out after %.0fs in %s",
                 HOOK_TIMEOUT,
                 self._workspace,
             )
             return False
         if proc.returncode != 0:
             logger.warning(
-                "vhdl_ls_hook failed (exit %s) in %s: %s",
+                "config hook failed (exit %s) in %s: %s",
                 proc.returncode,
                 self._workspace,
                 err.decode(errors="replace").strip()[-500:],
             )
             return False
-        return (self._workspace / "vhdl_ls.toml").exists()
+        return config_path_exists(self._workspace, self._config_name)
 
     # -- document flow --------------------------------------------------------
 
@@ -325,7 +371,7 @@ class VhdlLsp:
             {
                 "textDocument": {
                     "uri": uri,
-                    "languageId": "vhdl",
+                    "languageId": self.language_id,
                     "version": 1,
                     "text": text,
                 }
@@ -340,10 +386,11 @@ class VhdlLsp:
     async def wait_until_quiet(self, timeout: float = QUIET_TIMEOUT) -> None:
         """Wait until the server stops emitting diagnostics.
 
-        vhdl_ls pushes ``publishDiagnostics`` for every file it analyzes
-        (including files we did not open) and emits nothing for clean
-        files, so the analysis is "done" when no new diagnostics have
-        arrived for ``QUIET_WINDOW`` seconds (bounded by ``timeout``).
+        The server pushes ``publishDiagnostics`` for the files it
+        analyzes (including files we did not open) and emits nothing for
+        clean files, so the analysis is "done" when no new diagnostics
+        have arrived for ``QUIET_WINDOW`` seconds (bounded by
+        ``timeout``).
         """
         self._quiet_event.clear()
         deadline = asyncio.get_running_loop().time() + timeout
@@ -351,7 +398,7 @@ class VhdlLsp:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 logger.warning(
-                    "vhdl_ls diagnostics not quiet after %.0fs in %s",
+                    "language server diagnostics not quiet after %.0fs in %s",
                     timeout,
                     self._workspace,
                 )
@@ -368,9 +415,6 @@ class VhdlLsp:
     def diagnostics_for(self, path: Path) -> tuple[DiagnosticInfo, ...]:
         """Diagnostics collected so far for one file (empty when clean)."""
         return tuple(self._diagnostics.get(path_to_uri(path), ()))
-
-    def has_syntax_error(self, path: Path) -> bool:
-        return any(d.code == "syntax_error" for d in self.diagnostics_for(path))
 
     @property
     def supports_document_symbol(self) -> bool:
@@ -457,7 +501,7 @@ class VhdlLsp:
                 try:
                     message = json.loads(body)
                 except json.JSONDecodeError:
-                    logger.warning("ignoring malformed LSP message from vhdl_ls")
+                    logger.warning("ignoring malformed LSP message")
                     continue
                 self._dispatch(message)
         finally:
@@ -513,6 +557,10 @@ class VhdlLsp:
         self._pending.clear()
 
 
+def config_path_exists(workspace: Path, config_name: str) -> bool:
+    return workspace.joinpath(config_name).exists()
+
+
 def _parse_content_length(header: bytes) -> int | None:
     for line in header.split(b"\r\n"):
         if line.lower().startswith(b"content-length:"):
@@ -521,13 +569,69 @@ def _parse_content_length(header: bytes) -> int | None:
     return None
 
 
+class VhdlLsp(LspClient):
+    """vhdl_ls client: ``-l <libraries> --silent`` + a ``vhdl_ls.toml``.
+
+    vhdl_ls reads its workspace/library configuration from a
+    ``vhdl_ls.toml`` in the repository root; the official distribution
+    ships an ``vhdl_libraries`` directory next to the binary.
+    """
+
+    language_id = "vhdl"
+    config_name = "vhdl_ls.toml"
+
+    _DEFAULTLIB_GLOBS = ("**/*.vhd", "**/*.vhdl")
+
+    def __init__(
+        self,
+        binary: str,
+        workspace: Path,
+        libraries_dir: Path | None = None,
+        vhdl_ls_hook: str | None = None,
+    ) -> None:
+        super().__init__(binary, workspace, config_hook=vhdl_ls_hook)
+        self._libraries = libraries_dir
+
+    def build_args(self) -> list[str]:
+        args: list[str] = []
+        if self._libraries is not None and self._libraries.is_dir():
+            args += ["-l", str(self._libraries)]
+        args.append("--silent")
+        return args
+
+    def is_syntax_error(self, diagnostic: DiagnosticInfo) -> bool:
+        return diagnostic.code == "syntax_error"
+
+    def default_config_text(self) -> str | None:
+        files_list = ", ".join(f"'{glob}'" for glob in self._DEFAULTLIB_GLOBS)
+        lines = ["[libraries.defaultlib]", f"files = [{files_list}]", ""]
+        if self._libraries is not None and self._libraries.is_dir():
+            lib = str(self._libraries)
+            ieee_files = ", ".join(
+                f"'{lib}/{name}/*.vhdl'"
+                for name in ("ieee2008", "synopsys", "vital2000")
+            )
+            lines += [
+                "[libraries.std]",
+                f"files = ['{lib}/std/*.vhd']",
+                "is_third_party = true",
+                "",
+                "[libraries.ieee]",
+                f"files = [{ieee_files}]",
+                "is_third_party = true",
+            ]
+        return "\n".join(lines)
+
+
 # Kept for import convenience (used by tests).
 __all__ = [
     "DiagnosticInfo",
+    "LspClient",
     "LspError",
     "LspTimeout",
     "SymbolInfo",
     "VhdlLsp",
     "default_libraries_dir",
     "path_to_uri",
+    "server_version",
 ]
