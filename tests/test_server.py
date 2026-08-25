@@ -20,7 +20,12 @@ from pydantic import ValidationError
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.models import INDEX_SCHEMA_VERSION
+from vhdl_rag_mcp.models import (
+    INDEX_SCHEMA_VERSION,
+    Chunk,
+    CollectionName,
+    ContentType,
+)
 from vhdl_rag_mcp.server import (
     VhdlRagApp,
     _acquire_lock,
@@ -39,6 +44,24 @@ ENV = {
 
 STD_MD = "# Standard\n\n## Reset conventions\n\nAsync resets are named rst_n.\n"
 FIFO_C = "int fifo_write(int *mem) {\n    return 0;\n}\n"
+
+
+def make_hdl_chunk(file: str, language: str, kind: str, commit: str) -> Chunk:
+    return Chunk(
+        repository="repo",
+        branch="main",
+        commit=commit,
+        file=file,
+        content_type=ContentType.SOURCE,
+        language=language,
+        collection=CollectionName.HDL,
+        symbol=file.rsplit("/", 1)[-1].replace(".", "_"),
+        symbol_kind=kind,
+        start_line=1,
+        end_line=5,
+        content=f"{language} fifo body referencing FIFO_DEPTH\n" * 3,
+        symbols=("FIFO_DEPTH",),
+    )
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -138,6 +161,7 @@ async def test_tools_registered(env) -> None:
     _app, mcp, _up = env
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == {
+        "search_hdl",
         "search_vhdl",
         "search_docs",
         "search_code",
@@ -170,6 +194,47 @@ async def test_search_tools_end_to_end(env) -> None:
     assert "No VHDL results" in tool_text(result)
 
 
+async def test_search_hdl_tool_language_filter(env) -> None:
+    app, mcp, _up = env
+    commit = app.states.get("repo").indexed_commit or "abc123"
+    chunks = [
+        make_hdl_chunk("rtl/fifo.vhd", "vhdl", "entity", commit),
+        make_hdl_chunk("tb/fifo_tb.v", "verilog", "design_unit", commit),
+    ]
+    dense = app.providers.embed_passages(
+        CollectionName.HDL, [c.content for c in chunks]
+    )
+    sparse = app.providers.embed_sparse_passages([c.content for c in chunks])
+    app.store.upsert_chunks(chunks, dense, sparse)
+
+    # No language: all HDL languages are searchable together.
+    all_text = tool_text(await mcp.call_tool("search_hdl", {"query": "fifo"}))
+    assert "repo:rtl/fifo.vhd" in all_text
+    assert "repo:tb/fifo_tb.v" in all_text
+
+    # Language filter: only Verilog chunks match.
+    verilog_text = tool_text(
+        await mcp.call_tool("search_hdl", {"query": "fifo", "language": "verilog"})
+    )
+    assert "repo:tb/fifo_tb.v" in verilog_text
+    assert "repo:rtl/fifo.vhd" not in verilog_text
+
+    # search_vhdl is the VHDL-only form of search_hdl.
+    vhdl_text = tool_text(await mcp.call_tool("search_vhdl", {"query": "fifo"}))
+    assert "repo:rtl/fifo.vhd" in vhdl_text
+    assert "repo:tb/fifo_tb.v" not in vhdl_text
+
+
+async def test_search_hdl_language_validation(env) -> None:
+    _app, mcp, _up = env
+    result = await mcp.call_tool(
+        "search_hdl", {"query": "fifo", "language": "verilog-2005"}
+    )
+    assert tool_text(result).startswith("Error: unknown HDL language")
+    result = await mcp.call_tool("search_hdl", {"query": "fifo", "language": "  "})
+    assert tool_text(result).startswith("Error: language must not be empty")
+
+
 async def test_search_tool_errors(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
@@ -199,8 +264,12 @@ async def test_get_source_tool(env) -> None:
     assert tool_text(result).startswith("Error:")
 
 
-async def test_repository_status_tool(env) -> None:
+async def test_repository_status_tool(
+    env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _app, mcp, _up = env
+    # Deterministic analyzer discovery: nothing on PATH.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     result = await mcp.call_tool("repository_status", {})
     text = tool_text(result)
     assert "- repo (ref main, domains: hdl, docs, code)" in text
@@ -211,6 +280,11 @@ async def test_repository_status_tool(env) -> None:
     broken_block = text.split("- broken (")[1]
     assert "last error:" in broken_block
     assert "never" in broken_block.split("\n")[1]
+    # The HDL analyzer section: both analyzers in fallback mode.
+    assert "HDL analyzers:" in text
+    assert "- vhdl_ls: fallback" in text
+    assert "- veridian: fallback" in text
+    assert "was not found" in text
 
 
 async def test_sync_repositories_contains_errors(env) -> None:
@@ -362,6 +436,19 @@ async def test_cli_config_flag_and_overrides(tmp_path: Path) -> None:
     assert cfg.sync_interval == 60
     assert cfg.log_level == "DEBUG"
     assert [r.name for r in cfg.repositories] == ["cli-repo"]
+    # --vhdl-ls-path/--veridian-path override the analyzer binaries.
+    cfg = config_from_args(
+        [
+            "--config",
+            str(path),
+            "--vhdl-ls-path",
+            "/opt/vhdl_ls/bin/vhdl_ls",
+            "--veridian-path",
+            "/opt/veridian/bin/veridian",
+        ]
+    )
+    assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
+    assert cfg.veridian_path == "/opt/veridian/bin/veridian"
 
 
 async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:

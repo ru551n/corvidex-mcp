@@ -54,6 +54,7 @@ from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitManager
 from .indexing import IndexPipeline
 from .logging_setup import setup_logging
+from .lsp import build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
 from .retrieval import RetrievalError, RetrievalService
 from .state import StateStore
@@ -67,20 +68,24 @@ _LOCK_HANDLE: object | None = None
 MCP_NAME = "vhdl_rag_mcp"
 
 INSTRUCTIONS = (
-    "Semantic search over an organization's VHDL code, VHDL-related "
-    "documentation, and general source code (C/C++, Python, ...). Use "
-    "search_vhdl for reference VHDL implementations (entities, "
-    "architectures, processes, packages, functions, reset/clock/FSM "
-    "patterns), search_docs for standards and design documentation, "
-    "search_code for general C/C++/Python code, and search_knowledge "
-    "when the answer may span any of them. Pass `symbols` to find every "
-    "chunk that references specific identifiers (cross-referencing). "
-    "Use get_source for the full text of a known file (exact lines, "
-    "exact commit). Every result carries source attribution "
-    "(repository, file, line range, commit). Use repository_status to "
-    "see what is indexed and whether a sync failed; "
-    "sync_repositories to force an update, reindex_repository to "
-    "rebuild one repository's index."
+    "Semantic search over an organization's HDL code (VHDL, Verilog, "
+    "SystemVerilog), HDL-related documentation, and general source code "
+    "(C/C++, Python, ...). Use search_hdl for reference HDL "
+    "implementations (entities/modules, architectures, processes/always "
+    "blocks, packages, functions, tasks, reset/clock/FSM patterns) with "
+    "an optional language filter ('vhdl' | 'verilog' | "
+    "'systemverilog'); search_vhdl is the VHDL-only form of search_hdl. "
+    "search_docs for standards and design documentation, search_code for "
+    "general C/C++/Python code, and search_knowledge when the answer may "
+    "span any of them. Pass `symbols` to find every chunk that references "
+    "specific identifiers (cross-referencing; works across HDL "
+    "languages). Use get_source for the full text of a known file (exact "
+    "lines, exact commit). Every result carries source attribution "
+    "(repository, file, line range, commit, language). Use "
+    "repository_status to see what is indexed and whether a sync failed; "
+    "it also reports the HDL analyzer status (vhdl_ls / Veridian). "
+    "sync_repositories to force an update, reindex_repository to rebuild "
+    "one repository's index."
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
@@ -282,16 +287,21 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
-    async def search_vhdl(
+    async def search_hdl(
         query: str,
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
         symbols: list[str] | None = None,
+        language: str | None = None,
     ) -> str:
-        """Search VHDL source: entities, architectures, processes, packages,
-        functions — semantic + exact-identifier hybrid search.
-        `symbols` restricts to chunks referencing the given identifiers
-        (e.g. ["fifo_write", "rst_n"]). `repository` restricts to one
+        """Search HDL source — VHDL, Verilog, and SystemVerilog share one
+        index: entities/modules (design units), architectures, processes
+        and always blocks, packages, functions, tasks. Semantic +
+        exact-identifier hybrid search. `language` restricts results to
+        one language ('vhdl' | 'verilog' | 'systemverilog'); omit it to
+        search all HDL. `symbols` restricts to chunks referencing the
+        given identifiers (e.g. ["FIFO_DEPTH"]) — cross-referencing
+        works across HDL languages. `repository` restricts to one
         repository name."""
         return _render(
             retrieval.search(
@@ -300,6 +310,35 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 limit,
                 repository,
                 tuple(symbols) if symbols else None,
+                language,
+            ),
+            "No HDL results. Try a broader query or a different language, "
+            "or check repository_status.",
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def search_vhdl(
+        query: str,
+        limit: int = DEFAULT_LIMIT,
+        repository: str | None = None,
+        symbols: list[str] | None = None,
+    ) -> str:
+        """Search VHDL source only (the language-restricted form of
+        search_hdl; use search_hdl for Verilog/SystemVerilog or a mix):
+        entities, architectures, processes, packages, functions —
+        semantic + exact-identifier hybrid search. `symbols` restricts
+        to chunks referencing the given identifiers (e.g.
+        ["fifo_write", "rst_n"]). `repository` restricts to one
+        repository name."""
+        return _render(
+            retrieval.search(
+                CollectionName.HDL,
+                query,
+                limit,
+                repository,
+                tuple(symbols) if symbols else None,
+                "vhdl",
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
         )
@@ -389,7 +428,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
     @mcp.tool(annotations=_READ_ONLY)
     async def repository_status() -> str:
         """Show every configured repository: ref, enabled domains, last
-        indexed commit, last sync time, and any sync error."""
+        indexed commit, last sync time, and any sync error. Also reports
+        the HDL analyzers (vhdl_ls for VHDL, Veridian for
+        Verilog/SystemVerilog): availability, version, and whether
+        semantic (lsp) or fallback parsing is in effect."""
         lines: list[str] = []
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
@@ -406,6 +448,18 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
             )
         if not lines:
             return "No repositories configured."
+        lines.append("")
+        lines.append("HDL analyzers:")
+        for analyzer in build_analyzer_statuses(
+            app.config.vhdl_ls_path, app.config.veridian_path
+        ).values():
+            if analyzer.available:
+                line = f"- {analyzer.name}: {analyzer.mode}, {analyzer.version}"
+                if analyzer.path:
+                    line += f" ({analyzer.path})"
+            else:
+                line = f"- {analyzer.name}: {analyzer.mode} — {analyzer.error}"
+            lines.append(line)
         return "\n".join(lines)
 
     @mcp.tool(annotations=_READ_WRITE)
@@ -529,6 +583,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override vhdl_ls_path",
     )
     parser.add_argument(
+        "--veridian-path",
+        default=None,
+        metavar="PATH",
+        help="override veridian_path",
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -542,7 +602,8 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
 
     The config file is selected by ``--config`` or
     ``VHDL_RAG_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
-    ``--vhdl-ls-path``/``--log-level`` override the file's values.
+    ``--vhdl-ls-path``/``--veridian-path``/``--log-level`` override the
+    file's values.
     """
     args = _parse_args(argv)
     config = load_config(Path(args.config) if args.config else None)
@@ -553,6 +614,8 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
         overrides["sync_interval"] = args.sync_interval
     if args.vhdl_ls_path is not None:
         overrides["vhdl_ls_path"] = args.vhdl_ls_path
+    if args.veridian_path is not None:
+        overrides["veridian_path"] = args.veridian_path
     if args.log_level is not None:
         overrides["log_level"] = args.log_level
     if overrides:
