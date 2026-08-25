@@ -1,9 +1,10 @@
 # vhdl-rag-mcp
 
 An MCP (Model Context Protocol) server that gives coding agents
-high-quality semantic search over an organization's VHDL code,
-VHDL-related documentation, and general source code (C/C++, Python,
-...) — all cross-referenced, all with exact source attribution.
+high-quality semantic search over an organization's HDL code (VHDL,
+Verilog, SystemVerilog), HDL-related documentation, and general source
+code (C/C++, Python, ...) — all cross-referenced, all with exact
+source attribution.
 
 Runs as an MCP server over stdio (installed from this Git
 repository with `uvx`, see [Installation](#installation)). No
@@ -14,7 +15,8 @@ models run locally (ONNX via FastEmbed).
 
 The main uses are **RAG** and **cross-referencing code against
 documentation**, for coding agents (Claude Code, Maki, or any MCP
-client) that implement or modify VHDL.
+client) that implement or modify HDL (VHDL, Verilog, or
+SystemVerilog).
 
 **RAG (Retrieval-Augmented Generation).** RAG is a technique for
 keeping a language model grounded in *your* material instead of only
@@ -33,11 +35,13 @@ pattern.
 **Cross-referencing code against documentation.** This is what makes
 the search more than three separate indexes: every chunk stores the
 identifiers it defines or references (`symbols`), so the agent can
-bridge the domains. A standard that says "asynchronous resets are
-named `rst_n`" can be checked against the VHDL that actually uses
-`rst_n` and the C testbench that drives it; a signal renamed in the
-RTL can be found in every doc section and test function that still
-references the old name. In practice that means:
+bridge the domains — and the HDL languages: a constant shared by a
+SystemVerilog package, a Verilog module, and a VHDL entity is found
+once and resolves to all of them. A standard that says
+"asynchronous resets are named `rst_n`" can be checked against the
+VHDL that actually uses `rst_n` and the C testbench that drives it; a
+signal renamed in the RTL can be found in every doc section and test
+function that still references the old name. In practice that means:
 
 - **Docs → code.** Follow a convention from the standard to every
   VHDL construct and test function that implements it.
@@ -55,19 +59,25 @@ is, not a stale snapshot.
 
 ## Capabilities
 
-- **Three indexed domains, one server.** VHDL source, documentation
-  (Markdown/reST/text), and general code (C/C++, Python, ...) live in
-  three Qdrant collections, each with a dense (jina v2) *and* a sparse
-  (BM25) vector per chunk.
+- **Three indexed domains, one server.** HDL source (VHDL, Verilog,
+  and SystemVerilog in one `hdl` collection, each chunk tagged with
+  its language), documentation (Markdown/reST/text), and general code
+  (C/C++, Python, ...) live in three Qdrant collections, each with a
+  dense (jina v2) *and* a sparse (BM25) vector per chunk.
 - **Hybrid search.** Every query runs Qdrant's native hybrid
   (dense + sparse, RRF-fused) query: semantic similarity *and* exact
   identifier matching in one call. Ask about `rst_n` and you get it.
-- **VHDL-aware chunking.** VHDL files are chunked per construct
+- **HDL-aware chunking.** VHDL files are chunked per construct
   (entity, architecture, process, package, function, component) using
   the [vhdl_ls](https://vhdl-lang.org/) language server
-  (`documentSymbol` with exact line ranges), with a structural
-  line-scanner fallback for files with syntax errors — and a
-  whole-file last resort so no VHDL is ever lost.
+  (`documentSymbol` with exact line ranges); Verilog and SystemVerilog
+  are chunked by [Veridian](https://github.com/chipsalliance/veridian)
+  (module/program/interface, package, inner functions and tasks,
+  normalized to the same cross-language model — module → `design_unit`,
+  `always_ff` → `process` — with the server-native kind kept as
+  `native_symbol_kind`). Both have a structural line-scanner fallback
+  for files with syntax errors, and a whole-file last resort so no HDL
+  is ever lost.
 - **Structure-aware chunking elsewhere.** Documentation is chunked per
   heading section; general code is chunked per top-level
   function/class by tree-sitter (any language with a grammar), with
@@ -75,8 +85,15 @@ is, not a stale snapshot.
 - **Cross-referencing.** Every chunk payload stores the identifiers it
   defines or references (`symbols`). Search tools accept a `symbols`
   filter that matches chunks referencing the given identifiers —
-  bridging docs ↔ VHDL ↔ test code (e.g. find every VHDL process and C
-  function that touch `fifo_write`).
+  bridging docs ↔ HDL ↔ test code (e.g. find every construct that
+  touches `fifo_write`), and across HDL languages (e.g. `FIFO_DEPTH`
+  in a VHDL generic, a Verilog localparam, and an SV package constant).
+- **Optional HDL analyzers, graceful degradation.** `vhdl_ls` and
+  Veridian are external binaries that are *not* bundled or installed by
+  this server: each is located via its config path or on `PATH`, and
+  when one is missing its files simply fall back to structural/generic
+  parsing. `repository_status` reports each analyzer's availability,
+  version, and mode (`lsp` or `fallback`).
 - **Exact source attribution.** Every result names repository, file,
   line range, and commit; `get_source` returns the exact current file
   (or a line range) from the synced working tree.
@@ -86,7 +103,8 @@ is, not a stale snapshot.
   the tools can force a sync or a full reindex at any time.
 - **Graceful degradation.** Failures are contained per repository and
   recorded in state; a broken repository never blocks the others or
-  the server.
+  the server. A missing language-server binary degrades that analyzer
+  to structural parsing (see above) instead of failing.
 - **Stdout is protocol-clean.** All logging goes to stderr and a
   rotating log file, so the server is safe to run from any MCP host.
 
@@ -101,13 +119,22 @@ Requirements:
   x86_64 and arm64), Windows, and macOS 14+ (Apple Silicon and
   Intel). CI verifies all three OS families, including arm64 Linux,
   on Python 3.12–3.14.
-- The `vhdl_ls` binary (only needed for repositories that contain
-  VHDL): install a release from
-  <https://vhdl-lang.org/> so `vhdl_ls` is on your `PATH`, or point
-  `vhdl_ls_path` at the binary. The `vhdl_libraries` directory shipped
-  next to the binary is auto-detected. Per repository, `vhdl_ls_hook`
-  may generate the `vhdl_ls.toml` workspace config (below); otherwise
-  the server writes a built-in default.
+- `vhdl_ls` (only needed for repositories that contain VHDL): install
+  a release from <https://vhdl-lang.org/> so `vhdl_ls` is on your
+  `PATH`, or point `vhdl_ls_path` at the binary. The
+  `vhdl_libraries` directory shipped next to the binary is
+  auto-detected. Per repository, `vhdl_ls_hook` may generate the
+  `vhdl_ls.toml` workspace config (below); otherwise the server writes
+  a built-in default.
+- Veridian (only needed for repositories that contain Verilog or
+  SystemVerilog): install it so `veridian` is on your `PATH`, or point
+  `veridian_path` at the binary. Per repository, `veridian_hook` may
+  generate the `veridian.yaml` workspace config (below); otherwise the
+  server writes a built-in default that declares the repository root as
+  the workdir and include/source roots, so `` `include ``/`` `define ``
+  resolve in-tree.
+- Both binaries are **optional**: without one, its files are indexed
+  with a structural/generic fallback instead.
 
 The package is installed from this Git repository (it is not on
 PyPI):
@@ -136,7 +163,8 @@ commented template on first run if absent).
 ```toml
 data_dir = "~/.local/share/vhdl-rag"   # all state lives here
 sync_interval = 300                    # seconds between periodic syncs
-vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path
+vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path (VHDL)
+veridian_path = "veridian"             # binary on PATH or full path (Verilog/SV)
 log_level = "INFO"
 
 # [qdrant]
@@ -148,11 +176,12 @@ name = "company-standards"             # unique, [A-Za-z0-9._-]
 url = "git@github.com:company/vhdl-standards.git"
 ref = "main"                           # branch (tracked on every sync),
                                        # tag, or commit SHA (pinned)
-# domains = ["vhdl", "docs", "code"]   # which domains to index (default: all)
-# exclude = ["sim", "build/*", "*.log"]# glob path excludes ('*' crosses '/');
-                                       # wildcard-free patterns exclude the subtree
-# vhdl_ls_hook = "make vhdl-ls-config" # command run at the repo root to
-                                       # generate vhdl_ls.toml when missing
+# domains = ["hdl", "docs", "code"]     # which domains to index (default: all)
+# exclude = ["sim", "build/*", "*.log"]  # glob path excludes ('*' crosses '/');
+                                        # wildcard-free patterns exclude the subtree
+# vhdl_ls_hook = "make vhdl-ls-config"  # command run at the repo root to
+                                        # generate vhdl_ls.toml when missing
+# veridian_hook = "make veridian-config"  # command to generate veridian.yaml
 
 # ... or index your own active checkout instead of a remote:
 [[repositories]]
@@ -167,8 +196,8 @@ Notes:
   there on first run). Select another file with the `VHDL_RAG_MCP_CONFIG`
   environment variable or the `--config PATH` flag. The top-level scalar
   options also have command-line overrides (`--data-dir`,
-  `--sync-interval`, `--vhdl-ls-path`, `--log-level`); the command
-  line wins.
+  `--sync-interval`, `--vhdl-ls-path`, `--veridian-path`,
+  `--log-level`); the command line wins.
 - **`url` or `path`** (exactly one): `url` is a remote Git repository,
   cloned and kept in sync by the server under `data_dir/repos`.
   `path` is a **local working repository** — your own checkout, indexed
@@ -193,8 +222,9 @@ Notes:
   commit. Deleting an untracked file is not tracked between syncs —
   `reindex` repairs it.
 - **Per-repository domains/excludes**: index only what a repository
-  should contribute — e.g. `domains = ["vhdl"]` for a pure IP
-  repository, `exclude = ["sim"]` to skip simulation-only files.
+  should contribute — e.g. `domains = ["hdl"]` for a pure IP
+  repository (`"vhdl"` is accepted as a legacy alias for `"hdl"`),
+  `exclude = ["sim"]` to skip simulation-only files.
 - **Changing embedding models** changes the dense vector dimension;
   the server fails loudly with an actionable message instead of
   corrupting the index (delete the collection or `data_dir` and
@@ -234,28 +264,32 @@ args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-
 
 | Tool | What it does |
 | --- | --- |
-| `search_vhdl(query, limit, repository, symbols)` | Hybrid search over VHDL source (entities, architectures, processes, packages, functions). |
+| `search_hdl(query, limit, repository, symbols, language)` | Hybrid search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
+| `search_vhdl(query, limit, repository, symbols)` | `search_hdl` restricted to VHDL (back-compat name). |
 | `search_docs(...)` | Same over documentation sections. |
 | `search_code(...)` | Same over general code units (functions/classes). |
 | `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
 | `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
-| `repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error. |
+| `repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode). |
 | `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
 | `reindex_repository(repository)` | Drop and rebuild one repository's index. |
 
 All search tools take an optional `repository` (name) filter plus
 `symbols: list[str]` — restrict results to chunks referencing any of
-the given identifiers.
-Results are rendered as markdown with source attribution, score, and
-referenced identifiers; content is fenced by domain.
+the given identifiers. `search_hdl`/`search_knowledge` additionally
+accept `language` (e.g. `"verilog"`) to restrict results by language.
+Results are rendered as markdown with source attribution, score,
+language, and referenced identifiers; HDL content is fenced by
+language.
 
 Example agent flow:
 
 1. `search_knowledge("asynchronous reset conventions")` → a docs
-   section plus VHDL processes that implement resets.
-2. `search_vhdl("reset", symbols=["rst_n"])` → every VHDL chunk
-   touching `rst_n`.
-3. `get_source("company-standards", "rtl/reset_ctrl.vhd", 12, 40)` →
+   section plus VHDL and Verilog constructs that implement resets.
+2. `search_hdl("reset", symbols=["rst_n"])` → every HDL chunk touching
+   `rst_n`, in every HDL language.
+3. `search_hdl("fifo", language="systemverilog")` → only SystemVerilog.
+4. `get_source("company-standards", "rtl/reset_ctrl.vhd", 12, 40)` →
    the exact lines to copy.
 
 ## Operations
@@ -283,9 +317,10 @@ $ uv run mypy src                                   # strict types
 $ uv run pytest -q                                  # offline test suite
 ```
 
-The test suite runs fully offline: local `file://` git remotes, a fake
-LSP server script, and fake embedding providers (one real-binary test
-is gated on the `VHDL_LS_TEST_BIN` environment variable).
+The test suite runs fully offline: local `file://` git remotes, fake
+LSP server scripts (vhdl_ls *and* Veridian), and fake embedding
+providers (real-binary tests are gated on the `VHDL_LS_TEST_BIN` and
+`VERIDIAN_TEST_BIN` environment variables).
 
 CI (`.github/workflows/ci.yml`) runs on every push to `main` and on
 pull requests: `ruff format --check`, `ruff check`, `mypy` (strict),
@@ -303,14 +338,15 @@ Layout:
 ```
 src/vhdl_rag_mcp/
   config.py        typed config (pydantic) + default template
-  state.py         atomic repository sync state
+  state.py         atomic repository sync state (schema-versioned)
   git_manager.py   async clone/fetch/checkout + incremental SyncPlan
   routing.py       extension -> domain classification (+domains/excludes)
-  lsp/client.py    vhdl_ls LSP client (handshake, quiet-wait, symbols)
+  lsp/             LSP transport (server-agnostic) + vhdl_ls and Veridian
+                   adapters + analyzer discovery/status
   embeddings/      FastEmbed dense/sparse providers (per-collection + shared)
   vector_store.py  Qdrant wrapper: hybrid RRF query, payload filters
-  indexing/        vhdl (LSP-primary), docs (sections), code (tree-sitter),
-                   pipeline (incremental sync driver)
-  retrieval.py     search service: fusion, source access
+  indexing/        vhdl (vhdl_ls), verilog (Veridian), docs (sections),
+                   code (tree-sitter), pipeline (incremental sync driver)
+  retrieval.py     search service: fusion, language filter, source access
   server.py        FastMCP tools + startup + periodic sync + lock
 ```
