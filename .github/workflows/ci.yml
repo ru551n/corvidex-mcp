@@ -47,36 +47,43 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
-  test-almalinux-9:
-    name: Tests (AlmaLinux 9, py${{ matrix.python-version }})
+  test-rhel:
+    name: Tests (${{ matrix.distro }}, py${{ matrix.python-version }})
     needs: quality
-    # Alma 9 has no hosted runner; run it as a container on Ubuntu.
-    # The floating :9 tag tracks the newest 9.z (9.6+ at the time of
-    # writing). The container's glibc (2.34) is the strictest floor in
-    # the locked wheel set, so a green run here verifies RHEL 9-
-    # compatible Linux in general. Python is not taken from the distro
-    # repos: uv provisions its own standalone CPython (the same way a
-    # fresh user install works), so the job only needs git + curl.
+    # RHEL 9 and RHEL 10 have no hosted runners, so each runs as a
+    # container on Ubuntu. The subscription-gated registry.redhat.com
+    # rhel images need credentials, so the official UBI images are
+    # used instead: free to pull, and they carry the same RHEL 9/10
+    # user space (UBI 9 glibc 2.34 is the strictest floor in the
+    # locked wheel set; UBI 10 is glibc 2.39, which is looser).
+    # Python is not taken from the distro repos: uv provisions its own
+    # standalone CPython (the same way a fresh user install works), so
+    # the job only needs git + curl at runtime.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
+      fail-fast: false
       matrix:
+        include:
+          - distro: "RHEL 9"
+            image: "registry.access.redhat.com/ubi9/ubi:latest"
+          - distro: "RHEL 10"
+            image: "registry.access.redhat.com/ubi10/ubi:latest"
         python-version: ["3.12", "3.13", "3.14"]
     container:
-      image: quay.io/almalinux/almalinux:9
+      image: ${{ matrix.image }}
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Install system packages
         run: |
           set -e
-          # The image ships curl-minimal, which conflicts with the full
-          # curl package: only git is missing and needs installing.
-          if command -v microdnf >/dev/null 2>&1; then
-            microdnf install -y git
-          else
-            dnf install -y git
-          fi
+          # Install only what is missing: some base images ship
+          # curl-minimal, which conflicts with the full curl package,
+          # so an unconditional "install curl" would fail there.
+          if command -v microdnf >/dev/null 2>&1; then PKG=microdnf; else PKG=dnf; fi
+          command -v git  || $PKG install -y git
+          command -v curl || $PKG install -y curl
           command -v git
           command -v curl
       - uses: actions/checkout@v4
