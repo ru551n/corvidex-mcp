@@ -13,13 +13,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fake_lsp_util import executable_lsp_script
+from fake_veridian_util import fake_veridian as make_fake_veridian
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
 from vhdl_rag_mcp.git_manager import GitError, GitManager
 from vhdl_rag_mcp.indexing.pipeline import IndexPipeline
-from vhdl_rag_mcp.models import CollectionName
+from vhdl_rag_mcp.models import CollectionName, ContentType
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
 
@@ -508,3 +509,300 @@ async def test_local_amend_without_content_change_advances_commit(
     await pipeline.sync_repository(config.repository("work"))
     assert states.get("work").indexed_commit == head2
     store.close()
+
+
+# -- multi-language HDL (VHDL + Verilog + SystemVerilog) ----------------------
+#
+# Fixtures share the identifier FIFO_DEPTH so cross-language
+# cross-referencing is exercised: the VHDL entity generic, the Verilog
+# localparam, and the SystemVerilog package constant.
+
+FIFO_VHDL_CROSS = """\
+entity fifo is
+  generic (FIFO_DEPTH : positive := 8);
+  port (
+    clk : in std_logic
+  );
+end entity fifo;
+
+architecture rtl of fifo is
+begin
+end architecture rtl;
+"""
+
+FIFO_V = """\
+module fifo #(
+  parameter int DEPTH = 8
+) (
+  input  logic clk,
+  input  logic wr,
+  output logic [7:0] rd_data
+);
+  localparam int FIFO_DEPTH = DEPTH;
+  logic [DEPTH-1:0] mem [0:DEPTH-1];
+
+  always_ff @(posedge clk) begin
+    if (wr) begin
+      mem[0] <= 8'h00;
+    end
+  end
+
+  function automatic int inc8(input int v);
+    begin
+      inc8 = v + 1;
+    end
+  endfunction
+endmodule
+"""
+
+FIFO_PKG_SV = """\
+package fifo_pkg;
+  localparam int FIFO_DEPTH = 8;
+
+  function automatic int clog2(input int v);
+    int n;
+    begin
+      n = 0;
+      while ((1 << n) < v)
+        n = n + 1;
+    end
+  endfunction
+endpackage
+"""
+
+FIFO_BAD_V = """\
+module fifo_ctrl (
+  input  logic clk,
+  input  logic rst_n,
+  output logic [FIFO_DEPTH-1:0] count
+);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      count <= '0';
+    end else begin
+      count <= count + 1'b1;
+    end
+  end
+// endmodule intentionally missing (syntax error)
+"""
+
+
+def _vrange(start: int, end: int) -> dict:
+    return {
+        "start": {"line": start, "character": 0},
+        "end": {"line": end, "character": 1},
+    }
+
+
+@pytest.fixture
+def hdl_remote(tmp_path: Path) -> Path:
+    up = tmp_path / "upstream-hdl"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "main")
+    (up / "rtl").mkdir()
+    (up / "rtl" / "fifo.vhd").write_text(FIFO_VHDL_CROSS)
+    (up / "rtl" / "fifo.v").write_text(FIFO_V)
+    (up / "rtl" / "fifo_pkg.sv").write_text(FIFO_PKG_SV)
+    (up / "rtl" / "fifo_bad.v").write_text(FIFO_BAD_V)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "first")
+    return up
+
+
+@pytest.fixture
+def fake_veridian(tmp_path: Path) -> Path:
+    """Fake Veridian mirroring its real tree shape (no always blocks)."""
+    symbols = {
+        "fifo.v": [
+            {
+                "name": "fifo",
+                "kind": 2,
+                "range": _vrange(0, 21),
+                "children": [
+                    {
+                        "name": "DEPTH",
+                        "kind": 26,
+                        "range": _vrange(1, 1),
+                        "children": [],
+                    },
+                    {
+                        "name": "clk",
+                        "kind": 7,
+                        "range": _vrange(3, 3),
+                        "children": [],
+                    },
+                    {
+                        "name": "mem",
+                        "kind": 13,
+                        "range": _vrange(8, 8),
+                        "children": [],
+                    },
+                    {
+                        "name": "inc8",
+                        "kind": 12,
+                        "range": _vrange(16, 20),
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+        "fifo_pkg.sv": [
+            {
+                "name": "fifo_pkg",
+                "kind": 4,
+                "range": _vrange(0, 11),
+                "children": [
+                    {
+                        "name": "FIFO_DEPTH",
+                        "kind": 26,
+                        "range": _vrange(1, 1),
+                        "children": [],
+                    },
+                    {
+                        "name": "clog2",
+                        "kind": 12,
+                        "range": _vrange(3, 10),
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+        # fifo_bad.v: parse error -> no symbol tree.
+    }
+    diagnostics = {
+        "fifo_bad.v": [
+            {
+                "source": "slang",
+                "message": " expected 'endmodule'",
+                "severity": 1,
+                "range": _vrange(13, 13),
+            }
+        ]
+    }
+    return make_fake_veridian(tmp_path, "fake_veridian", symbols, diagnostics)
+
+
+@pytest.fixture
+def hdl_env(tmp_path: Path, hdl_remote: Path, fake_lsp: Path, fake_veridian: Path):
+    config = AppConfig(
+        data_dir=tmp_path / "data-hdl",
+        vhdl_ls_path=str(fake_lsp),
+        veridian_path=str(fake_veridian),
+        repositories=[RepositoryConfig(name="hdl", url=str(hdl_remote), ref="main")],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    providers = fake_providers(config)
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        providers,
+        StateStore(config.state_dir / "repositories.json"),
+    )
+    yield config, store, pipeline, providers
+    store.close()
+
+
+def _all_hdl_chunks(store: VectorStore, providers: EmbeddingProviders) -> list:
+    scored = store.query(
+        CollectionName.HDL,
+        providers.embed_query(CollectionName.HDL, "fifo"),
+        providers.embed_sparse_query("fifo"),
+        limit=50,
+    )
+    return [sc.chunk for sc in scored]
+
+
+async def test_verilog_sv_indexed_via_veridian(hdl_env) -> None:
+    config, store, pipeline, providers = hdl_env
+    await pipeline.sync_repository(config.repository("hdl"))
+    # 3 VHDL (fake vhdl_ls) + 2 Verilog (module, function)
+    # + 2 SystemVerilog (package, function)
+    # + 2 broken-file fallback chunks (module, always_ff process).
+    assert store.count() == 9
+    chunks = _all_hdl_chunks(store, providers)
+    assert len(chunks) == 9
+    assert {c.language for c in chunks} == {"vhdl", "verilog", "systemverilog"}
+    assert all(c.collection is CollectionName.HDL for c in chunks)
+    by_file: dict[str, list] = {}
+    for chunk in chunks:
+        by_file.setdefault(chunk.file, []).append(chunk)
+    # Clean Verilog: the LSP tree gives module + inner function
+    # (Veridian does not expose always blocks).
+    assert {(c.symbol_kind, c.symbol) for c in by_file["rtl/fifo.v"]} == {
+        ("design_unit", "fifo"),
+        ("function", "inc8"),
+    }
+    inc8 = next(c for c in by_file["rtl/fifo.v"] if c.symbol == "inc8")
+    assert inc8.module == "fifo"
+    # Clean SystemVerilog: package + inner function.
+    assert {(c.symbol_kind, c.symbol) for c in by_file["rtl/fifo_pkg.sv"]} == {
+        ("package", "fifo_pkg"),
+        ("function", "clog2"),
+    }
+    # Syntax error: structural fallback inside the LSP session; the
+    # always_ff block becomes a process chunk attributed to its module.
+    bad = by_file["rtl/fifo_bad.v"]
+    assert {(c.symbol_kind, c.symbol) for c in bad} == {
+        ("design_unit", "fifo_ctrl"),
+        ("process", "always_ff"),
+    }
+    process = next(c for c in bad if c.symbol_kind == "process")
+    assert process.native_symbol_kind == "always_ff"
+    assert process.module == "fifo_ctrl"
+
+
+async def test_cross_language_cross_reference(hdl_env) -> None:
+    config, store, pipeline, providers = hdl_env
+    await pipeline.sync_repository(config.repository("hdl"))
+    dense = providers.embed_query(CollectionName.HDL, "FIFO_DEPTH")
+    sparse = providers.embed_sparse_query("FIFO_DEPTH")
+    scored = store.query(
+        CollectionName.HDL,
+        dense,
+        sparse,
+        limit=50,
+        should={"symbols": ("FIFO_DEPTH",)},
+    )
+    languages = {sc.chunk.language for sc in scored}
+    # The shared identifier is referenced in all three HDL languages.
+    assert languages == {"vhdl", "verilog", "systemverilog"}
+
+
+async def test_verilog_sv_fallback_without_veridian(
+    tmp_path: Path, hdl_remote: Path, fake_lsp: Path
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data-hdl-nover",
+        vhdl_ls_path=str(fake_lsp),
+        veridian_path=str(tmp_path / "no-such-veridian"),
+        repositories=[RepositoryConfig(name="hdl", url=str(hdl_remote), ref="main")],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    providers = fake_providers(config)
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        providers,
+        StateStore(config.state_dir / "repositories.json"),
+    )
+    try:
+        await pipeline.sync_repository(config.repository("hdl"))
+        # vhdl_ls still indexes the VHDL (3 chunks); without Veridian the
+        # three Verilog/SV files degrade to whole-file source chunks.
+        assert store.count() == 6
+        chunks = _all_hdl_chunks(store, providers)
+        sv = {c.file: c for c in chunks if c.language in ("verilog", "systemverilog")}
+        assert set(sv) == {"rtl/fifo.v", "rtl/fifo_pkg.sv", "rtl/fifo_bad.v"}
+        assert sv["rtl/fifo.v"].language == "verilog"
+        assert sv["rtl/fifo_pkg.sv"].language == "systemverilog"
+        for chunk in sv.values():
+            assert chunk.content_type is ContentType.SOURCE
+            assert chunk.collection is CollectionName.HDL
+            assert "FIFO_DEPTH" in chunk.symbols
+    finally:
+        store.close()
