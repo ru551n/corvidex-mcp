@@ -3,10 +3,10 @@
 Full app lifecycle against a local file:// git remote with fake
 embedding providers: initial sync, server restart (Qdrant local
 persistence + state round-trip), incremental sync from the persisted
-state, and the periodic auto-sync loop. One test, gated on the
-``VHDL_LS_TEST_BIN`` environment variable, runs the same lifecycle
-against the real vhdl_ls binary (real LSP handshake, diagnostics,
-documentSymbol).
+state, and the periodic auto-sync loop. Tests gated on the
+``VHDL_LS_TEST_BIN`` / ``VERIDIAN_TEST_BIN`` environment variables run
+the same flows against the real language-server binaries (real LSP
+handshake, diagnostics, documentSymbol).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from vhdl_rag_mcp.models import CollectionName
 from vhdl_rag_mcp.server import VhdlRagApp
 
 REAL_BIN = os.environ.get("VHDL_LS_TEST_BIN")
+REAL_VERIDIAN = os.environ.get("VERIDIAN_TEST_BIN")
 
 # The remote's initial content: 1 VHDL file (entity + architecture +
 # one >=5-line process), 2 docs sections, 2 C functions = 7 chunks.
@@ -80,6 +81,22 @@ int fifo_read(int *mem, int ptr) {
 }
 """
 NEW_VHDL = "entity new_top is end entity new_top;\n"
+REAL_VERIDIAN_PKG_SV = """\
+package fifo_pkg;
+  localparam int FIFO_DEPTH = 8;
+endpackage
+"""
+REAL_VERIDIAN_V = """\
+module fifo (
+  input logic clk,
+  output logic [7:0] dout
+);
+  localparam int FIFO_DEPTH = 8;
+  always_ff @(posedge clk) begin
+    dout <= FIFO_DEPTH[7:0];
+  end
+endmodule
+"""
 MODIFIED_C = """\
 int fifo_write(int *mem, int ptr) {
     mem[ptr] = 1;
@@ -301,5 +318,47 @@ async def test_real_lsp_end_to_end(tmp_path: Path, remote: Path) -> None:
         docs = app.store.chunks_for_file("repo", "docs/standard.md")
         reset = next(c for c in docs if c.heading == "Reset conventions")
         assert "rst_n" in reset.symbols
+    finally:
+        app.close()
+
+
+@pytest.mark.skipif(not REAL_VERIDIAN, reason="VERIDIAN_TEST_BIN not set")
+async def test_real_veridian_end_to_end(tmp_path: Path) -> None:
+    """Verilog/SV indexing against the real Veridian binary.
+
+    The two fixture files share FIFO_DEPTH, so the cross-language
+    cross-reference is asserted over the real index.
+    """
+    up = tmp_path / "upstream"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "main")
+    (up / "rtl").mkdir()
+    (up / "rtl" / "fifo.v").write_text(REAL_VERIDIAN_V)
+    (up / "rtl" / "fifo_pkg.sv").write_text(REAL_VERIDIAN_PKG_SV)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "first")
+
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        veridian_path=REAL_VERIDIAN,
+        repositories=[RepositoryConfig(name="repo", url=str(up), ref="main")],
+    )
+    app = make_app(config)
+    await app.sync_all()
+    try:
+        verilog = app.store.chunks_for_file("repo", "rtl/fifo.v")
+        sv = app.store.chunks_for_file("repo", "rtl/fifo_pkg.sv")
+        assert verilog and sv
+        assert {c.language for c in verilog} == {"verilog"}
+        assert {c.language for c in sv} == {"systemverilog"}
+        # Real Veridian (slang) produced LSP-primary chunks: the module
+        # (design_unit) and the package.
+        assert any(c.symbol_kind == "design_unit" for c in verilog)
+        assert any(c.symbol_kind == "package" for c in sv)
+        # Cross-language cross-reference over the shared identifier.
+        results = app.retrieval.search(
+            CollectionName.HDL, "fifo", symbols=("FIFO_DEPTH",), limit=20
+        )
+        assert {r.language for r in results} == {"verilog", "systemverilog"}
     finally:
         app.close()

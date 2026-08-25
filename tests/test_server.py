@@ -224,6 +224,20 @@ async def test_search_hdl_tool_language_filter(env) -> None:
     assert "repo:rtl/fifo.vhd" in vhdl_text
     assert "repo:tb/fifo_tb.v" not in vhdl_text
 
+    # Cross-referencing: both chunks reference FIFO_DEPTH.
+    sym_text = tool_text(
+        await mcp.call_tool("search_hdl", {"query": "fifo", "symbols": ["FIFO_DEPTH"]})
+    )
+    assert "repo:rtl/fifo.vhd" in sym_text
+    assert "repo:tb/fifo_tb.v" in sym_text
+    # An identifier no chunk references yields the empty message.
+    none_text = tool_text(
+        await mcp.call_tool(
+            "search_hdl", {"query": "fifo", "symbols": ["no_such_ident"]}
+        )
+    )
+    assert "No HDL results" in none_text
+
 
 async def test_search_hdl_language_validation(env) -> None:
     _app, mcp, _up = env
@@ -233,6 +247,26 @@ async def test_search_hdl_language_validation(env) -> None:
     assert tool_text(result).startswith("Error: unknown HDL language")
     result = await mcp.call_tool("search_hdl", {"query": "fifo", "language": "  "})
     assert tool_text(result).startswith("Error: language must not be empty")
+
+
+async def test_repository_status_analyzer_available(env, tmp_path: Path) -> None:
+    from fake_veridian_util import fake_veridian as make_fake_veridian
+
+    app, _mcp, _up = env
+    # A resolvable fake Veridian: the status reports lsp mode + version.
+    veridian = make_fake_veridian(tmp_path, "veridian", {})
+    config = app.config.model_copy(update={"veridian_path": str(veridian)})
+    app2 = VhdlRagApp(
+        config, providers=app.providers, store=app.store, states=app.states
+    )
+    mcp2 = create_mcp(app2)
+    try:
+        result = await mcp2.call_tool("repository_status", {})
+    finally:
+        app2.close()
+    text = tool_text(result)
+    assert "- veridian: lsp, veridian 9.9.9-test" in text
+    assert str(veridian) in text
 
 
 async def test_search_tool_errors(env) -> None:

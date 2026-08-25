@@ -806,3 +806,48 @@ async def test_verilog_sv_fallback_without_veridian(
             assert "FIFO_DEPTH" in chunk.symbols
     finally:
         store.close()
+
+
+async def test_all_analyzers_unavailable_falls_back(
+    tmp_path: Path, hdl_remote: Path
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data-hdl-none",
+        vhdl_ls_path=str(tmp_path / "no-such-vhdl-ls"),
+        veridian_path=str(tmp_path / "no-such-veridian"),
+        repositories=[RepositoryConfig(name="hdl", url=str(hdl_remote), ref="main")],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    providers = fake_providers(config)
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        providers,
+        StateStore(config.state_dir / "repositories.json"),
+    )
+    try:
+        await pipeline.sync_repository(config.repository("hdl"))
+        # No analyzer at all: the structural VHDL scan (entity +
+        # architecture; the fixture has no process) plus one whole-file
+        # chunk per Verilog/SV file.
+        assert store.count() == 5
+        chunks = _all_hdl_chunks(store, providers)
+        assert {c.file for c in chunks} == {
+            "rtl/fifo.vhd",
+            "rtl/fifo.v",
+            "rtl/fifo_pkg.sv",
+            "rtl/fifo_bad.v",
+        }
+        vhdl = [c for c in chunks if c.language == "vhdl"]
+        assert {(c.symbol_kind, c.symbol) for c in vhdl} == {
+            ("entity", "fifo"),
+            ("architecture", "rtl"),
+        }
+        # The entity chunk references the shared identifier.
+        assert any("FIFO_DEPTH" in c.symbols for c in vhdl)
+        for chunk in chunks:
+            assert chunk.collection is CollectionName.HDL
+    finally:
+        store.close()
