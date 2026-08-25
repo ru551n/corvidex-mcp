@@ -109,3 +109,53 @@ jobs:
         run: $HOME/.local/bin/uv sync --frozen
       - name: Run tests
         run: $HOME/.local/bin/uv run pytest -q
+
+  test-linux-arm64:
+    name: Tests (linux/arm64, py${{ matrix.python-version }})
+    needs: quality
+    # aarch64 Linux (Pi 4/5, Jetson, ARM dev boxes) has no hosted runner,
+    # so the suite runs in an arm64 container under QEMU user-mode
+    # emulation. All native dependencies ship aarch64 manylinux wheels,
+    # so "uv sync --frozen" verifies wheel resolution and the suite
+    # verifies execution on the architecture. Emulation is slow, so at
+    # most two Python versions run at a time.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Run tests in an arm64 container
+        run: |
+          set -euo pipefail
+          # Multi-arch base image (glibc 2.39); the purpose of this job is
+          # architecture coverage, not the glibc floor (that is UBI 9).
+          image="ubuntu:24.04"
+          docker pull --platform linux/arm64 "$image"
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "$PWD:/src" \
+            -w /src \
+            -e UV_PYTHON \
+            "$image" bash -c '
+              set -eu
+              apt-get update -y
+              PKGS=""
+              command -v git  || PKGS="$PKGS git"
+              command -v curl || PKGS="$PKGS curl"
+              if [ -n "$PKGS" ]; then
+                apt-get install -y --no-install-recommends ca-certificates $PKGS
+              fi
+              command -v git
+              command -v curl
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              export PATH="$HOME/.local/bin:$PATH"
+              uv sync --frozen
+              uv run pytest -q
+            '

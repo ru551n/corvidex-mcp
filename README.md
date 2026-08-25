@@ -97,9 +97,10 @@ Requirements:
 - [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥ 3.12
 - Git (with your normal credentials/SSH setup for private repos)
 - Supported platforms: Linux with glibc ≥ 2.34 (RHEL 9/10 and
-  derivatives such as AlmaLinux 9.6+, Ubuntu 24.04, Debian 12),
-  Windows, and macOS 14+ (Apple Silicon and Intel). CI verifies all
-  three OS families on Python 3.12–3.14.
+  derivatives such as AlmaLinux 9.6+, Ubuntu 24.04, Debian 12;
+  x86_64 and arm64), Windows, and macOS 14+ (Apple Silicon and
+  Intel). CI verifies all three OS families, including arm64 Linux,
+  on Python 3.12–3.14.
 - The `vhdl_ls` binary (only needed for repositories that contain
   VHDL): install a release from
   <https://vhdl-lang.org/> so `vhdl_ls` is on your `PATH`, or point
@@ -291,7 +292,9 @@ pull requests: `ruff format --check`, `ruff check`, `mypy` (strict),
 and the full test suite on a matrix of Python 3.12/3.13/3.14 across
 Ubuntu, Windows, and macOS, plus RHEL 9 and RHEL 10 container jobs
 (official UBI images; UBI 9's glibc 2.34 is the strictest floor in
-the dependency wheel set).
+the dependency wheel set), and linux/arm64 jobs that run the suite
+in an arm64 container under QEMU user-mode emulation (no hosted
+arm64 runners; this verifies the aarch64 wheels and execution).
 
 Layout:
 
