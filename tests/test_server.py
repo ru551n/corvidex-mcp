@@ -8,6 +8,7 @@ files, so no LSP server is spawned.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -19,12 +20,14 @@ from pydantic import ValidationError
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
+from vhdl_rag_mcp.models import INDEX_SCHEMA_VERSION
 from vhdl_rag_mcp.server import (
     VhdlRagApp,
     _acquire_lock,
     config_from_args,
     create_mcp,
 )
+from vhdl_rag_mcp.state import StateStore
 
 ENV = {
     **os.environ,
@@ -275,6 +278,62 @@ async def test_drop_unconfigured_repositories(env) -> None:
         assert app2.drop_unconfigured_repositories() == []
     finally:
         app2.close()
+
+
+async def test_migrate_index_is_a_noop_on_current_layout(env) -> None:
+    app, _mcp, _up = env
+    assert app.states.schema_version == INDEX_SCHEMA_VERSION
+    assert not app.states.needs_migration
+    assert app.migrate_index() is False
+
+
+async def test_migrate_index_migrates_a_v1_deployment(env) -> None:
+    app, _mcp, _up = env
+    # Simulate a v1 deployment: a flat (pre-schema) state document.
+    path = app.config.state_dir / "repositories.json"
+    path.write_text(
+        json.dumps(
+            {
+                "repo": {"name": "repo", "indexed_commit": "deadbeef"},
+                "broken": {"name": "broken"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    app.states = StateStore(path)
+    assert app.states.needs_migration
+    assert app.states.get("repo").indexed_commit == "deadbeef"
+
+    assert app.migrate_index() is True
+    assert app.states.get("repo").indexed_commit is None
+    assert app.states.get("broken").indexed_commit is None
+    assert not app.states.needs_migration
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == INDEX_SCHEMA_VERSION
+    assert app.migrate_index() is False  # idempotent
+
+
+async def test_migrate_index_drops_legacy_vhdl_collection(env) -> None:
+    from qdrant_client.models import Distance, VectorParams
+
+    app, _mcp, _up = env
+    # Simulate a v1 deployment: the legacy collection exists and the
+    # state document predates the schema version.
+    app.store._client.create_collection(
+        "vhdl",
+        vectors_config={"dense": VectorParams(size=4, distance=Distance.COSINE)},
+    )
+    app.store._existing = None  # fresh process: no cached collection set
+    path = app.config.state_dir / "repositories.json"
+    path.write_text(
+        json.dumps({"repo": {"name": "repo", "indexed_commit": "deadbeef"}}),
+        encoding="utf-8",
+    )
+    app.states = StateStore(path)
+
+    assert app.migrate_index() is True
+    assert "vhdl" not in app.store._collections()
+    assert "hdl" in app.store._collections()
 
 
 CLI_CONFIG = """\

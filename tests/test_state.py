@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from vhdl_rag_mcp.models import INDEX_SCHEMA_VERSION
 from vhdl_rag_mcp.state import RepositoryState, StateStore
 
 
@@ -45,7 +46,8 @@ def test_write_is_valid_json(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "repositories.json")
     store.set_indexed("repo1", "abc123")
     raw = json.loads((tmp_path / "repositories.json").read_text())
-    assert raw["repo1"]["indexed_commit"] == "abc123"
+    assert raw["schema_version"] == INDEX_SCHEMA_VERSION
+    assert raw["repositories"]["repo1"]["indexed_commit"] == "abc123"
 
 
 def test_corrupt_state_file_is_quarantined(tmp_path: Path) -> None:
@@ -82,3 +84,59 @@ def test_datetime_roundtrip(tmp_path: Path) -> None:
 def test_state_model_defaults() -> None:
     state = RepositoryState(name="x")
     assert state.model_dump()["indexed_commit"] is None
+
+
+def test_v1_state_file_is_detected(tmp_path: Path) -> None:
+    path = tmp_path / "repositories.json"
+    path.write_text(
+        json.dumps({"repo1": {"name": "repo1", "indexed_commit": "abc123"}}),
+        encoding="utf-8",
+    )
+    store = StateStore(path)
+    assert store.schema_version == 1
+    assert store.needs_migration
+    assert store.get("repo1").indexed_commit == "abc123"
+
+
+def test_migrate_resets_indexed_commits_and_persists_current(tmp_path: Path) -> None:
+    path = tmp_path / "repositories.json"
+    path.write_text(
+        json.dumps(
+            {
+                "repo1": {"name": "repo1", "indexed_commit": "abc123"},
+                "repo2": {"name": "repo2", "indexed_commit": "def456"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = StateStore(path)
+    assert store.migrate() is True
+    assert store.get("repo1").indexed_commit is None
+    assert store.get("repo2").indexed_commit is None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == INDEX_SCHEMA_VERSION
+    assert set(raw["repositories"]) == {"repo1", "repo2"}
+
+
+def test_migrate_is_idempotent_on_current_document(tmp_path: Path) -> None:
+    path = tmp_path / "repositories.json"
+    store = StateStore(path)
+    store.set_indexed("repo1", "abc123")
+    assert store.migrate() is False
+    reloaded = StateStore(path)
+    assert reloaded.schema_version == INDEX_SCHEMA_VERSION
+    assert not reloaded.needs_migration
+    assert reloaded.get("repo1").indexed_commit == "abc123"
+
+
+def test_reset_all_indexed_forgets_commits(tmp_path: Path) -> None:
+    path = tmp_path / "repositories.json"
+    store = StateStore(path)
+    store.set_indexed("repo1", "abc123")
+    store.set_indexed("repo2", "def456")
+    store.reset_all_indexed()
+    assert store.get("repo1").indexed_commit is None
+    assert store.get("repo2").indexed_commit is None
+    reloaded = StateStore(path)
+    assert reloaded.get("repo1").indexed_commit is None
+    assert reloaded.get("repo2").indexed_commit is None

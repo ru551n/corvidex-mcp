@@ -54,7 +54,7 @@ from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitManager
 from .indexing import IndexPipeline
 from .logging_setup import setup_logging
-from .models import CollectionName, SearchResult
+from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
 from .retrieval import RetrievalError, RetrievalService
 from .state import StateStore
 from .vector_store import VectorStore
@@ -128,6 +128,27 @@ class VhdlRagApp:
             docs_dim=self.providers.dimension(CollectionName.DOCS),
             code_dim=self.providers.dimension(CollectionName.CODE),
         )
+
+    def migrate_index(self) -> bool:
+        """Migrate the index to the current schema layout (v1 -> v2).
+
+        The legacy ``vhdl`` collection is dropped and every repository's
+        indexed commit is forgotten, so the next sync rebuilds the index
+        deterministically from git (no manual data migration). Safe to
+        call on every start: a current document is left untouched.
+        Returns True when a migration ran.
+        """
+        if not self.states.needs_migration:
+            return False
+        dropped = self.store.delete_legacy_vhdl()
+        self.states.migrate()
+        logger.info(
+            "index migrated to schema v%d (legacy vhdl collection dropped: %s); "
+            "repositories reindex deterministically on the next sync",
+            INDEX_SCHEMA_VERSION,
+            dropped,
+        )
+        return True
 
     # -- sync -----------------------------------------------------------------
 
@@ -466,6 +487,7 @@ async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
 async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
     logger.info("ensuring collections (embedding models download on first run)")
     app.ensure_collections()
+    app.migrate_index()
     dropped = app.drop_unconfigured_repositories()
     if dropped:
         logger.info(

@@ -92,6 +92,22 @@ def test_ensure_collection_dimension_drift(tmp_path: Path) -> None:
     store.close()
 
 
+def test_delete_legacy_vhdl_drops_only_the_v1_collection(
+    store: VectorStore,
+) -> None:
+    from qdrant_client.models import Distance, VectorParams
+
+    store._client.create_collection(
+        "vhdl",
+        vectors_config={"dense": VectorParams(size=4, distance=Distance.COSINE)},
+    )
+    store._existing = None  # fresh process: no cached collection set
+    assert store.delete_legacy_vhdl() is True
+    assert "vhdl" not in store._collections()
+    assert {"hdl", "docs", "code"} <= store._collections()
+    assert store.delete_legacy_vhdl() is False  # idempotent
+
+
 def test_point_id_deterministic_and_stable_across_commits() -> None:
     a = make_chunk()
     b = make_chunk(commit="def456")  # same content, new commit
