@@ -64,12 +64,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Explicit combinations: GitHub's matrix-include merging would
+        # collapse two include entries that share the same keys instead
+        # of cross-multiplying them with python-version.
         include:
           - distro: "RHEL 9"
             image: "registry.access.redhat.com/ubi9/ubi:latest"
+            python-version: "3.12"
+          - distro: "RHEL 9"
+            image: "registry.access.redhat.com/ubi9/ubi:latest"
+            python-version: "3.13"
+          - distro: "RHEL 9"
+            image: "registry.access.redhat.com/ubi9/ubi:latest"
+            python-version: "3.14"
           - distro: "RHEL 10"
             image: "registry.access.redhat.com/ubi10/ubi:latest"
-        python-version: ["3.12", "3.13", "3.14"]
+            python-version: "3.12"
+          - distro: "RHEL 10"
+            image: "registry.access.redhat.com/ubi10/ubi:latest"
+            python-version: "3.13"
+          - distro: "RHEL 10"
+            image: "registry.access.redhat.com/ubi10/ubi:latest"
+            python-version: "3.14"
     container:
       image: ${{ matrix.image }}
     env:
