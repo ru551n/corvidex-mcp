@@ -11,6 +11,7 @@ from vhdl_rag_mcp.config import (
     ALL_DOMAINS,
     AppConfig,
     ConfigError,
+    EmbeddingsConfig,
     QdrantConfig,
     RepositoryConfig,
     load_config,
@@ -25,6 +26,10 @@ log_level = "DEBUG"
 
 [qdrant]
 mode = "local"
+
+[embeddings]
+dense_max_tokens = 2048
+dense_threads = 8
 
 [[repositories]]
 name = "standards"
@@ -64,6 +69,8 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.repositories == []
     assert cfg.qdrant.mode == "local"
     assert cfg.qdrant.url is None
+    assert cfg.embeddings.dense_max_tokens == 1024
+    assert cfg.embeddings.dense_threads == 4
 
 
 def test_default_template_written(tmp_path: Path) -> None:
@@ -81,6 +88,8 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
     assert cfg.log_level == "DEBUG"
     assert cfg.qdrant.mode == "local"
+    assert cfg.embeddings.dense_max_tokens == 2048
+    assert cfg.embeddings.dense_threads == 8
     assert [r.name for r in cfg.repositories] == [
         "standards",
         "ip",
@@ -214,6 +223,19 @@ def test_qdrant_server_mode_requires_url() -> None:
     with pytest.raises(ValidationError, match=r"qdrant.url is required"):
         QdrantConfig(mode="server", url=None)
     assert QdrantConfig(mode="server", url="http://qdrant:6333").mode == "server"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"dense_max_tokens": 63},  # below the 64-token floor
+        {"dense_max_tokens": 8193},  # above the model context
+        {"dense_threads": 0},  # needs at least one thread
+    ],
+)
+def test_embeddings_bounds_rejected(kwargs: dict[str, int]) -> None:
+    with pytest.raises(ValidationError):
+        AppConfig(embeddings=EmbeddingsConfig(**kwargs))
 
 
 def test_repository_lookup_error() -> None:

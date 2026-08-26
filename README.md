@@ -171,6 +171,13 @@ log_level = "INFO"
 # mode = "local"                       # embedded (default) — or "server" with url
 # url = "http://qdrant:6333"
 
+# [embeddings]
+# dense_max_tokens = 1024              # passages are truncated to this many
+#                                      # tokens before dense embedding (model
+#                                      # context is 8192; attention memory is
+#                                      # quadratic in length)
+# dense_threads = 4                    # CPU threads for dense ONNX inference
+
 [[repositories]]
 name = "company-standards"             # unique, [A-Za-z0-9._-]
 url = "git@github.com:company/vhdl-standards.git"
@@ -207,6 +214,13 @@ Notes:
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely). `ref` is ignored for local working
   repositories.
+- **`[embeddings]`**: dense-inference bounds (memory safety).
+  `dense_max_tokens` (default 1024, maximum 8192) truncates a passage
+  before dense embedding; `dense_threads` (default 4) caps the ONNX
+  Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
+  attention work is quadratic in sequence length, so without these
+  bounds a single long chunk can make one embedding batch reserve tens
+  of GB.
 - **`vhdl_ls_hook`**: shell command run at the repository root that
   generates `vhdl_ls.toml` when the file is missing (before the
   `vhdl_ls` session for that repository). When no hook is set, the hook

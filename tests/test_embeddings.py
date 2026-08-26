@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -151,3 +152,64 @@ def test_sparse_count_mismatch_raises() -> None:
     )
     with pytest.raises(RuntimeError, match="returned 1 vectors for 2 texts"):
         provider.embed_sparse_passages(["a", "bb"])
+
+
+class _RecordingTokenizer:
+    def __init__(self) -> None:
+        self.caps: list[int] = []
+
+    def enable_truncation(self, max_length: int) -> None:
+        self.caps.append(max_length)
+
+
+class _StubModel:
+    def __init__(self) -> None:
+        self.tokenizer = _RecordingTokenizer()
+
+
+class StubTextEmbedding:
+    """Captures fastembed.TextEmbedding constructor arguments (offline)."""
+
+    instances: ClassVar[list[StubTextEmbedding]] = []
+
+    embedding_size = 4
+
+    def __init__(self, model_name: str, cache_dir: str | None = None, threads=None):
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        self.threads = threads
+        self.model = _StubModel()
+        StubTextEmbedding.instances.append(self)
+
+    def passage_embed(self, texts, batch_size=8):
+        for i, text in enumerate(texts):
+            yield np.array([float(i), float(len(text)), 0.0, 0.0], dtype=np.float32)
+
+    def query_embed(self, text, batch_size=8):
+        yield np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+
+def test_dense_token_cap_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    StubTextEmbedding.instances = []
+    monkeypatch.setattr("fastembed.TextEmbedding", StubTextEmbedding)
+    provider = FastEmbedProvider("fake/model", max_tokens=512, threads=3)
+    out = provider.embed_passages(["ab", "cdef"])
+    assert len(out) == 2
+    (stub,) = StubTextEmbedding.instances
+    assert stub.threads == 3
+    assert stub.model.tokenizer.caps == [512]
+
+
+def test_dense_no_token_cap_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    StubTextEmbedding.instances = []
+    monkeypatch.setattr("fastembed.TextEmbedding", StubTextEmbedding)
+    provider = FastEmbedProvider("fake/model")
+    assert provider.embed_passages(["ab"])
+    (stub,) = StubTextEmbedding.instances
+    assert stub.threads is None
+    assert stub.model.tokenizer.caps == []
+
+
+def test_dense_batch_size_default_is_bounded() -> None:
+    provider, _, _ = make_provider()
+    assert provider._batch_size == 8

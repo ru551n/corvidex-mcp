@@ -91,7 +91,18 @@ def _sparse_from(result: SparseVectorResult) -> SparseVectorData:
 
 
 class FastEmbedProvider:
-    """FastEmbed-based provider (dense + sparse); models download on first use."""
+    """FastEmbed-based provider (dense + sparse); models download on first use.
+
+    Dense inference is memory-bounded: ONNX Runtime's per-thread memory
+    arenas retain peak tensor sizes and never release them, and
+    transformer attention work is quadratic in sequence length. With the
+    model's full context (8192 tokens for the jina v2 models) and a
+    32-thread pool, a single long passage in a batch can make the arena
+    reserve tens of GB. ``max_tokens`` re-bounds the tokenizer truncation
+    (fastembed does not expose it) and ``threads``/``batch_size`` keep
+    the per-call peak small, so embedding stays bounded regardless of
+    chunk length.
+    """
 
     def __init__(
         self,
@@ -100,11 +111,15 @@ class FastEmbedProvider:
         cache_dir: Path | None = None,
         dense: DenseModelLike | None = None,
         sparse: SparseModelLike | None = None,
-        batch_size: int = 32,
+        batch_size: int = 8,
+        max_tokens: int | None = None,
+        threads: int | None = None,
     ) -> None:
         self._dense_model = dense_model
         self._sparse_model = sparse_model
         self._batch_size = batch_size
+        self._max_tokens = max_tokens
+        self._threads = threads
         self._dense: DenseModelLike | None = dense
         self._sparse: SparseModelLike | None = sparse
         self._cache_dir = cache_dir
@@ -116,7 +131,32 @@ class FastEmbedProvider:
 
             cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
             logger.info("loading dense model %s", self._dense_model)
-            self._dense = TextEmbedding(self._dense_model, cache_dir=cache_dir)
+            self._dense = TextEmbedding(
+                self._dense_model, cache_dir=cache_dir, threads=self._threads
+            )
+            self._apply_token_cap(self._dense)
+            logger.debug(
+                "dense model %s: max_tokens=%s threads=%s batch_size=%d",
+                self._dense_model,
+                self._max_tokens,
+                self._threads,
+                self._batch_size,
+            )
+
+    def _apply_token_cap(self, dense: DenseModelLike) -> None:
+        """Bound fastembed's tokenizer truncation to ``max_tokens``.
+
+        FastEmbed truncates at the model's full context (8192 tokens for
+        the jina v2 models) and does not expose a shorter limit; its
+        tokenizer object is re-configurable. Inert for test fakes that do
+        not carry the fastembed model/tokenizer attributes.
+        """
+        if self._max_tokens is None:
+            return
+        model = getattr(dense, "model", None)
+        tokenizer = getattr(model, "tokenizer", None)
+        if tokenizer is not None and hasattr(tokenizer, "enable_truncation"):
+            tokenizer.enable_truncation(max_length=self._max_tokens)
 
     def _ensure_sparse(self) -> None:
         """Lazily load the sparse model (and only the sparse model)."""

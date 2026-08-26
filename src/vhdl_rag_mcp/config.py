@@ -60,6 +60,43 @@ class QdrantConfig(BaseModel):
         return self
 
 
+class EmbeddingsConfig(BaseModel):
+    """Runtime bounds for dense embedding inference (memory safety).
+
+    The local dense models run through ONNX Runtime with the model's full
+    context (8192 tokens for the jina v2 models). Attention work is
+    quadratic in sequence length, and ONNX Runtime's per-thread memory
+    arenas retain peak tensor sizes without releasing them — a single
+    long passage in a batch can make one embedding call reserve tens of
+    GB. These bounds keep each embedding batch small no matter how long
+    the indexed text is.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    dense_max_tokens: int = Field(
+        default=1024,
+        ge=64,
+        le=8192,
+        description=(
+            "Maximum tokens a passage is truncated to before dense "
+            "embedding. The model's full context is 8192 tokens, but "
+            "longer passages rarely improve retrieval while their "
+            "attention work (and ONNX Runtime arena usage) grows "
+            "quadratically with length."
+        ),
+    )
+    dense_threads: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Intra-op threads for dense ONNX inference. Lower values "
+            "trade per-batch speed for lower memory pressure and less "
+            "CPU saturation during indexing and serving."
+        ),
+    )
+
+
 class RepositoryConfig(BaseModel):
     """One configured source repository.
 
@@ -244,6 +281,7 @@ class AppConfig(BaseModel):
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
 
     @field_validator("data_dir")
@@ -347,6 +385,14 @@ log_level = "INFO"
 # # or, for a remote Qdrant server:
 # # mode = "server"
 # # url = "http://qdrant:6333"
+
+# [embeddings]
+# # Max tokens a passage is truncated to before dense embedding (the
+# # model's full context is 8192; longer rarely helps and memory cost
+# # of attention is quadratic in length):
+# dense_max_tokens = 1024
+# # CPU threads for dense ONNX inference:
+# dense_threads = 4
 
 [[repositories]]
 name = "company-standards"

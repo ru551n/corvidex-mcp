@@ -12,8 +12,9 @@ from ..config import AppConfig
 from ..models import CollectionName, SparseVectorData
 from .provider import FastEmbedProvider
 
-#: Fixed local embedding models (no configuration surface): per-collection
-#: dense (jina v2, 768 dimensions) + one shared sparse BM25 model.
+#: Fixed local embedding models: per-collection dense (jina v2, 768
+#: dimensions) + one shared sparse BM25 model. Dense inference bounds
+#: (truncation, threads) come from the ``[embeddings]`` config section.
 HDL_MODEL = "jinaai/jina-embeddings-v2-base-code"
 DOCS_MODEL = "jinaai/jina-embeddings-v2-base-en"
 CODE_MODEL = "jinaai/jina-embeddings-v2-base-code"
@@ -43,6 +44,8 @@ class EmbeddingProviders:
                 name,
                 sparse_model=SPARSE_MODEL,
                 cache_dir=self._config.embed_cache_dir,
+                max_tokens=self._config.embeddings.dense_max_tokens,
+                threads=self._config.embeddings.dense_threads,
             )
             self._dense[name] = provider
         return provider
