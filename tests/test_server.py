@@ -8,6 +8,8 @@ files, so no LSP server is spawned.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -356,6 +358,82 @@ async def test_reindex_repository_tool(env) -> None:
     assert app.store.count() == before
     result = await mcp.call_tool("reindex_repository", {"repository": "nope"})
     assert tool_text(result).startswith("Error: unknown repository")
+
+
+async def _until(condition, timeout: float = 10.0) -> None:
+    """Poll ``condition`` until truthy or ``timeout`` elapses."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not condition():
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.05)
+
+
+async def test_local_poll_syncs_on_change(tmp_path: Path) -> None:
+    """The fast poller syncs a local working repository when its
+    working-tree fingerprint changes, and stays quiet while it is stable.
+    Remote repositories (none configured here) are never touched by it.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    (work / "docs.md").write_text(STD_MD)
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "first")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_sync_interval=1,
+        repositories=[RepositoryConfig(name="work", path=work)],
+    )
+    app = VhdlRagApp(config, providers=fake_providers(config))
+    app.ensure_collections()
+    await app.sync_all()
+    base = app.store.count()
+    assert base > 0
+
+    calls: list[str] = []
+    original = app.pipeline.sync_repository
+
+    async def spy(cfg):
+        calls.append(cfg.name)
+        await original(cfg)
+
+    app.pipeline.sync_repository = spy
+    poll = asyncio.create_task(app.local_poll())
+    try:
+        # A full cycle with no changes: no sync is triggered.
+        await asyncio.sleep(1.5)
+        assert calls == []
+        # A tracked edit changes the fingerprint: the poller syncs.
+        (work / "docs.md").write_text(STD_MD + "\nMore docs\n")
+        await _until(lambda: calls)
+        assert calls == ["work"]
+        assert app.store.count() >= base
+        fp_after = app.states.get("work").local_fingerprint
+        assert fp_after is not None
+        # The fingerprint is now current: the next cycle is quiet again.
+        calls.clear()
+        await asyncio.sleep(1.5)
+        assert calls == []
+        # A new untracked file changes the fingerprint too.
+        (work / "extra.md").write_text("# Extra\n\nUntracked docs.\n")
+        await _until(lambda: calls)
+        assert calls == ["work"]
+        assert app.store.count() > base
+        assert app.states.get("work").local_fingerprint != fp_after
+    finally:
+        poll.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poll
+    app.close()
+
+
+async def test_local_poll_disabled_without_local_repos(env) -> None:
+    """No local repositories configured: the poller exits immediately."""
+    app, _mcp, _up = env
+    assert not app._has_local_repos()
+    task = asyncio.create_task(app.local_poll())
+    await asyncio.wait_for(task, timeout=1.0)
 
 
 async def test_lock_single_instance(tmp_path: Path) -> None:

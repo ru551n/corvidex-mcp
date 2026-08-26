@@ -24,6 +24,7 @@ can never hang on a credential prompt.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
@@ -59,6 +60,13 @@ class SyncPlan:
     full: bool
     added_or_modified: tuple[str, ...] = ()
     deleted: tuple[str, ...] = ()
+    #: Local working repositories only: the current untracked files
+    #: (honoring ``.gitignore``). The pipeline fingerprints their content
+    #: before merging them into ``added_or_modified``/``deleted``.
+    untracked: tuple[str, ...] = ()
+    #: Local working repositories only: working-tree fingerprint at plan
+    #: time (see :meth:`GitManager.local_fingerprint`).
+    fingerprint: str | None = None
 
     @property
     def empty(self) -> bool:
@@ -118,6 +126,30 @@ class GitManager:
         return self._repos_dir / cfg.name
 
     # -- low-level git ----------------------------------------------------
+
+    async def local_fingerprint(self, cfg: RepositoryConfig) -> str:
+        """Cheap, read-only fingerprint of a local working repository.
+
+        ``sha256(HEAD + porcelain status)`` with untracked files expanded
+        (``--untracked-files=all``), so it changes when a commit lands, a
+        tracked file is staged/unstaged-edited, or an untracked file is
+        added, removed, or renamed. A content edit to an *existing*
+        untracked file does not change it (the path and its ``??`` line
+        are unchanged); those edits are picked up by the periodic
+        sync's plan-time content fingerprinting. The command is
+        non-mutating, so it tolerates the user's in-progress work.
+        """
+        assert cfg.path is not None
+        repo_dir = cfg.path
+        head = (await self._run(repo_dir, "rev-parse", "HEAD")).strip()
+        status = await self._try(
+            repo_dir, "status", "--porcelain", "-z", "--untracked-files=all"
+        )
+        h = hashlib.sha256()
+        h.update(head.encode("utf-8"))
+        h.update(b"\x00")
+        h.update((status or "").encode("utf-8"))
+        return h.hexdigest()
 
     async def _git(
         self, cwd: Path, *args: str, timeout: float = GIT_TIMEOUT
@@ -297,8 +329,11 @@ class GitManager:
 
         The index covers HEAD plus uncommitted changes (staged and
         unstaged) and untracked files (honoring ``.gitignore``);
-        attribution is the current HEAD commit. Deleting an untracked
-        file is not tracked between syncs — ``reindex`` repairs it.
+        attribution is the current HEAD commit. Untracked files are
+        reported via ``plan.untracked`` together with the working-tree
+        ``plan.fingerprint`` so the pipeline can fingerprint their
+        content, skip re-chunking unchanged ones, and detect deleted
+        untracked files.
         """
         assert cfg.path is not None
         repo_dir = cfg.path
@@ -315,6 +350,7 @@ class GitManager:
         branch = (
             await self._run(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
         ).strip()
+        fingerprint = await self.local_fingerprint(cfg)
         if last_commit is None:
             files = await self._list_working_files(repo_dir)
             logger.info(
@@ -325,7 +361,13 @@ class GitManager:
                 branch,
             )
             return SyncPlan(
-                cfg.name, branch, commit, full=True, added_or_modified=files
+                cfg.name,
+                branch,
+                commit,
+                full=True,
+                added_or_modified=files,
+                untracked=await self._local_untracked(repo_dir),
+                fingerprint=fingerprint,
             )
         added: set[str] = set()
         deleted: set[str] = set()
@@ -344,28 +386,35 @@ class GitManager:
                 )
                 files = await self._list_working_files(repo_dir)
                 return SyncPlan(
-                    cfg.name, branch, commit, full=True, added_or_modified=files
+                    cfg.name,
+                    branch,
+                    commit,
+                    full=True,
+                    added_or_modified=files,
+                    untracked=await self._local_untracked(repo_dir),
+                    fingerprint=fingerprint,
                 )
             a, d = parse_name_status_z(diff)
             added.update(a)
             deleted.update(d)
-        # Uncommitted work: index/worktree-vs-HEAD (staged + unstaged)
-        # plus untracked files (honoring .gitignore).
+        # Uncommitted work: index/worktree-vs-HEAD (staged + unstaged).
         worktree = await self._try(repo_dir, "diff", "-z", "--name-status", "HEAD")
         if worktree is not None:
             a, d = parse_name_status_z(worktree)
             added.update(a)
             deleted.update(d)
-        untracked = await self._run(
-            repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
-        )
-        added.update(p for p in untracked.split("\0") if p)
+        # Untracked files (honoring .gitignore) are reported separately;
+        # the pipeline fingerprints their content so unchanged files are
+        # not re-chunked and deleted untracked files are detected.
+        untracked = await self._local_untracked(repo_dir)
         added.difference_update(deleted)
         plan_added = tuple(sorted(added))
         plan_deleted = tuple(sorted(deleted))
-        if not plan_added and not plan_deleted:
+        if not plan_added and not plan_deleted and not untracked:
             logger.info("%s: working tree unchanged at %s", cfg.name, commit[:12])
-            return SyncPlan(cfg.name, branch, commit, full=False)
+            return SyncPlan(
+                cfg.name, branch, commit, full=False, fingerprint=fingerprint
+            )
         logger.info(
             "%s: %d added/modified, %d deleted (working tree at %s)",
             cfg.name,
@@ -380,7 +429,17 @@ class GitManager:
             full=False,
             added_or_modified=plan_added,
             deleted=plan_deleted,
+            untracked=untracked,
+            fingerprint=fingerprint,
         )
+
+    async def _local_untracked(self, repo_dir: Path) -> tuple[str, ...]:
+        """Untracked files of a working repository (honoring
+        ``.gitignore``), sorted."""
+        raw = await self._run(
+            repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
+        )
+        return tuple(sorted(p for p in raw.split("\0") if p))
 
     async def _list_working_files(self, repo_dir: Path) -> tuple[str, ...]:
         """Everything to index in a working repository: tracked (index)

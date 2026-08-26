@@ -237,6 +237,7 @@ def test_local_first_sync_is_full(manager: GitManager, work_repo: Path):
 def test_local_uncommitted_and_untracked(manager: GitManager, work_repo: Path):
     cfg = make_local_config(work_repo)
     first = run(manager.sync(cfg, None))
+    assert first.fingerprint is not None
     head = git(work_repo, "rev-parse", "HEAD")
     # Uncommitted work: modify one tracked file, add untracked files.
     (work_repo / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n-- v2\n")
@@ -247,9 +248,60 @@ def test_local_uncommitted_and_untracked(manager: GitManager, work_repo: Path):
     assert not plan.full
     assert plan.commit == head  # nothing committed: HEAD did not move
     assert plan.ref == "main"
-    assert sorted(plan.added_or_modified) == ["rtl/fifo.vhd", "src/helper.c"]
+    # Tracked edits land in added_or_modified; untracked files are reported
+    # separately for content-fingerprinting by the pipeline.
+    assert sorted(plan.added_or_modified) == ["rtl/fifo.vhd"]
+    assert plan.untracked == ("src/helper.c",)
     # .gitignore is honored: build/ is untracked but ignored.
-    assert not any(p.startswith("build/") for p in plan.added_or_modified)
+    assert not any(p.startswith("build/") for p in plan.untracked)
+    assert plan.fingerprint != first.fingerprint
+
+
+def test_local_fingerprint_tracks_working_tree(manager: GitManager, work_repo: Path):
+    cfg = make_local_config(work_repo)
+    fp = run(manager.local_fingerprint(cfg))
+    # Stable while the tree is untouched.
+    assert run(manager.local_fingerprint(cfg)) == fp
+    # Tracked edit (unstaged).
+    (work_repo / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n-- v2\n")
+    fp2 = run(manager.local_fingerprint(cfg))
+    assert fp2 != fp
+    # Commit: HEAD moves.
+    git(work_repo, "add", "-A")
+    git(work_repo, "commit", "-qm", "v2")
+    fp3 = run(manager.local_fingerprint(cfg))
+    assert fp3 != fp2
+    # Untracked file appears.
+    (work_repo / "src" / "helper.c").write_text("void help(void);\n")
+    fp4 = run(manager.local_fingerprint(cfg))
+    assert fp4 != fp3
+    # Untracked file removed.
+    (work_repo / "src" / "helper.c").unlink()
+    assert run(manager.local_fingerprint(cfg)) == fp3
+    # An edit to an *existing* untracked file does not change it (the
+    # pipeline's content fingerprinting covers that case instead).
+    (work_repo / "src" / "helper.c").write_text("void help(void);\n")
+    fp5 = run(manager.local_fingerprint(cfg))
+    (work_repo / "src" / "helper.c").write_text("void help2(void);\n")
+    assert run(manager.local_fingerprint(cfg)) == fp5
+
+
+def test_local_untracked_removal_is_empty_plan_for_pipeline(
+    manager: GitManager, work_repo: Path
+):
+    """The manager keeps reporting untracked files even when nothing else
+    changed; the pipeline (not the manager) decides what to do with them."""
+    cfg = make_local_config(work_repo)
+    first = run(manager.sync(cfg, None))
+    (work_repo / "src" / "helper.c").write_text("void help(void);\n")
+    plan = run(manager.sync(cfg, first.commit))
+    assert plan.added_or_modified == ()
+    assert plan.deleted == ()
+    assert plan.untracked == ("src/helper.c",)
+    # Fingerprint changed (a new untracked file appeared), so the fast
+    # poller will trigger this sync.
+    assert plan.fingerprint is not None
+    assert plan.fingerprint != first.fingerprint
 
 
 def test_local_committed_changes_are_incremental(manager: GitManager, work_repo: Path):

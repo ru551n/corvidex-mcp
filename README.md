@@ -100,7 +100,11 @@ is, not a stale snapshot.
 - **Incremental, self-maintaining index.** Repositories are synced
   from Git (clone/fetch/diff): only changed files are re-chunked and
   re-embedded. A background task syncs every `sync_interval` seconds;
-  the tools can force a sync or a full reindex at any time.
+  the tools can force a sync or a full reindex at any time. Local
+  working repositories get a fast change poller (`local_sync_interval`,
+  default 10 s) so in-progress work — commits, tracked edits, untracked
+  file add/remove — lands in the index within about one poll, read-only
+  and never interfering with the user's checkout.
 - **Graceful degradation.** Failures are contained per repository and
   recorded in state; a broken repository never blocks the others or
   the server. A missing language-server binary degrades that analyzer
@@ -163,6 +167,9 @@ commented template on first run if absent).
 ```toml
 data_dir = "~/.local/share/vhdl-rag"   # all state lives here
 sync_interval = 300                    # seconds between periodic syncs
+local_sync_interval = 10               # fast poller for local working
+                                       # repositories (0 disables; remote
+                                       # repositories ignore it)
 vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path (VHDL)
 veridian_path = "veridian"             # binary on PATH or full path (Verilog/SV)
 log_level = "INFO"
@@ -215,13 +222,21 @@ Notes:
   there on first run). Select another file with the `VHDL_RAG_MCP_CONFIG`
   environment variable or the `--config PATH` flag. The top-level scalar
   options also have command-line overrides (`--data-dir`,
-  `--sync-interval`, `--vhdl-ls-path`, `--veridian-path`,
-  `--log-level`); the command line wins.
+  `--sync-interval`, `--local-sync-interval`, `--vhdl-ls-path`,
+  `--veridian-path`, `--log-level`); the command line wins.
 - **`url` or `path`** (exactly one): `url` is a remote Git repository,
   cloned and kept in sync by the server under `data_dir/repos`.
   `path` is a **local working repository** — your own checkout, indexed
   in place and never modified (no clone, fetch, or checkout by the
-  server).
+  server). Local repositories are additionally watched by a fast
+  poller: every `local_sync_interval` seconds (default 10, 0 disables
+  it) the server computes a read-only fingerprint of the working tree
+  (HEAD + `git status` porcelain) and syncs the repository when it
+  changed — so commits, tracked edits, and untracked file add/remove
+  show up in the index within about one poll. Untracked file content
+  is fingerprinted at sync time: unchanged files are not re-chunked,
+  edited files are re-chunked, and deleted untracked files are dropped
+  from the index.
 - **`ref`**: a branch name is fetched and tracked on every sync. A tag
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely). `ref` is ignored for local working
@@ -262,8 +277,7 @@ Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
 - **Local working repositories** index the working tree: HEAD plus
   uncommitted changes (staged and unstaged) and untracked files
   (honoring `.gitignore`); chunks are attributed to the current HEAD
-  commit. Deleting an untracked file is not tracked between syncs —
-  `reindex` repairs it.
+  commit.
 - **Per-repository domains/excludes**: index only what a repository
   should contribute — e.g. `domains = ["hdl"]` for a pure IP
   repository (`"vhdl"` is accepted as a legacy alias for `"hdl"`),
@@ -282,7 +296,9 @@ $ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
 ```
 
 It serves MCP over stdio until the host closes the connection; a
-background task syncs all repositories every `sync_interval` seconds.
+background task syncs all repositories every `sync_interval` seconds,
+and local working repositories are additionally change-checked every
+`local_sync_interval` seconds by a fast, read-only poller.
 A single-instance lock (`data_dir/server.lock`) prevents two servers
 from sharing one data directory.
 

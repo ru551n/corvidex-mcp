@@ -95,6 +95,21 @@ DEFAULT_LIMIT = 8
 KNOWLEDGE_LIMIT = 10
 
 
+def _local_poll_done(task: asyncio.Task[None], name: str, in_flight: set[str]) -> None:
+    """Clear the in-flight flag and log a failed local poll sync.
+
+    The fast poller fires repository syncs as detached tasks so a slow
+    sync never blocks the polling loop; this is their completion
+    callback.
+    """
+    in_flight.discard(name)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("%s: local poll sync failed: %s", name, exc)
+
+
 class VhdlRagApp:
     """Runtime components and lifecycle for one server process."""
 
@@ -226,6 +241,55 @@ class VhdlRagApp:
             await asyncio.sleep(interval)
             logger.info("periodic sync started (%.0fs interval)", interval)
             await self.sync_all()
+
+    def _has_local_repos(self) -> bool:
+        """True when at least one local working repository is configured."""
+        return any(cfg.is_local for cfg in self.config.repositories)
+
+    async def local_poll(self) -> None:
+        """Fast change poller for local working repositories.
+
+        Every ``local_sync_interval`` seconds, compute a cheap, read-only
+        fingerprint (HEAD + porcelain status) for each local repository
+        and run that repository's sync when the fingerprint differs from
+        the one persisted at the last successful sync. This makes local
+        work (commits, tracked edits, untracked file add/remove) show up
+        in the index within about one interval instead of waiting for
+        ``sync_interval``. Remote repositories are untouched (they still
+        sync on ``sync_interval``). A sync failure is contained to the
+        repository and never stops the poller.
+        """
+        interval = float(self.config.local_sync_interval)
+        if interval <= 0 or not self._has_local_repos():
+            return
+        in_flight: set[str] = set()
+        while True:
+            await asyncio.sleep(interval)
+            for cfg in self.config.repositories:
+                if not cfg.is_local or cfg.name in in_flight:
+                    continue
+                try:
+                    fingerprint = await self.git.local_fingerprint(cfg)
+                except Exception as exc:  # contained per repository
+                    logger.debug(
+                        "%s: local poll could not fingerprint: %s",
+                        cfg.name,
+                        exc,
+                    )
+                    continue
+                if fingerprint == self.states.get(cfg.name).local_fingerprint:
+                    continue
+                in_flight.add(cfg.name)
+                logger.info("%s: local change detected (poll); syncing", cfg.name)
+                task = asyncio.create_task(self.pipeline.sync_repository(cfg))
+                # add_done_callback passes only the task; bind the per-repo
+                # arguments with a partial so the loop variable ``cfg`` is
+                # captured by value, not by reference.
+                task.add_done_callback(
+                    functools.partial(
+                        _local_poll_done, name=cfg.name, in_flight=in_flight
+                    )
+                )
 
     # -- helpers -----------------------------------------------------------------
 
@@ -534,14 +598,23 @@ def _acquire_lock(config: AppConfig) -> Path:
 
 
 async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
-    """Serve stdio with a background periodic-sync task."""
+    """Serve stdio with background sync tasks: the periodic sync (all
+    repositories) and the fast change poller (local working repos)."""
     sync_task = asyncio.create_task(app.periodic_sync())
+    poll_task = (
+        asyncio.create_task(app.local_poll()) if app._has_local_repos() else None
+    )
     try:
         await mcp.run_stdio_async()
     finally:
         sync_task.cancel()
+        if poll_task is not None:
+            poll_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sync_task
+        if poll_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
         app.close()
 
 
@@ -584,6 +657,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override sync_interval",
     )
     parser.add_argument(
+        "--local-sync-interval",
+        default=None,
+        type=int,
+        metavar="SECONDS",
+        help="override local_sync_interval (fast poller for local repos)",
+    )
+    parser.add_argument(
         "--vhdl-ls-path",
         default=None,
         metavar="PATH",
@@ -619,6 +699,8 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
         overrides["data_dir"] = Path(args.data_dir)
     if args.sync_interval is not None:
         overrides["sync_interval"] = args.sync_interval
+    if args.local_sync_interval is not None:
+        overrides["local_sync_interval"] = args.local_sync_interval
     if args.vhdl_ls_path is not None:
         overrides["vhdl_ls_path"] = args.vhdl_ls_path
     if args.veridian_path is not None:

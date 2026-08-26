@@ -22,6 +22,8 @@ its error in the state store and does not affect the others.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
 import logging
 from pathlib import Path
 
@@ -93,6 +95,7 @@ class IndexPipeline:
             logger.exception("%s: git sync failed: %s", cfg.name, exc)
             self._states.record_sync(cfg.name, str(exc))
             raise
+        plan, untracked_fps = self._refine_local_plan(cfg, plan)
         if plan.empty:
             if last_commit is not None and plan.commit != last_commit:
                 # HEAD/ref moved without a content change (an amend or
@@ -119,6 +122,7 @@ class IndexPipeline:
                     plan.ref,
                     plan.commit[:12],
                 )
+            self._apply_local_state(cfg, plan, untracked_fps)
             self._states.record_sync(cfg.name, None)
             return
         logger.info(
@@ -144,7 +148,75 @@ class IndexPipeline:
         self._states.set_indexed(
             cfg.name, plan.commit, file_count=len(plan.added_or_modified)
         )
+        self._apply_local_state(cfg, plan, untracked_fps)
         self._states.record_sync(cfg.name, None)
+
+    # -- local working repositories -------------------------------------------
+
+    def _refine_local_plan(
+        self, cfg: RepositoryConfig, plan: SyncPlan
+    ) -> tuple[SyncPlan, dict[str, str]]:
+        """Merge a local repo's untracked files into the plan using the
+        persisted content fingerprints.
+
+        Returns ``(refined_plan, untracked_fingerprints)``. New or
+        content-changed untracked files go into ``added_or_modified``;
+        untracked files indexed previously but no longer present go into
+        ``deleted``; unchanged untracked files are dropped (no
+        re-chunking). ``untracked_fingerprints`` is what the caller
+        persists after a successful sync. For remote repositories
+        (``plan.fingerprint is None``) the plan is returned unchanged.
+        """
+        if plan.fingerprint is None:
+            return plan, {}
+        stored = dict(self._states.get(cfg.name).untracked_indexed)
+        repo_dir = self._git.repo_dir(cfg)
+        fingerprints: dict[str, str] = {}
+        new_or_changed: list[str] = []
+        for path in plan.untracked:
+            digest = self._content_fingerprint(repo_dir / path)
+            if digest is None:
+                # Unreadable or gone mid-sync: not indexed this round (if it
+                # was indexed before it is dropped via the stored diff).
+                continue
+            fingerprints[path] = digest
+            if stored.get(path) != digest:
+                new_or_changed.append(path)
+        deleted_untracked = [p for p in stored if p not in fingerprints]
+        if not new_or_changed and not deleted_untracked:
+            return plan, fingerprints
+        refined = dataclasses.replace(
+            plan,
+            added_or_modified=tuple(
+                sorted(set(plan.added_or_modified) | set(new_or_changed))
+            ),
+            deleted=tuple(sorted(set(plan.deleted) | set(deleted_untracked))),
+        )
+        return refined, fingerprints
+
+    @staticmethod
+    def _content_fingerprint(path: Path) -> str | None:
+        """sha256 of a file's content, or ``None`` if unreadable."""
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        return hashlib.sha256(data).hexdigest()
+
+    def _apply_local_state(
+        self,
+        cfg: RepositoryConfig,
+        plan: SyncPlan,
+        untracked_fps: dict[str, str],
+    ) -> None:
+        """Record a local repo's working-tree fingerprint and untracked
+        content fingerprints after a successful sync. The caller's
+        subsequent state save makes it durable. No-op for remote repos."""
+        if plan.fingerprint is None:
+            return
+        state = self._states.get(cfg.name)
+        state.local_fingerprint = plan.fingerprint
+        state.untracked_indexed = untracked_fps
 
     # -- plan application ----------------------------------------------------
 

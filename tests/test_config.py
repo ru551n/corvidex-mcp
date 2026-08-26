@@ -70,6 +70,7 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     cfg = load_config(tmp_path / "config.toml", write_default=False)
     assert cfg.data_dir == Path("~/.local/share/vhdl-rag")
     assert cfg.sync_interval == 300
+    assert cfg.local_sync_interval == 10
     assert cfg.vhdl_ls_path == "vhdl_ls"
     assert cfg.log_level == "INFO"
     assert cfg.repositories == []
@@ -179,6 +180,18 @@ def test_data_dir_expanded(tmp_path: Path) -> None:
     assert cfg.state_dir == cfg.resolved_data_dir / "state"
     assert cfg.log_file == cfg.resolved_data_dir / "logs" / "vhdl-rag.log"
     assert cfg.qdrant_local_path == cfg.resolved_data_dir / "qdrant"
+
+
+def test_local_sync_interval_bounds(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("local_sync_interval = 0\n")  # 0 disables the poller
+    assert load_config(path).local_sync_interval == 0
+    path.write_text("local_sync_interval = -1\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
+    path.write_text("local_sync_interval = 3601\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,8 @@ def test_empty_store_when_no_file(tmp_path: Path) -> None:
     assert state.name == "repo1"
     assert state.indexed_commit is None
     assert state.last_sync_error is None
+    assert state.local_fingerprint is None
+    assert state.untracked_indexed == {}
 
 
 def test_set_indexed_persists_across_reload(tmp_path: Path) -> None:

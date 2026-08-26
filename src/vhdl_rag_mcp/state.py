@@ -45,6 +45,16 @@ class RepositoryState(BaseModel):
     last_sync_error: str | None = None
     #: Last full index run (clone or reindex).
     last_indexed_file_count: int = 0
+    #: Local working repositories only: cheap fingerprint (HEAD + porcelain
+    #: status) of the working tree at the last successful sync. The fast
+    #: local poller compares its freshly computed fingerprint to this value
+    #: to decide whether a sync is needed without running the full plan.
+    local_fingerprint: str | None = None
+    #: Local working repositories only: content fingerprints (sha256) of
+    #: untracked files at the last successful sync, keyed by
+    #: repository-relative path. Lets the sync plan skip re-chunking
+    #: unchanged untracked files and detect deleted untracked files.
+    untracked_indexed: dict[str, str] = {}
 
 
 class StateStore:

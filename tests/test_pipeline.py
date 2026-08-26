@@ -511,6 +511,98 @@ async def test_local_amend_without_content_change_advances_commit(
     store.close()
 
 
+async def test_local_untracked_file_lifecycle(tmp_path: Path, fake_lsp: Path) -> None:
+    """Untracked files in a local working repository follow their content.
+
+    New/changed untracked files are (re)chunked, unchanged ones are
+    skipped, and deletions (committed or plain ``rm``) remove the chunks.
+    The whole flow tolerates the user's in-progress work: nothing is
+    ever committed, stashed, or checked out by the pipeline.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    (work / "fifo.vhd").write_text(FIFO_VHDL)
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "first")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        vhdl_ls_path=str(fake_lsp),
+        repositories=[RepositoryConfig(name="work", path=work)],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    states = StateStore(config.state_dir / "repositories.json")
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        fake_providers(config),
+        states,
+    )
+    cfg = config.repository("work")
+    await pipeline.sync_repository(cfg)
+    assert store.count() > 0
+    assert states.get("work").local_fingerprint is not None
+
+    def helper_symbols() -> set[str]:
+        return {c.symbol for c in store.chunks_for_file("work", "helper.c")}
+
+    # New untracked file: indexed on the next sync.
+    (work / "helper.c").write_text("int help(void) { return 1; }\n")
+    await pipeline.sync_repository(cfg)
+    assert helper_symbols() == {"help"}
+    assert "helper.c" in states.get("work").untracked_indexed
+
+    # Unchanged tree: no re-chunking at all.
+    plan = await pipeline._git.sync(cfg, states.get("work").indexed_commit)
+    refined, _fps = pipeline._refine_local_plan(cfg, plan)
+    assert refined.empty
+    applied = 0
+
+    async def _spy(_cfg, _plan) -> None:
+        nonlocal applied
+        applied += 1
+        await pipeline._apply_plan(_cfg, _plan)
+
+    original = pipeline._apply_plan
+    pipeline._apply_plan = _spy
+    try:
+        await pipeline.sync_repository(cfg)
+    finally:
+        pipeline._apply_plan = original
+    assert applied == 0
+
+    # Content edit of the untracked file: re-chunked with the new content.
+    (work / "helper.c").write_text("int help2(void) { return 2; }\n")
+    await pipeline.sync_repository(cfg)
+    assert helper_symbols() == {"help2"}
+
+    # The user commits the untracked file: it becomes tracked; the index
+    # keeps its chunks and the untracked bookkeeping drops it.
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "add helper")
+    await pipeline.sync_repository(cfg)
+    assert helper_symbols() == {"help2"}
+    assert "helper.c" not in states.get("work").untracked_indexed
+
+    # The user commits a deletion: chunks are removed.
+    git(work, "rm", "-q", "helper.c")
+    git(work, "commit", "-qm", "drop helper")
+    await pipeline.sync_repository(cfg)
+    assert store.chunks_for_file("work", "helper.c") == []
+
+    # A deleted *untracked* file (never committed) is detected too.
+    (work / "scratch.c").write_text("int scratch(void) { return 3; }\n")
+    await pipeline.sync_repository(cfg)
+    assert {c.symbol for c in store.chunks_for_file("work", "scratch.c")} == {"scratch"}
+    (work / "scratch.c").unlink()
+    await pipeline.sync_repository(cfg)
+    assert store.chunks_for_file("work", "scratch.c") == []
+    assert "scratch.c" not in states.get("work").untracked_indexed
+    store.close()
+
+
 # -- multi-language HDL (VHDL + Verilog + SystemVerilog) ----------------------
 #
 # Fixtures share the identifier FIFO_DEPTH so cross-language

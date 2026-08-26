@@ -340,6 +340,16 @@ class AppConfig(BaseModel):
     sync_interval: int = Field(
         default=300, ge=10, description="Seconds between periodic git synchronizations"
     )
+    local_sync_interval: int = Field(
+        default=10,
+        ge=0,
+        le=3600,
+        description=(
+            "Seconds between change checks of local working repositories "
+            "(fast poller; remote repositories still sync on sync_interval). "
+            "0 disables the fast poller."
+        ),
+    )
     vhdl_ls_path: str = Field(
         default="vhdl_ls", description="Path to the vhdl_ls binary (or a PATH name)"
     )
@@ -452,6 +462,10 @@ _DEFAULT_TEMPLATE = """\
 
 data_dir = "~/.local/share/vhdl-rag"
 sync_interval = 300
+# # Local working repositories (path, not url) are change-checked this
+# # often by a fast poller (commits, tracked edits, untracked add/remove);
+# # 0 disables it. Remote repositories ignore it (they use sync_interval).
+# local_sync_interval = 10
 vhdl_ls_path = "vhdl_ls"
 veridian_path = "veridian"
 log_level = "INFO"
