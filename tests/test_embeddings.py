@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
@@ -231,3 +232,133 @@ def test_dense_no_token_cap_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dense_batch_size_default_is_bounded() -> None:
     provider, _, _ = make_provider()
     assert provider._batch_size == 8
+
+
+class _WordTokens:
+    def __init__(self, ids: list[str]) -> None:
+        self.ids = ids
+
+
+class _WordTokenizer:
+    """Whitespace tokenizer: one token per word (offline stand-in)."""
+
+    def __init__(self) -> None:
+        self.caps: list[int] = []
+
+    def enable_truncation(self, max_length: int) -> None:
+        self.caps.append(max_length)
+
+    def encode(self, text: str):
+        return _WordTokens(text.split())
+
+    def decode(self, ids: list[str], skip_special_tokens: bool = True) -> str:
+        return " ".join(ids)
+
+
+class _WordModel:
+    def __init__(self) -> None:
+        self.tokenizer = _WordTokenizer()
+
+
+class WordFakeDense(FakeDense):
+    """FakeDense exposing a ``.model.tokenizer`` (word-level)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _WordModel()
+
+
+def _word_provider(
+    dense_cache_dir: Path | None = None,
+    index_max_tokens: int = 16,
+    indexing_workers: int = 1,
+) -> tuple[FastEmbedProvider, WordFakeDense, FakeSparse]:
+    dense, sparse = WordFakeDense(), FakeSparse()
+    provider = FastEmbedProvider(
+        "fake/model",
+        cache_dir=None,
+        dense=dense,
+        sparse=sparse,
+        index_max_tokens=index_max_tokens,
+        indexing_workers=indexing_workers,
+        dense_cache_dir=dense_cache_dir,
+    )
+    return provider, dense, sparse
+
+
+def test_index_truncation_at_token_cap() -> None:
+    provider, dense, _ = _word_provider(index_max_tokens=2)
+    out = provider.embed_passages(["alpha beta gamma"])
+    # passage_embed sees the truncated text (2 of 3 tokens).
+    assert dense.passage_calls == [["alpha beta"]]
+    assert len(out) == 1
+
+
+def test_length_aware_batch_ordering() -> None:
+    provider, dense, _ = _word_provider(index_max_tokens=16)
+    out = provider.embed_passages(["x y z", "a", "p q"])  # 3, 1, 2 tokens
+    # Misses are sent length-sorted ...
+    assert dense.passage_calls == [["a", "p q", "x y z"]]
+    # ... but results map back to the original order.
+    assert out[0] == [2.0, 5.0, 0.0, 0.0]  # "x y z"
+    assert out[1] == [0.0, 1.0, 0.0, 0.0]  # "a"
+    assert out[2] == [1.0, 3.0, 0.0, 0.0]  # "p q"
+
+
+def test_dense_vector_cache_hit(tmp_path) -> None:
+    provider, dense, _ = _word_provider(dense_cache_dir=tmp_path / "dc")
+    first = provider.embed_passages(["hello world", "second doc"])
+    assert len(dense.passage_calls) == 1  # all misses on a cold cache
+    second = provider.embed_passages(["hello world", "second doc"])
+    assert second == first  # vectors identical
+    assert len(dense.passage_calls) == 1  # both now cache hits
+    assert len(list((tmp_path / "dc").rglob("*.npy"))) == 2
+
+
+def test_dense_vector_cache_isolated_per_model(tmp_path) -> None:
+    cache = tmp_path / "dc"
+    p1, _, _ = _word_provider(dense_cache_dir=cache)
+    p1._dense_model = "fake/model-a"
+    p1.embed_passages(["same text"])
+    p2, d2, _ = _word_provider(dense_cache_dir=cache)
+    p2._dense_model = "fake/model-b"
+    out = p2.embed_passages(["same text"])
+    assert len(d2.passage_calls) == 1  # no cross-model cache reuse
+    assert len(out) == 1
+
+
+def test_dense_vector_cache_corrupt_recomputes(tmp_path) -> None:
+    cache = tmp_path / "dc"
+    provider, dense, _ = _word_provider(dense_cache_dir=cache)
+    provider.embed_passages(["hello world"])
+    (vec_path,) = list(cache.rglob("*.npy"))
+    vec_path.write_bytes(b"not a numpy array")
+    out = provider.embed_passages(["hello world"])
+    assert len(dense.passage_calls) == 2  # recomputed after corruption
+    assert len(out) == 1
+    # The corrupted entry was rewritten with valid data.
+    assert np.load(vec_path).shape[0] == 4
+
+
+def test_parallel_fallback_when_misses_small() -> None:
+    # workers > 1 but misses <= batch_size stay on the serial path
+    # (no pool spawn).
+    provider, dense, _ = _word_provider(indexing_workers=4)
+    out = provider.embed_passages(["a", "b c", "d e f"])
+    assert dense.passage_calls == [["a", "b c", "d e f"]]
+    assert len(out) == 3
+
+
+def test_even_slices_balanced() -> None:
+    from vhdl_rag_mcp.embeddings.provider import _even_slices
+
+    assert _even_slices(10, 4) == [(0, 3), (3, 6), (6, 9), (9, 10)]
+    assert _even_slices(3, 8) == [(0, 1), (1, 2), (2, 3)]  # workers > count
+    assert _even_slices(0, 4) == []
+    assert _even_slices(10, 1) == [(0, 10)]
+    # No item is skipped or duplicated.
+    for count, workers in [(1089, 8), (11, 4), (1, 1)]:
+        flat = [
+            i for start, end in _even_slices(count, workers) for i in range(start, end)
+        ]
+        assert flat == list(range(count))

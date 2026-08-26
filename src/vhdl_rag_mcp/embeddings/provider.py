@@ -18,6 +18,7 @@ a ``mode`` argument.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -90,6 +91,53 @@ def _sparse_from(result: SparseVectorResult) -> SparseVectorData:
     )
 
 
+def _even_slices(count: int, workers: int) -> list[tuple[int, int]]:
+    """Split ``count`` items into ``workers`` contiguous, balanced
+    ``(start, end)`` half-open ranges. The largest slice holds at most
+    one item more than the smallest (low per-slice padding variance)."""
+    n = min(workers, count)
+    if n <= 0:
+        return []
+    size = (count + n - 1) // n
+    return [(i, min(i + size, count)) for i in range(0, count, size)]
+
+
+def _embed_slice(
+    args: tuple[str, str | None, int | None, bool, int | None, int, list[str]],
+) -> list[np.ndarray]:
+    """Worker for data-parallel dense embedding (#3).
+
+    Runs in a spawned child process with its own ONNX Runtime session.
+    Receives already length-sorted, pre-truncated texts and returns
+    float32 vectors in the same order. Kept module-level so it pickles.
+    """
+    (
+        model_name,
+        cache_dir,
+        threads,
+        arena,
+        max_tokens,
+        batch_size,
+        texts,
+    ) = args
+    from fastembed import TextEmbedding
+
+    te = TextEmbedding(
+        model_name,
+        cache_dir=cache_dir,
+        threads=threads,
+        enable_cpu_mem_arena=arena,
+    )
+    if max_tokens is not None:
+        tokenizer = getattr(te.model, "tokenizer", None)
+        if tokenizer is not None and hasattr(tokenizer, "enable_truncation"):
+            tokenizer.enable_truncation(max_length=max_tokens)
+    return [
+        np.asarray(v, dtype=np.float32).ravel()
+        for v in te.passage_embed(list(texts), batch_size=batch_size)
+    ]
+
+
 class FastEmbedProvider:
     """FastEmbed-based provider (dense + sparse); models download on first use.
 
@@ -117,6 +165,9 @@ class FastEmbedProvider:
         max_tokens: int | None = None,
         threads: int | None = None,
         enable_arena: bool = False,
+        index_max_tokens: int | None = None,
+        indexing_workers: int = 1,
+        dense_cache_dir: Path | None = None,
     ) -> None:
         self._dense_model = dense_model
         self._sparse_model = sparse_model
@@ -124,6 +175,9 @@ class FastEmbedProvider:
         self._max_tokens = max_tokens
         self._threads = threads
         self._enable_arena = enable_arena
+        self._index_max_tokens = index_max_tokens
+        self._indexing_workers = indexing_workers
+        self._dense_cache_dir = dense_cache_dir
         self._dense: DenseModelLike | None = dense
         self._sparse: SparseModelLike | None = sparse
         self._cache_dir = cache_dir
@@ -167,6 +221,115 @@ class FastEmbedProvider:
         if tokenizer is not None and hasattr(tokenizer, "enable_truncation"):
             tokenizer.enable_truncation(max_length=self._max_tokens)
 
+    def _tokenizer(self) -> object | None:
+        model = getattr(self._dense, "model", None)
+        tokenizer = getattr(model, "tokenizer", None)
+        return tokenizer
+
+    def _prepare(self, text: str) -> tuple[str, int]:
+        """Truncate a passage to ``index_max_tokens`` (speed/memory).
+
+        Returns ``(truncated_text, token_len)``. Inert (returns the text
+        unchanged with length 0) when no cap is set or the model exposes
+        no tokenizer (test fakes), so behaviour then is unchanged.
+        """
+        if self._index_max_tokens is None:
+            return text, 0
+        tokenizer = self._tokenizer()
+        if tokenizer is None or not hasattr(tokenizer, "encode"):
+            return text, 0
+        tok: Any = tokenizer
+        enc = tok.encode(text)
+        ids = list(enc.ids)
+        if len(ids) > self._index_max_tokens:
+            ids = ids[: self._index_max_tokens]
+        truncated: str = tok.decode(ids, skip_special_tokens=True)
+        return truncated, len(ids)
+
+    def _cache_key(self, text: str) -> str:
+        """Content-addressed key: the vector is a pure function of the
+        model and the (already truncated) passage text — batch order and
+        padding are masked out, so they do not affect it."""
+        if self._dense_cache_dir is None:
+            return ""
+        h = hashlib.sha256()
+        h.update(self._dense_model.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(text.encode("utf-8"))
+        return h.hexdigest()
+
+    def _cache_load(self, key: str) -> np.ndarray | None:
+        if self._dense_cache_dir is None or not key:
+            return None
+        path = self._dense_cache_dir / key[:2] / f"{key}.npy"
+        if not path.exists():
+            return None
+        try:
+            arr = np.load(path)
+            return np.asarray(arr, dtype=np.float32)
+        except Exception as exc:  # corrupt/absent -> recompute
+            logger.debug("dense cache read failed for %s: %s", key[:12], exc)
+            return None
+
+    def _cache_store(self, key: str, vec: np.ndarray) -> None:
+        if self._dense_cache_dir is None or not key:
+            return
+        path = self._dense_cache_dir / key[:2] / f"{key}.npy"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, vec)
+        except Exception as exc:
+            logger.warning("dense vector cache write failed: %s", exc)
+
+    def _embed_texts(self, texts: list[str]) -> list[np.ndarray]:
+        """Serial embedding of an already length-sorted text list."""
+        assert self._dense is not None
+        vectors = [
+            np.asarray(v, dtype=np.float32).ravel()
+            for v in self._dense.passage_embed(texts, batch_size=self._batch_size)
+        ]
+        if len(vectors) != len(texts):
+            raise RuntimeError(
+                f"embedding model returned {len(vectors)} vectors "
+                f"for {len(texts)} texts"
+            )
+        return vectors
+
+    def _embed_parallel(self, items: list[tuple[str, int]]) -> list[np.ndarray]:
+        """Data-parallel embedding (N spawn workers, each its own model).
+
+        ``items`` are length-sorted ``(text, token_len)`` pairs; they are
+        split into contiguous slices so each worker's batches stay
+        length-uniform (low padding). Results are concatenated in slice
+        order, preserving the length-sorted order.
+        """
+        texts = [t for t, _ in items]
+        n = min(self._indexing_workers, len(texts))
+        if n <= 1:
+            return self._embed_texts(texts)
+        slices = [texts[start:end] for start, end in _even_slices(len(texts), n)]
+        args = [
+            (
+                self._dense_model,
+                str(self._cache_dir) if self._cache_dir is not None else None,
+                self._threads,
+                self._enable_arena,
+                self._max_tokens,
+                self._batch_size,
+                s,
+            )
+            for s in slices
+        ]
+        from multiprocessing import get_context
+
+        ctx = get_context("spawn")
+        with ctx.Pool(processes=len(slices)) as pool:
+            outs = pool.map(_embed_slice, args)
+        flat: list[np.ndarray] = []
+        for o in outs:
+            flat.extend(o)
+        return flat
+
     def _ensure_sparse(self) -> None:
         """Lazily load the sparse model (and only the sparse model)."""
         if self._sparse is None:
@@ -191,16 +354,49 @@ class FastEmbedProvider:
             return []
         self._ensure_dense()
         assert self._dense is not None
-        vectors = [
-            np.asarray(v, dtype=np.float32).ravel()
-            for v in self._dense.passage_embed(texts, batch_size=self._batch_size)
-        ]
-        if len(vectors) != len(texts):
-            raise RuntimeError(
-                f"embedding model returned {len(vectors)} vectors "
-                f"for {len(texts)} texts"
-            )
-        return [[float(x) for x in v] for v in vectors]
+
+        # #4: pre-truncate each passage to index_max_tokens.
+        prepared = [self._prepare(t) for t in texts]
+
+        # #2: content-addressed cache lookup (reindex / repeated content
+        # and shared data_dir become cache hits).
+        results: list[np.ndarray | None] = [None] * len(prepared)
+        keys: list[str] = []
+        misses: list[tuple[int, str, int]] = []
+        for i, (text, length) in enumerate(prepared):
+            key = self._cache_key(text)
+            keys.append(key)
+            cached = self._cache_load(key)
+            if cached is not None:
+                results[i] = cached
+            else:
+                misses.append((i, text, length))
+
+        if misses:
+            # #1: length-aware batching — sort misses by token length so
+            # each batch pads to a similar length (less wasted compute).
+            misses.sort(key=lambda m: m[2])
+            if self._indexing_workers > 1 and len(misses) > self._batch_size:
+                ordered = self._embed_parallel([(t, length) for _, t, length in misses])
+            else:
+                ordered = self._embed_texts([t for _, t, _ in misses])
+            if len(ordered) != len(misses):
+                raise RuntimeError(
+                    f"embedding produced {len(ordered)} vectors for "
+                    f"{len(misses)} cache-miss texts"
+                )
+            for new_pos, (orig_i, _, _) in enumerate(misses):
+                vec = ordered[new_pos]
+                results[orig_i] = vec
+                # #2: store the freshly computed vector.
+                self._cache_store(keys[orig_i], vec)
+
+        out: list[list[float]] = []
+        for r in results:
+            if r is None:  # defensive: every slot is populated above
+                raise RuntimeError("internal: unpopulated embedding slot")
+            out.append([float(x) for x in r])
+        return out
 
     def embed_query(self, text: str) -> list[float]:
         self._ensure_dense()

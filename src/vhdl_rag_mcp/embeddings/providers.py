@@ -12,12 +12,9 @@ from ..config import AppConfig
 from ..models import CollectionName, SparseVectorData
 from .provider import FastEmbedProvider
 
-#: Fixed local embedding models: per-collection dense (jina v2, 768
-#: dimensions) + one shared sparse BM25 model. Dense inference bounds
-#: (truncation, threads) come from the ``[embeddings]`` config section.
-HDL_MODEL = "jinaai/jina-embeddings-v2-base-code"
-DOCS_MODEL = "jinaai/jina-embeddings-v2-base-en"
-CODE_MODEL = "jinaai/jina-embeddings-v2-base-code"
+#: Shared sparse BM25 model (dense models are per-collection and
+#: configurable via the ``[embeddings]`` config section; the defaults
+#: there are the jina v2 base models).
 SPARSE_MODEL = "Qdrant/bm25"
 
 
@@ -30,23 +27,28 @@ class EmbeddingProviders:
         self._sparse: FastEmbedProvider | None = None
 
     def _dense_model_name(self, collection: CollectionName) -> str:
+        e = self._config.embeddings
         return {
-            CollectionName.HDL: HDL_MODEL,
-            CollectionName.DOCS: DOCS_MODEL,
-            CollectionName.CODE: CODE_MODEL,
+            CollectionName.HDL: e.hdl_model,
+            CollectionName.DOCS: e.docs_model,
+            CollectionName.CODE: e.code_model,
         }[collection]
 
     def _dense_provider(self, collection: CollectionName) -> FastEmbedProvider:
         name = self._dense_model_name(collection)
         provider = self._dense.get(name)
         if provider is None:
+            eb = self._config.embeddings
             provider = FastEmbedProvider(
                 name,
                 sparse_model=SPARSE_MODEL,
                 cache_dir=self._config.embed_cache_dir,
-                max_tokens=self._config.embeddings.dense_max_tokens,
-                threads=self._config.embeddings.dense_threads,
-                enable_arena=self._config.embeddings.dense_enable_cpu_mem_arena,
+                max_tokens=eb.dense_max_tokens,
+                threads=eb.dense_threads,
+                enable_arena=eb.dense_enable_cpu_mem_arena,
+                index_max_tokens=eb.index_max_tokens,
+                indexing_workers=eb.indexing_workers,
+                dense_cache_dir=self._config.dense_cache_dir,
             )
             self._dense[name] = provider
         return provider

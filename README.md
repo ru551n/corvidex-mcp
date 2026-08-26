@@ -177,6 +177,18 @@ log_level = "INFO"
 #                                      # context is 8192; attention memory is
 #                                      # quadratic in length)
 # dense_threads = 4                    # CPU threads for dense ONNX inference
+# dense_enable_cpu_mem_arena = false   # ONNX CPU memory arena (fast but
+#                                      # retains peak buffers, ~+2.5 GB;
+#                                      # false = lower RAM, ~35% slower)
+# index_max_tokens = 512               # indexed passages are truncated to
+#                                      # this many tokens (queries are
+#                                      # unaffected; must be <= dense_max_tokens)
+# indexing_workers = 1                 # worker processes for data-parallel
+#                                      # dense embedding (1 = single process;
+#                                      # each worker loads its own model copy)
+# hdl_model = "jinaai/jina-embeddings-v2-base-code"
+# docs_model = "jinaai/jina-embeddings-v2-base-en"    # any fastembed
+# code_model = "jinaai/jina-embeddings-v2-base-code"  # TextEmbedding name
 
 [[repositories]]
 name = "company-standards"             # unique, [A-Za-z0-9._-]
@@ -214,17 +226,27 @@ Notes:
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely). `ref` is ignored for local working
   repositories.
-- **`[embeddings]`**: dense-inference bounds (memory safety).
+- **`[embeddings]`**: dense-inference bounds (memory safety and speed).
   `dense_max_tokens` (default 1024, maximum 8192) truncates a passage
   before dense embedding; `dense_threads` (default 4) caps the ONNX
 Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
-   attention work is quadratic in sequence length, so without these
-   bounds a single long chunk can make one embedding batch reserve tens
-   of GB. `dense_enable_cpu_mem_arena` (default false) additionally
-   disables the ONNX CPU memory arena: buffers are released after each
-   inference, halving peak RAM (measured 5.4 → 2.9 GB) at a ~35%
-   indexing-time cost — set true when indexing speed matters more and
-   RAM is plentiful.
+    attention work is quadratic in sequence length, so without these
+    bounds a single long chunk can make one embedding batch reserve tens
+    of GB. `dense_enable_cpu_mem_arena` (default false) additionally
+    disables the ONNX CPU memory arena: buffers are released after each
+    inference, halving peak RAM (measured 5.4 → 2.9 GB) at a ~35%
+    indexing-time cost — set true when indexing speed matters more and
+    RAM is plentiful. `index_max_tokens` (default 512) truncates
+    *indexed* passages before embedding (queries are unaffected — they
+    are short): on the measured corpus quality is unchanged at 512 while
+    indexing is faster and lighter. `indexing_workers` (default 1) runs
+    data-parallel embedding with N worker processes during indexing
+    (each loads its own model copy, ~0.6 GB); quality is identical.
+    `hdl_model`/`docs_model`/`code_model` (defaults: jina v2 base
+    code/en/code) select the dense model per collection; any fastembed
+    `TextEmbedding` model name works. Computed dense vectors are cached
+    content-addressed under `data_dir/dense-cache`, so reindexing, branch
+    flips, and duplicated content skip re-embedding.
 - **`vhdl_ls_hook`**: shell command run at the repository root that
   generates `vhdl_ls.toml` when the file is missing (before the
   `vhdl_ls` session for that repository). When no hook is set, the hook
@@ -315,7 +337,8 @@ Example agent flow:
 - **Data directory** (`data_dir`): Qdrant collections, the per-repo
   Git working trees (`<name>/`), sync state
   (`state/repositories.json`), the log file (`logs/vhdl-rag-mcp.log`),
-  and the lock file. Deleting it resets the index.
+  the model cache (`embed-cache`), the dense-vector cache
+  (`dense-cache`), and the lock file. Deleting it resets the index.
 - **State & retries**: a repository's `indexed_commit` advances only
   after its index update fully succeeded; a failed sync keeps the
   previous commit and the next sync retries the same diff.
