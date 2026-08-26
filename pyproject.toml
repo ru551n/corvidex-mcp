@@ -39,6 +39,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# The quality-test corpus is fixture *data* (a miniature user
+# repository being indexed), not project code: exempt from lint.
+extend-exclude = ["tests/quality/corpus"]
 
 [tool.ruff.lint]
 select = [

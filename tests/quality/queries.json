@@ -1,0 +1,86 @@
+[
+ {
+  "id": "oddr-semantic",
+  "collection": "hdl",
+  "strict": true,
+  "query": "odd-rate data output register for the clocked interface",
+  "expect": "rtl/oddr_output.vhd"
+ },
+ {
+  "id": "fifo-semantic",
+  "collection": "hdl",
+  "strict": true,
+  "query": "write pointer and full flag of the fifo with asynchronous reset",
+  "expect": "rtl/fifo_ctrl.vhd"
+ },
+ {
+  "id": "divider-semantic",
+  "collection": "hdl",
+  "strict": true,
+  "query": "divide the clock frequency using a counter",
+  "expect": "rtl/clk_divider.vhd"
+ },
+ {
+  "id": "fifo-identifier",
+  "collection": "hdl",
+  "strict": true,
+  "query": "fifo_ctrl rst_n",
+  "expect": "rtl/fifo_ctrl.vhd"
+ },
+ {
+  "id": "divider-identifier",
+  "collection": "hdl",
+  "strict": false,
+  "query": "clk_divider enable",
+  "expect": "rtl/clk_divider.vhd"
+ },
+ {
+  "id": "install-semantic",
+  "collection": "docs",
+  "strict": true,
+  "query": "how do I install the tool with pip from pypi",
+  "expect": "docs/installing.rst"
+ },
+ {
+  "id": "layout-semantic",
+  "collection": "docs",
+  "strict": false,
+  "query": "where do the rtl sources live in this repository",
+  "expect": "docs/structure.rst"
+ },
+ {
+  "id": "conventions-semantic",
+  "collection": "docs",
+  "strict": false,
+  "query": "naming conventions for modules and signals",
+  "expect": "docs/structure.rst"
+ },
+ {
+  "id": "notes-semantic",
+  "collection": "docs",
+  "strict": false,
+  "query": "changelog of bug fixes and improvements",
+  "expect": "docs/release_notes.rst"
+ },
+ {
+  "id": "synth-semantic",
+  "collection": "code",
+  "strict": true,
+  "query": "generate the bitstream by running the synthesis script",
+  "expect": "code/synth_flow.py"
+ },
+ {
+  "id": "sim-semantic",
+  "collection": "code",
+  "strict": true,
+  "query": "simulation models and unisim exclude list",
+  "expect": "code/sim_setup.py"
+ },
+ {
+  "id": "knowledge-install",
+  "collection": "knowledge",
+  "strict": false,
+  "query": "installing the toolchain from the package index",
+  "expect": "docs/installing.rst"
+ }
+]
