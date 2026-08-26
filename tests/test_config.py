@@ -31,6 +31,11 @@ mode = "local"
 dense_max_tokens = 2048
 dense_threads = 8
 dense_enable_cpu_mem_arena = true
+index_max_tokens = 128
+indexing_workers = 2
+hdl_model = "fake/hdl"
+docs_model = "fake/docs"
+code_model = "fake/code"
 
 [[repositories]]
 name = "standards"
@@ -73,6 +78,12 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.embeddings.dense_max_tokens == 1024
     assert cfg.embeddings.dense_threads == 4
     assert cfg.embeddings.dense_enable_cpu_mem_arena is False
+    assert cfg.embeddings.index_max_tokens == 512
+    assert cfg.embeddings.indexing_workers == 1
+    assert cfg.embeddings.hdl_model == "jinaai/jina-embeddings-v2-base-code"
+    assert cfg.embeddings.docs_model == "jinaai/jina-embeddings-v2-base-en"
+    assert cfg.embeddings.code_model == "jinaai/jina-embeddings-v2-base-code"
+    assert cfg.dense_cache_dir == cfg.resolved_data_dir / "dense-cache"
 
 
 def test_default_template_written(tmp_path: Path) -> None:
@@ -93,6 +104,11 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.embeddings.dense_max_tokens == 2048
     assert cfg.embeddings.dense_threads == 8
     assert cfg.embeddings.dense_enable_cpu_mem_arena is True
+    assert cfg.embeddings.index_max_tokens == 128
+    assert cfg.embeddings.indexing_workers == 2
+    assert cfg.embeddings.hdl_model == "fake/hdl"
+    assert cfg.embeddings.docs_model == "fake/docs"
+    assert cfg.embeddings.code_model == "fake/code"
     assert [r.name for r in cfg.repositories] == [
         "standards",
         "ip",
@@ -234,6 +250,11 @@ def test_qdrant_server_mode_requires_url() -> None:
         {"dense_max_tokens": 63},  # below the 64-token floor
         {"dense_max_tokens": 8193},  # above the model context
         {"dense_threads": 0},  # needs at least one thread
+        {"index_max_tokens": 63},  # below the 64-token floor
+        {"index_max_tokens": 8193},  # above the model context
+        {"indexing_workers": 0},  # needs at least one worker
+        # index cap may not exceed the query cap
+        {"index_max_tokens": 2048, "dense_max_tokens": 1024},
     ],
 )
 def test_embeddings_bounds_rejected(kwargs: dict[str, int]) -> None:

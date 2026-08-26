@@ -108,6 +108,59 @@ class EmbeddingsConfig(BaseModel):
             "matters more and RAM is plentiful."
         ),
     )
+    index_max_tokens: int = Field(
+        default=512,
+        ge=64,
+        le=8192,
+        description=(
+            "Maximum tokens an indexed passage is truncated to before "
+            "dense embedding. Queries are unaffected (they are short). "
+            "Lower values index faster and use less memory; on the "
+            "measured corpus quality is unchanged at 512. Must be <= "
+            "dense_max_tokens."
+        ),
+    )
+    indexing_workers: int = Field(
+        default=1,
+        ge=1,
+        le=64,
+        description=(
+            "Worker processes for data-parallel dense embedding during "
+            "indexing. 1 (default) = single process. Each worker loads "
+            "its own model copy (~0.6 GB), so keep it modest and ensure "
+            "RAM. Speeds up indexing on multi-core hosts; quality is "
+            "identical (same model, masked padding)."
+        ),
+    )
+    hdl_model: str = Field(
+        default="jinaai/jina-embeddings-v2-base-code",
+        description=(
+            "Dense embedding model for the hdl collection "
+            "(any fastembed TextEmbedding model name)."
+        ),
+    )
+    docs_model: str = Field(
+        default="jinaai/jina-embeddings-v2-base-en",
+        description=(
+            "Dense embedding model for the docs collection "
+            "(any fastembed TextEmbedding model name)."
+        ),
+    )
+    code_model: str = Field(
+        default="jinaai/jina-embeddings-v2-base-code",
+        description=(
+            "Dense embedding model for the code collection "
+            "(any fastembed TextEmbedding model name)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_index_cap(self) -> EmbeddingsConfig:
+        if self.index_max_tokens > self.dense_max_tokens:
+            raise ValueError(
+                "embeddings.index_max_tokens must be <= embeddings.dense_max_tokens"
+            )
+        return self
 
 
 class RepositoryConfig(BaseModel):
@@ -332,6 +385,11 @@ class AppConfig(BaseModel):
         return self.resolved_data_dir / "embed-cache"
 
     @property
+    def dense_cache_dir(self) -> Path:
+        """Content-addressed cache of dense vectors (see #2)."""
+        return self.resolved_data_dir / "dense-cache"
+
+    @property
     def qdrant_local_path(self) -> Path:
         return self.resolved_data_dir / "qdrant"
 
@@ -409,6 +467,15 @@ log_level = "INFO"
 # # ONNX CPU memory arena (fast but retains peak buffers, ~+2.5 GB;
 # # false = lower memory, ~35% slower indexing):
 # dense_enable_cpu_mem_arena = false
+# # Max tokens an indexed passage is truncated to before embedding
+# # (queries are unaffected; 512 is measured quality-neutral):
+# index_max_tokens = 512
+# # Worker processes for data-parallel indexing (1 = single process):
+# indexing_workers = 1
+# # Per-collection dense model (any fastembed TextEmbedding name):
+# hdl_model = "jinaai/jina-embeddings-v2-base-code"
+# docs_model = "jinaai/jina-embeddings-v2-base-en"
+# code_model = "jinaai/jina-embeddings-v2-base-code"
 
 [[repositories]]
 name = "company-standards"
