@@ -55,7 +55,7 @@ not a CI gate.
 
 The job caches the models in `actions/cache`
 (key `vhdl-rag-embed-cache-v2` →
-`${{ runner.temp }}/vhdl-rag-quality/embed-cache`), so the download
+`/tmp/vhdl-rag-quality/embed-cache`), so the download
 only happens on the first run and after a key bump.
 
 ## Running locally

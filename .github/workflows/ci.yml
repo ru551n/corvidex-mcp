@@ -39,14 +39,17 @@ jobs:
     timeout-minutes: 30
     env:
       VHDL_RAG_RUN_QUALITY: "1"
-      VHDL_RAG_QUALITY_DATA: ${{ runner.temp }}/vhdl-rag-quality
+      # Plain path (no ${{ }} expression): runner.temp is not
+      # evaluable in the job-level env context. /tmp is writable and
+      # ephemeral on hosted runners, which is what we want.
+      VHDL_RAG_QUALITY_DATA: /tmp/vhdl-rag-quality
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Cache embedding models
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/vhdl-rag-quality/embed-cache
+          path: /tmp/vhdl-rag-quality/embed-cache
           # Bump -v2 when the default models (config defaults) or the
           # fastembed version change; see docs/quality-testing.md.
           key: vhdl-rag-embed-cache-v2
