@@ -1,0 +1,35 @@
+name: scratch-quality
+
+on:
+  workflow_dispatch:
+
+jobs:
+  quality-e2e:
+    name: Quality (ubuntu-latest, real models)
+    # Full-pipeline RAG quality gate: indexes a small fixture corpus
+    # with the real fastembed models and asserts a fixed query battery
+    # retrieves the expected files (see docs/quality-testing.md).
+    # ubuntu-latest only: it downloads ~1.5 GB of models (cached below)
+    # and runs ONNX inference, so it does not join the cross-OS matrix.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VHDL_RAG_RUN_QUALITY: "1"
+      VHDL_RAG_QUALITY_DATA: ${{ runner.temp }}/vhdl-rag-quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Cache embedding models
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vhdl-rag-quality/embed-cache
+          # Bump -v2 when the default models (config defaults) or the
+          # fastembed version change; see docs/quality-testing.md.
+          key: vhdl-rag-embed-cache-v2
+          restore-keys: vhdl-rag-embed-cache-v2
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run quality tests
+        run: uv run pytest -v tests/test_quality.py
+
+
