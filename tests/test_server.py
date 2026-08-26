@@ -308,10 +308,16 @@ async def test_repository_status_tool(
     text = tool_text(result)
     assert "- repo (ref main, domains: hdl, docs, code)" in text
     assert "indexed:" in text
+    # Chunk and file counts are reported per domain with a total.
+    assert "chunks: " in text
+    assert " total)" in text
+    assert "files:" in text
     # The healthy repo has no error; the broken one does.
     repo_block = text.split("- repo (")[1].split("- broken")[0]
     assert "last error" not in repo_block
+    # Nothing was indexed for the broken repo.
     broken_block = text.split("- broken (")[1]
+    assert "chunks: 0 hdl + 0 docs + 0 code (0 total)" in broken_block
     assert "last error:" in broken_block
     assert "never" in broken_block.split("\n")[1]
     # The HDL analyzer section: both analyzers in fallback mode.

@@ -428,10 +428,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
     @mcp.tool(annotations=_READ_ONLY)
     async def repository_status() -> str:
         """Show every configured repository: ref, enabled domains, last
-        indexed commit, last sync time, and any sync error. Also reports
-        the HDL analyzers (vhdl_ls for VHDL, Veridian for
-        Verilog/SystemVerilog): availability, version, and whether
-        semantic (lsp) or fallback parsing is in effect."""
+        indexed commit, chunk and file counts, last sync time, and any
+        sync error. Also reports the HDL analyzers (vhdl_ls for VHDL,
+        Veridian for Verilog/SystemVerilog): availability, version, and
+        whether semantic (lsp) or fallback parsing is in effect."""
         lines: list[str] = []
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
@@ -442,9 +442,16 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 if status.last_sync_error is not None
                 else ""
             )
+            per_domain: list[str] = []
+            for domain in status.domains:
+                count = app.store.count_repository(status.name, CollectionName(domain))
+                per_domain.append(f"{count} {domain}")
+            total = app.store.count_repository(status.name)
             lines.append(
                 f"- {status.name} (ref {status.ref}, domains: {domains})\n"
-                f"  indexed: {commit}, synced: {synced}{error}"
+                f"  indexed: {commit}, synced: {synced}\n"
+                f"  chunks: {' + '.join(per_domain)} ({total} total), "
+                f"files: {status.file_count}{error}"
             )
         if not lines:
             return "No repositories configured."

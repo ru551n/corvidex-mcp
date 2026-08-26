@@ -159,6 +159,34 @@ def test_upsert_across_collections_and_query(store: VectorStore) -> None:
     assert [r.chunk.symbol for r in results] == ["top", "p_read", "p_write"]
 
 
+def test_count_repository(store: VectorStore) -> None:
+    chunks = [
+        make_chunk(symbol="p_write"),
+        make_chunk(symbol="p_read", kind="process", start=21, end=30),
+        make_chunk(repo="repoB", file="rtl/other.vhd", symbol="top", kind="entity"),
+        make_chunk(
+            repo="repoB",
+            collection=CollectionName.CODE,
+            content_type=ContentType.CODE,
+            language="c",
+            file="src/fifo.c",
+            symbol="fifo_write",
+            kind="function",
+        ),
+    ]
+    store.upsert_chunks(
+        chunks,
+        dense=[dense(0), dense(1), dense(2), dense(3)],
+        sparse=[sparse(), sparse(), sparse(), sparse()],
+    )
+    assert store.count_repository("repoA") == 2
+    assert store.count_repository("repoB") == 2
+    assert store.count_repository("repoB", CollectionName.HDL) == 1
+    assert store.count_repository("repoB", CollectionName.CODE) == 1
+    assert store.count_repository("repoA", CollectionName.CODE) == 0
+    assert store.count_repository("unknown") == 0
+
+
 def test_upsert_mismatched_lengths_raise(store: VectorStore) -> None:
     with pytest.raises(VectorStoreError, match="1 chunks, 2 dense"):
         store.upsert_chunks(

@@ -397,6 +397,21 @@ class VectorStore:
             return self._client.count(collection.value, exact=True).count
         return sum(self.count(c) for c in ALL_COLLECTIONS)
 
+    def count_repository(
+        self, repository: str, collection: CollectionName | None = None
+    ) -> int:
+        """Points of one repository, in one collection or all of them."""
+        flt = Filter(
+            must=[FieldCondition(key="repository", match=MatchValue(value=repository))]
+        )
+        if collection is not None:
+            if collection.value not in self._collections():
+                return 0
+            return self._client.count(
+                collection.value, count_filter=flt, exact=True
+            ).count
+        return sum(self.count_repository(repository, c) for c in ALL_COLLECTIONS)
+
     def chunks_for_file(self, repository: str, file: str) -> list[Chunk]:
         """All currently indexed chunks for one file (every collection)."""
         chunks: list[Chunk] = []
