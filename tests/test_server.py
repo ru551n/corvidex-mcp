@@ -395,8 +395,11 @@ async def test_local_poll_syncs_on_change(tmp_path: Path) -> None:
     original = app.pipeline.sync_repository
 
     async def spy(cfg):
-        calls.append(cfg.name)
+        # Record completion, not start: the poller runs syncs as detached
+        # tasks, so asserting on store state after a *started* sync races
+        # the in-flight sync and flakes on slow runners.
         await original(cfg)
+        calls.append(cfg.name)
 
     app.pipeline.sync_repository = spy
     poll = asyncio.create_task(app.local_poll())
