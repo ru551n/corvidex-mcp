@@ -95,6 +95,19 @@ class EmbeddingsConfig(BaseModel):
             "CPU saturation during indexing and serving."
         ),
     )
+    dense_enable_cpu_mem_arena: bool = Field(
+        default=False,
+        description=(
+            "Enable ONNX Runtime's CPU memory arena. When enabled, ONNX "
+            "reuses and retains peak tensor buffers across batches, which "
+            "is faster but keeps the worst-case arena size resident "
+            "(measured ~2.5 GB extra at the defaults). When disabled "
+            "(default) buffers are released after each inference, halving "
+            "peak RSS at a ~35% indexing-time cost. Disable for "
+            "memory-constrained hosts; enable when indexing speed "
+            "matters more and RAM is plentiful."
+        ),
+    )
 
 
 class RepositoryConfig(BaseModel):
@@ -393,6 +406,9 @@ log_level = "INFO"
 # dense_max_tokens = 1024
 # # CPU threads for dense ONNX inference:
 # dense_threads = 4
+# # ONNX CPU memory arena (fast but retains peak buffers, ~+2.5 GB;
+# # false = lower memory, ~35% slower indexing):
+# dense_enable_cpu_mem_arena = false
 
 [[repositories]]
 name = "company-standards"

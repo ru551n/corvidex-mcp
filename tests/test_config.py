@@ -30,6 +30,7 @@ mode = "local"
 [embeddings]
 dense_max_tokens = 2048
 dense_threads = 8
+dense_enable_cpu_mem_arena = true
 
 [[repositories]]
 name = "standards"
@@ -71,6 +72,7 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.qdrant.url is None
     assert cfg.embeddings.dense_max_tokens == 1024
     assert cfg.embeddings.dense_threads == 4
+    assert cfg.embeddings.dense_enable_cpu_mem_arena is False
 
 
 def test_default_template_written(tmp_path: Path) -> None:
@@ -90,6 +92,7 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.qdrant.mode == "local"
     assert cfg.embeddings.dense_max_tokens == 2048
     assert cfg.embeddings.dense_threads == 8
+    assert cfg.embeddings.dense_enable_cpu_mem_arena is True
     assert [r.name for r in cfg.repositories] == [
         "standards",
         "ip",

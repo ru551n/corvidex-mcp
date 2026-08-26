@@ -46,6 +46,7 @@ class EmbeddingProviders:
                 cache_dir=self._config.embed_cache_dir,
                 max_tokens=self._config.embeddings.dense_max_tokens,
                 threads=self._config.embeddings.dense_threads,
+                enable_arena=self._config.embeddings.dense_enable_cpu_mem_arena,
             )
             self._dense[name] = provider
         return provider

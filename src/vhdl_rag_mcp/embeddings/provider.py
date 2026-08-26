@@ -101,7 +101,9 @@ class FastEmbedProvider:
     reserve tens of GB. ``max_tokens`` re-bounds the tokenizer truncation
     (fastembed does not expose it) and ``threads``/``batch_size`` keep
     the per-call peak small, so embedding stays bounded regardless of
-    chunk length.
+    chunk length. The ONNX CPU memory arena can additionally be disabled
+    (``enable_arena=False``, the default) to release peak buffers after
+    each inference — lower resident RAM at a ~35% indexing-time cost.
     """
 
     def __init__(
@@ -114,12 +116,14 @@ class FastEmbedProvider:
         batch_size: int = 8,
         max_tokens: int | None = None,
         threads: int | None = None,
+        enable_arena: bool = False,
     ) -> None:
         self._dense_model = dense_model
         self._sparse_model = sparse_model
         self._batch_size = batch_size
         self._max_tokens = max_tokens
         self._threads = threads
+        self._enable_arena = enable_arena
         self._dense: DenseModelLike | None = dense
         self._sparse: SparseModelLike | None = sparse
         self._cache_dir = cache_dir
@@ -132,15 +136,20 @@ class FastEmbedProvider:
             cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
             logger.info("loading dense model %s", self._dense_model)
             self._dense = TextEmbedding(
-                self._dense_model, cache_dir=cache_dir, threads=self._threads
+                self._dense_model,
+                cache_dir=cache_dir,
+                threads=self._threads,
+                enable_cpu_mem_arena=self._enable_arena,
             )
             self._apply_token_cap(self._dense)
             logger.debug(
-                "dense model %s: max_tokens=%s threads=%s batch_size=%d",
+                "dense model %s: max_tokens=%s threads=%s batch_size=%d "
+                "cpu_mem_arena=%s",
                 self._dense_model,
                 self._max_tokens,
                 self._threads,
                 self._batch_size,
+                self._enable_arena,
             )
 
     def _apply_token_cap(self, dense: DenseModelLike) -> None:

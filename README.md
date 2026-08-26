@@ -217,10 +217,14 @@ Notes:
 - **`[embeddings]`**: dense-inference bounds (memory safety).
   `dense_max_tokens` (default 1024, maximum 8192) truncates a passage
   before dense embedding; `dense_threads` (default 4) caps the ONNX
-  Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
-  attention work is quadratic in sequence length, so without these
-  bounds a single long chunk can make one embedding batch reserve tens
-  of GB.
+Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
+   attention work is quadratic in sequence length, so without these
+   bounds a single long chunk can make one embedding batch reserve tens
+   of GB. `dense_enable_cpu_mem_arena` (default false) additionally
+   disables the ONNX CPU memory arena: buffers are released after each
+   inference, halving peak RAM (measured 5.4 → 2.9 GB) at a ~35%
+   indexing-time cost — set true when indexing speed matters more and
+   RAM is plentiful.
 - **`vhdl_ls_hook`**: shell command run at the repository root that
   generates `vhdl_ls.toml` when the file is missing (before the
   `vhdl_ls` session for that repository). When no hook is set, the hook

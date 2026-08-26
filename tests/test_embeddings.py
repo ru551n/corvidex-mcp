@@ -174,10 +174,17 @@ class StubTextEmbedding:
 
     embedding_size = 4
 
-    def __init__(self, model_name: str, cache_dir: str | None = None, threads=None):
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: str | None = None,
+        threads=None,
+        enable_cpu_mem_arena=None,
+    ):
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.threads = threads
+        self.enable_cpu_mem_arena = enable_cpu_mem_arena
         self.model = _StubModel()
         StubTextEmbedding.instances.append(self)
 
@@ -198,6 +205,17 @@ def test_dense_token_cap_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     (stub,) = StubTextEmbedding.instances
     assert stub.threads == 3
     assert stub.model.tokenizer.caps == [512]
+    # Arena is off by default (lower resident RAM).
+    assert stub.enable_cpu_mem_arena is False
+
+
+def test_dense_arena_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    StubTextEmbedding.instances = []
+    monkeypatch.setattr("fastembed.TextEmbedding", StubTextEmbedding)
+    provider = FastEmbedProvider("fake/model", enable_arena=True)
+    assert provider.embed_passages(["ab"])
+    (stub,) = StubTextEmbedding.instances
+    assert stub.enable_cpu_mem_arena is True
 
 
 def test_dense_no_token_cap_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
