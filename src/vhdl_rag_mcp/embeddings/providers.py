@@ -14,7 +14,7 @@ from .provider import FastEmbedProvider
 
 #: Shared sparse BM25 model (dense models are per-collection and
 #: configurable via the ``[embeddings]`` config section; the defaults
-#: there are the jina v2 base models).
+#: there are the jina v2 small-en model, 512 dims).
 SPARSE_MODEL = "Qdrant/bm25"
 
 

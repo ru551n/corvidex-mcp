@@ -199,8 +199,8 @@ def test_quality_embedding_determinism() -> None:
     providers = EmbeddingProviders(config)
     coll = CollectionName.HDL
     dim = providers.dimension(coll)
-    # The default models (jina v2 base code/en) are 768-dim.
-    assert dim == 768
+    # The default model (jina v2 small-en) is 512-dim.
+    assert dim == 512
 
     texts = [
         "entity sample is port (clk : in std_logic; q : out std_logic)"

@@ -152,8 +152,8 @@ $ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp --hel
 ```
 
 On first start the server creates its data directory, downloads the
-embedding models (jina v2 `base-code` + `base-en`, ~tens of MB each,
-once), and performs an initial sync of all configured repositories.
+embedding model (jina v2 `small-en`, ~0.1 GB, once), and performs an
+initial sync of all configured repositories.
 
 ## Configuration
 
@@ -186,9 +186,9 @@ log_level = "INFO"
 # indexing_workers = 1                 # worker processes for data-parallel
 #                                      # dense embedding (1 = single process;
 #                                      # each worker loads its own model copy)
-# hdl_model = "jinaai/jina-embeddings-v2-base-code"
-# docs_model = "jinaai/jina-embeddings-v2-base-en"    # any fastembed
-# code_model = "jinaai/jina-embeddings-v2-base-code"  # TextEmbedding name
+# hdl_model = "jinaai/jina-embeddings-v2-small-en"  # any fastembed
+# docs_model = "jinaai/jina-embeddings-v2-small-en"  # TextEmbedding name;
+# code_model = "jinaai/jina-embeddings-v2-small-en"  # default: small-en (512 dims)
 
 [[repositories]]
 name = "company-standards"             # unique, [A-Za-z0-9._-]
@@ -241,10 +241,13 @@ Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
     are short): on the measured corpus quality is unchanged at 512 while
     indexing is faster and lighter. `indexing_workers` (default 1) runs
     data-parallel embedding with N worker processes during indexing
-    (each loads its own model copy, ~0.6 GB); quality is identical.
-    `hdl_model`/`docs_model`/`code_model` (defaults: jina v2 base
-    code/en/code) select the dense model per collection; any fastembed
-    `TextEmbedding` model name works. Computed dense vectors are cached
+    (each loads its own model copy, ~0.1 GB for the default); quality
+    is identical. `hdl_model`/`docs_model`/`code_model` (default: jina
+    v2 small-en, 512 dims — measured equal-or-better retrieval quality
+    at ~3x lower indexing RAM) select the dense model per collection;
+    any fastembed `TextEmbedding` model name works. Switching to a
+    model with a different vector size requires a reindex (delete the
+    collection or `data_dir`). Computed dense vectors are cached
     content-addressed under `data_dir/dense-cache`, so reindexing, branch
     flips, and duplicated content skip re-embedding.
 - **`vhdl_ls_hook`**: shell command run at the repository root that

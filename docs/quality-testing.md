@@ -13,7 +13,7 @@ retrieves the expected source files.
 | Job / env | OS | Models | Purpose |
 |---|---|---|---|
 | `test` matrix | ubuntu / windows / macos / RHEL / arm64 | fakes | plumbing, fast, offline |
-| `quality-e2e` | **ubuntu-latest only** | real (jina v2 base code/en, Qdrant/bm25) | end-to-end retrieval quality |
+| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en, Qdrant/bm25) | end-to-end retrieval quality |
 | `tests/test_quality.py` locally | any | real | same gate, on demand |
 
 `tests/test_quality.py` is skipped unless
@@ -35,7 +35,7 @@ Windows/macOS/RHEL/arm64 runners.
 - `test_quality_embedding_determinism` — the same text embeds to
   **bit-identical** vectors across repeated calls (guards against
   non-deterministic model or ORT upgrades, and that the configured
-  model loads at the expected 768 dims).
+  model loads at the expected 512 dims).
 
 The corpus is small on purpose: model load + embedding a few dozen
 short chunks takes ~1–2 min on a 2-core runner. The heavy full-corpus
@@ -54,7 +54,7 @@ not a CI gate.
   download would slow the whole pipeline.
 
 The job caches the models in `actions/cache`
-(key `vhdl-rag-embed-cache-v1` →
+(key `vhdl-rag-embed-cache-v2` →
 `${{ runner.temp }}/vhdl-rag-quality/embed-cache`), so the download
 only happens on the first run and after a key bump.
 
@@ -115,7 +115,7 @@ quality battery (real models, structural chunking):
   `code_model` config defaults): re-run locally, re-tune thresholds if
   needed, update the dimension assert in
   `test_quality_embedding_determinism`, and **bump the CI cache key**
-  (`vhdl-rag-embed-cache-v1` → `v2`) in `.github/workflows/ci.yml`.
+  (`vhdl-rag-embed-cache-v2` → `v3`) in `.github/workflows/ci.yml`.
 - **Tuning thresholds**: only with a local run that shows stable
   results; document the rationale in a commit message.
 

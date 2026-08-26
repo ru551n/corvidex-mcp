@@ -127,30 +127,35 @@ class EmbeddingsConfig(BaseModel):
         description=(
             "Worker processes for data-parallel dense embedding during "
             "indexing. 1 (default) = single process. Each worker loads "
-            "its own model copy (~0.6 GB), so keep it modest and ensure "
-            "RAM. Speeds up indexing on multi-core hosts; quality is "
-            "identical (same model, masked padding)."
+            "its own model copy (~0.1 GB for the default small-en model), "
+            "so keep it modest and ensure RAM. Speeds up indexing on "
+            "multi-core hosts; quality is identical (same model, masked "
+            "padding)."
         ),
     )
     hdl_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-code",
+        default="jinaai/jina-embeddings-v2-small-en",
         description=(
-            "Dense embedding model for the hdl collection "
-            "(any fastembed TextEmbedding model name)."
+            "Dense embedding model for the hdl collection (any fastembed "
+            "TextEmbedding model name). Default: jina v2 small-en "
+            "(512 dims, ~0.12 GB) — measured equal or better retrieval "
+            "quality than the base models at ~3x lower indexing RAM. "
+            "Switching to a model with a different vector size requires "
+            "a reindex (delete the collection or data_dir)."
         ),
     )
     docs_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-en",
+        default="jinaai/jina-embeddings-v2-small-en",
         description=(
-            "Dense embedding model for the docs collection "
-            "(any fastembed TextEmbedding model name)."
+            "Dense embedding model for the docs collection (any fastembed "
+            "TextEmbedding model name; see hdl_model for the default)."
         ),
     )
     code_model: str = Field(
-        default="jinaai/jina-embeddings-v2-base-code",
+        default="jinaai/jina-embeddings-v2-small-en",
         description=(
-            "Dense embedding model for the code collection "
-            "(any fastembed TextEmbedding model name)."
+            "Dense embedding model for the code collection (any fastembed "
+            "TextEmbedding model name; see hdl_model for the default)."
         ),
     )
 
@@ -472,10 +477,11 @@ log_level = "INFO"
 # index_max_tokens = 512
 # # Worker processes for data-parallel indexing (1 = single process):
 # indexing_workers = 1
-# # Per-collection dense model (any fastembed TextEmbedding name):
-# hdl_model = "jinaai/jina-embeddings-v2-base-code"
-# docs_model = "jinaai/jina-embeddings-v2-base-en"
-# code_model = "jinaai/jina-embeddings-v2-base-code"
+# # Per-collection dense model (any fastembed TextEmbedding name;
+# # default jina v2 small-en, 512 dims):
+# hdl_model = "jinaai/jina-embeddings-v2-small-en"
+# docs_model = "jinaai/jina-embeddings-v2-small-en"
+# code_model = "jinaai/jina-embeddings-v2-small-en"
 
 [[repositories]]
 name = "company-standards"
