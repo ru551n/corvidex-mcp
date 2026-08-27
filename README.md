@@ -163,6 +163,69 @@ once and cached; it can alternatively ship inside the installed package
 so no runtime download is needed (air-gapped installs — see
 `tools/bundle_model.py`).
 
+### Air-gapped installation
+
+For hosts without network access, install from a wheel plus a
+dependency wheelhouse; after installation the server never touches
+the network. Everything is built on an internet-connected machine:
+
+1. **Bundle the model into the package** (the ONNX weights are
+   gitignored, so a plain git checkout does not contain them):
+
+   ```console
+   $ uv run --no-sync python tools/bundle_model.py
+   # offline alternative, from an existing snapshot directory:
+   $ uv run --no-sync python tools/bundle_model.py --from /path/to/snapshot
+   ```
+
+2. **Build the package wheel** (the model ships inside it, ~75 MB):
+
+   ```console
+   $ uv build --wheel --out-dir dist
+   ```
+
+3. **Build the dependency wheelhouse** (the third-party dependencies
+   stay external; the wheel only carries the model data). Portable
+   form, targeting the air-gapped host's platform:
+
+   ```console
+   $ uv export --no-hashes --no-emit-project --no-dev > requirements.txt
+   $ pip download -r requirements.txt --dest wheelhouse \
+       --only-binary=:all: --python-version 312 \
+       --platform manylinux2014_x86_64 --platform any
+   ```
+
+   (Omit the `--platform`/`--python-version` flags when building on a
+   machine with the same OS, architecture, and Python version as the
+   target.)
+
+4. **Transfer** `dist/vhdl_rag_mcp-*.whl` and the `wheelhouse/`
+   directory to the air-gapped host.
+
+5. **Install offline** (Python ≥ 3.12 with `pip`, or uv):
+
+   ```console
+   $ python3.12 -m venv .venv
+   $ .venv/bin/pip install --no-index --find-links wheelhouse \
+       dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
+   # with uv: uv venv .venv && uv pip install --python .venv/bin/python \
+   #     --no-index --find-links wheelhouse dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
+   ```
+
+6. **Register the MCP client** with the absolute path to the installed
+   console script (no `uvx`, no network):
+
+   ```console
+   $ claude mcp add vhdl-rag-mcp -- /path/to/.venv/bin/vhdl-rag-mcp
+   ```
+
+On startup the self-check logs that the embedding model is loaded from
+the bundled assets; `repository_status` reports per-collection model
+state. If a wheel was built without the model assets (plain git
+checkout), the fallback is to pre-provision the fastembed cache: copy
+an existing `embed-cache` directory (from an online machine) into
+`<data_dir>/embed-cache` before the first start.
+
 ## Configuration
 
 Config file: `~/.config/vhdl-rag/config.toml` (created with a
