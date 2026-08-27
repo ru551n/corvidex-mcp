@@ -1,8 +1,8 @@
 """End-to-end RAG quality tests (real embedding models).
 
 Indexes a small fixture repository (``tests/quality/corpus/``) through
-the full production pipeline — git sync, chunking, dense + sparse
-embedding, Qdrant hybrid search — with the **real** fastembed models
+the full production pipeline — git sync, chunking, dense
+embedding, hybrid (dense + full-text) search — with the **real** fastembed models
 (the defaults from the ``[embeddings]`` config), and asserts that a
 fixed query battery (``tests/quality/queries.json``) retrieves the
 expected source files.

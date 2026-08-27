@@ -440,7 +440,7 @@ async def test_drop_unconfigured_repositories(env) -> None:
     config = app.config.model_copy(
         update={"repositories": [app.config.repository("broken")]}
     )
-    # Share the store (Qdrant local mode locks its directory) and state.
+    # Share the store (its Lance tables belong to this data dir) and state.
     app2 = VhdlRagApp(
         config, providers=app.providers, store=app.store, states=app.states
     )

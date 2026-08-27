@@ -8,8 +8,8 @@ source attribution.
 
 Runs as an MCP server over stdio (installed from this Git
 repository with `uvx`, see [Installation](#installation)). No
-external services required: Qdrant runs embedded and the embedding
-models run locally (ONNX via FastEmbed).
+external services required: the vector store (LanceDB) runs embedded
+and the embedding models run locally (ONNX via FastEmbed).
 
 ## Intended use
 
@@ -62,10 +62,10 @@ is, not a stale snapshot.
 - **Three indexed domains, one server.** HDL source (VHDL, Verilog,
   and SystemVerilog in one `hdl` collection, each chunk tagged with
   its language), documentation (Markdown/reST/text), and general code
-  (C/C++, Python, ...) live in three Qdrant collections, each with a
-  dense (jina v2) *and* a sparse (BM25) vector per chunk.
-- **Hybrid search.** Every query runs Qdrant's native hybrid
-  (dense + sparse, RRF-fused) query: semantic similarity *and* exact
+  (C/C++, Python, ...) live in three LanceDB tables, each chunk stored
+  as a dense (jina v2) vector alongside its full-text-indexed content.
+- **Hybrid search.** Every query runs a native hybrid (dense +
+  full-text, RRF-fused) search: semantic similarity *and* exact
   identifier matching in one call. Ask about `rst_n` and you get it.
 - **HDL-aware chunking.** VHDL files are chunked per construct
   (entity, architecture, process, package, function, component) using
@@ -173,10 +173,6 @@ local_sync_interval = 10               # fast poller for local working
 vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path (VHDL)
 veridian_path = "veridian"             # binary on PATH or full path (Verilog/SV)
 log_level = "INFO"
-
-# [qdrant]
-# mode = "local"                       # embedded (default) — or "server" with url
-# url = "http://qdrant:6333"
 
 # [embeddings]
 # dense_max_tokens = 1024              # passages are truncated to this many
@@ -353,7 +349,7 @@ Example agent flow:
 
 ## Operations
 
-- **Data directory** (`data_dir`): Qdrant collections, the per-repo
+- **Data directory** (`data_dir`): the LanceDB index, the per-repo
   Git working trees (`<name>/`), sync state
   (`state/repositories.json`), the log file (`logs/vhdl-rag-mcp.log`),
   the model cache (`embed-cache`), the dense-vector cache
@@ -403,8 +399,9 @@ src/vhdl_rag_mcp/
   routing.py       extension -> domain classification (+domains/excludes)
   lsp/             LSP transport (server-agnostic) + vhdl_ls and Veridian
                    adapters + analyzer discovery/status
-  embeddings/      FastEmbed dense/sparse providers (per-collection + shared)
-  vector_store.py  Qdrant wrapper: hybrid RRF query, payload filters
+  embeddings/      FastEmbed dense providers (per-collection, lazy)
+  vector_store.py  LanceDB wrapper: hybrid (dense + FTS) RRF query,
+                   row filters
   indexing/        vhdl (vhdl_ls), verilog (Veridian), docs (sections),
                    code (tree-sitter), pipeline (incremental sync driver)
   retrieval.py     search service: fusion, language filter, source access

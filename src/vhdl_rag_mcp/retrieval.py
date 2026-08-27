@@ -27,7 +27,8 @@ from .vector_store import ALL_COLLECTIONS, VectorStore
 
 logger = logging.getLogger(__name__)
 
-#: RRF rank constant (Qdrant's own FusionQuery default).
+#: RRF rank constant (the standard value; originally taken from
+#: Qdrant's FusionQuery default).
 RRF_K = 60
 
 #: Languages indexed into the hdl collection (routing-derived).

@@ -4,9 +4,9 @@ HDL covers VHDL, Verilog, and SystemVerilog (one collection).
 
 The :class:`Chunk` model is the single currency between the indexers, the
 embedding layer, and the vector store. Its ``canonical_id`` feeds the
-deterministic Qdrant point ID; the git commit is deliberately NOT part of
-the ID, so re-indexing a file at a new commit reuses stable point IDs and
-stale chunks are removed via payload filters (repository + file) before
+deterministic vector-store row ID; the git commit is deliberately NOT part of
+the ID, so re-indexing a file at a new commit reuses stable row IDs and
+stale chunks are removed via row filters (repository + file) before
 the new ones are upserted. The commit stays in the payload for attribution.
 
 Cross-referencing

@@ -1,7 +1,7 @@
 """End-to-end acceptance tests.
 
 Full app lifecycle against a local file:// git remote with fake
-embedding providers: initial sync, server restart (Qdrant local
+embedding providers: initial sync, server restart (LanceDB
 persistence + state round-trip), incremental sync from the persisted
 state, and the periodic auto-sync loop. Tests gated on the
 ``VHDL_LS_TEST_BIN`` / ``VERIDIAN_TEST_BIN`` environment variables run
@@ -211,8 +211,8 @@ async def test_full_lifecycle_with_restart(
     assert commit1 == git(remote, "rev-parse", "HEAD")
     app.close()
 
-    # Process 2: fresh app over the same data dir. Qdrant local mode
-    # persists; state comes from the state file.
+    # Process 2: fresh app over the same data dir. LanceDB tables
+    # persist; state comes from the state file.
     app = make_app(config)
     assert app.store.count() == 7
     assert app.states.get("repo").indexed_commit == commit1
