@@ -12,3 +12,6 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Benchmark tooling output (tools/*.py --out)
+runs/
