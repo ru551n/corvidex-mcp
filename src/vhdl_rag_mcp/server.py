@@ -152,21 +152,26 @@ class VhdlRagApp:
     def migrate_index(self) -> bool:
         """Migrate the index to the current schema layout (v1 -> v2).
 
-        The legacy ``vhdl`` collection is dropped and every repository's
+        Both the SQLite store layout and the repository state document
+        carry the schema version; whichever is behind is migrated. The
+        legacy ``vhdl`` collection is dropped and every repository's
         indexed commit is forgotten, so the next sync rebuilds the index
         deterministically from git (no manual data migration). Safe to
-        call on every start: a current document is left untouched.
+        call on every start: a current deployment is left untouched.
         Returns True when a migration ran.
         """
-        if not self.states.needs_migration:
+        db_migrated = self.store.migrate()
+        state_migrated = self.states.migrate()
+        if not db_migrated and not state_migrated:
             return False
-        dropped = self.store.delete_legacy_vhdl()
-        self.states.migrate()
+        # A v1 -> v2 layout change invalidates the indexed commits.
+        self.states.reset_all_indexed()
         logger.info(
-            "index migrated to schema v%d (legacy vhdl collection dropped: %s); "
+            "index migrated to schema v%d (store: %s, state: %s); "
             "repositories reindex deterministically on the next sync",
             INDEX_SCHEMA_VERSION,
-            dropped,
+            db_migrated,
+            state_migrated,
         )
         return True
 

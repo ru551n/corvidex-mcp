@@ -1,4 +1,4 @@
-"""Tests for the LanceDB-backed vector store (embedded, temp directories)."""
+"""Tests for the SQLite/sqlite-vec vector store (embedded, temp dirs)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 
 from vhdl_rag_mcp.config import AppConfig
 from vhdl_rag_mcp.models import (
+    INDEX_SCHEMA_VERSION,
     Chunk,
     CollectionName,
     ContentType,
@@ -84,16 +85,42 @@ def test_ensure_collection_dimension_drift(tmp_path: Path) -> None:
     store.close()
 
 
-def test_delete_legacy_vhdl_drops_only_the_v1_collection(
-    store: VectorStore,
-) -> None:
+def test_schema_version_current_on_fresh_store(store: VectorStore) -> None:
+    # A fresh, ensured store reports the current version (inferred from
+    # its tables); migrate() stamps it without modifying data.
+    assert store.schema_version == INDEX_SCHEMA_VERSION
+    assert store.migrate() is False
+    assert store._read_version() == INDEX_SCHEMA_VERSION  # stamped
+    assert store.migrate() is False  # idempotent
+
+
+def test_migration_v1_to_v2_drops_the_legacy_collection(tmp_path: Path) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    store = VectorStore(config)
+    # A v1 deployment: only the legacy ``vhdl`` collection, no meta row.
     store._conn.execute("CREATE TABLE chunks_vhdl (id TEXT PRIMARY KEY)")
     store._conn.execute("CREATE VIRTUAL TABLE vec_vhdl USING vec0(embedding float[4])")
     store._conn.execute("CREATE VIRTUAL TABLE fts_vhdl USING fts5(content)")
-    assert store.delete_legacy_vhdl() is True
+    store._conn.commit()
+    assert store.schema_version == 1
+    assert store.migrate() is True
     assert "vhdl" not in store._tables()
+    assert store.schema_version == INDEX_SCHEMA_VERSION
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     assert {"hdl", "docs", "code"} <= store._tables()
-    assert store.delete_legacy_vhdl() is False  # idempotent
+    assert store.migrate() is False  # idempotent
+    store.close()
+
+
+def test_migration_reinfers_version_when_meta_is_missing(
+    store: VectorStore,
+) -> None:
+    store.migrate()  # stamps the meta row
+    store._conn.execute("DELETE FROM meta")
+    assert store._read_version() is None
+    assert store.schema_version == INDEX_SCHEMA_VERSION  # inferred
+    assert store.migrate() is False  # re-stamp only, no data change
+    assert store._read_version() == INDEX_SCHEMA_VERSION
 
 
 def test_point_id_deterministic_and_stable_across_commits() -> None:

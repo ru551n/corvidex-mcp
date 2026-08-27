@@ -13,8 +13,9 @@ Design notes
                       vectors, rowid-joined to ``chunks_<c>``;
     ``fts_<c>``     — a SQLite FTS5 table over the chunk content,
                       rowid-joined to ``chunks_<c>``.
-  Upgrading from the v1 layout (a ``vhdl`` collection) is a
-  deterministic full reindex; :meth:`VectorStore.delete_legacy_vhdl`
+  The database layout is versioned (``meta`` table; see
+  :meth:`VectorStore.migrate`). Upgrading from the v1 layout (a single
+  ``vhdl`` collection) is a deterministic full reindex: the migration
   drops the old tables safely because every chunk is reproducible from
   the git history.
 - Chunk rows are keyed by a deterministic ``uuid5`` id over
@@ -59,7 +60,7 @@ import numpy as np
 import sqlite_vec  # type: ignore[import-untyped]
 
 from .config import AppConfig
-from .models import Chunk, CollectionName
+from .models import INDEX_SCHEMA_VERSION, Chunk, CollectionName
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +401,11 @@ class VectorStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         self._conn = conn
+        # Layout-version bookkeeping (see :meth:`migrate`).
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        self._conn.commit()
         logger.info("sqlite-vec embedded store: %s", path)
 
     def close(self) -> None:
@@ -496,11 +502,68 @@ class VectorStore:
                     "delete the index (or the data directory) and reindex."
                 )
 
-    def delete_legacy_vhdl(self) -> bool:
-        """Drop the v1-layout ``vhdl`` collection (safe: reproducible).
+    # -- schema versioning ------------------------------------------------------
 
-        Returns True when a legacy table was removed.
+    _SCHEMA_VERSION_KEY = "schema_version"
+
+    @property
+    def schema_version(self) -> int:
+        """The store layout version (``meta`` table, or inferred)."""
+        version = self._read_version()
+        return version if version is not None else self._infer_version()
+
+    def _read_version(self) -> int | None:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (self._SCHEMA_VERSION_KEY,)
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
+    def _infer_version(self) -> int:
+        """Infer the layout version from the tables present (no meta row)."""
+        tables = self._tables()
+        if "vhdl" in tables:
+            return 1
+        if tables & {COLLECTION_HDL, COLLECTION_DOCS, COLLECTION_CODE}:
+            return 2
+        return 0
+
+    def _stamp_version(self, version: int) -> None:
+        self._conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (self._SCHEMA_VERSION_KEY, str(version)),
+        )
+        self._conn.commit()
+
+    def migrate(self) -> bool:
+        """Bring the store layout up to the current schema version.
+
+        Migrations are small, deterministic steps applied in version
+        order; the current version is tracked in the ``meta`` table and
+        a database without a version row is inferred from its tables.
+        Returns True when a data-changing migration ran (a current
+        database is only re-stamped, never modified).
         """
+        version = self._read_version()
+        if version is None:
+            version = self._infer_version()
+        changed = False
+        while version < INDEX_SCHEMA_VERSION:
+            version += 1
+            changed = self._apply_migration(version) or changed
+        self._stamp_version(INDEX_SCHEMA_VERSION)
+        if changed:
+            logger.info("sqlite index migrated to schema v%d", INDEX_SCHEMA_VERSION)
+        return changed
+
+    def _apply_migration(self, target_version: int) -> bool:
+        """Apply the single migration step landing on ``target_version``."""
+        if target_version == 2:
+            return self._drop_legacy_vhdl()
+        raise VectorStoreError(f"unknown migration target: {target_version}")
+
+    def _drop_legacy_vhdl(self) -> bool:
+        """Drop the v1-layout ``vhdl`` collection (safe: reproducible)."""
         dropped = False
         for name in ("chunks_vhdl", "vec_vhdl", "fts_vhdl"):
             if self._table_exists(name):
