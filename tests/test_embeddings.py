@@ -95,11 +95,13 @@ class StubTextEmbedding:
         cache_dir: str | None = None,
         threads=None,
         enable_cpu_mem_arena=None,
+        specific_model_path: str | None = None,
     ):
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.threads = threads
         self.enable_cpu_mem_arena = enable_cpu_mem_arena
+        self.specific_model_path = specific_model_path
         self.model = _StubModel()
         StubTextEmbedding.instances.append(self)
 

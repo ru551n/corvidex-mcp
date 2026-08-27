@@ -156,9 +156,12 @@ accepts `--help`:
 $ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp --help
 ```
 
-On first start the server creates its data directory, downloads the
-embedding model (jina v2 `small-en`, ~0.1 GB, once), and performs an
-initial sync of all configured repositories.
+On first start the server creates its data directory, loads the
+embedding model (jina v2 `small-en`, ~0.1 GB), and performs an initial
+sync of all configured repositories. By default the model is downloaded
+once and cached; it can alternatively ship inside the installed package
+so no runtime download is needed (air-gapped installs — see
+`tools/bundle_model.py`).
 
 ## Configuration
 

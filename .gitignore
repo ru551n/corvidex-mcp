@@ -15,3 +15,9 @@ htmlcov/
 
 # Benchmark tooling output (tools/*.py --out)
 runs/
+
+# Bundled model ONNX weights (provisioned into src/vhdl_rag_mcp/assets/
+# by tools/bundle_model.py on the machine that builds the wheel; the
+# wheel still includes them). The small tokenizer/config JSON files in
+# the same directory are committed.
+src/vhdl_rag_mcp/assets/*/onnx/

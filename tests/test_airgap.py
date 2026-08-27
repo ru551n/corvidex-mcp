@@ -3,20 +3,22 @@
 Proves the server operates air-gapped: with every socket connection
 blocked (any network attempt fails hard), the process must still
 
-1. load the dense model from a pre-provisioned local cache
-   (``VHDL_RAG_EMBED_CACHE``),
+1. load the dense model with zero downloads: from the model files
+   bundled in the package (``assets/``, provisioned by
+   ``tools/bundle_model.py``), or, when the assets are not present,
+   from a pre-provisioned local cache (``VHDL_RAG_EMBED_CACHE``),
 2. pass the startup self-check (runtime components + models),
 3. sync a local working repository through the real pipeline (real
    embedding, real sqlite-vec + FTS5 store), and
 4. answer hybrid, semantic, and lexical searches.
 
-Opt-in: requires a pre-provisioned fastembed cache that holds the
-default model (jinaai/jina-embeddings-v2-small-en):
+The bundled-model path needs nothing extra:
+
+    uv run pytest tests/test_airgap.py -v
+
+The cache fallback (assets not provisioned into the source tree):
 
     VHDL_RAG_EMBED_CACHE=/path/to/embed-cache uv run pytest tests/test_airgap.py -v
-
-After the default model ships inside the wheel (package assets), the
-same test applies with the bundled model in place of the cache.
 """
 
 from __future__ import annotations
@@ -29,16 +31,20 @@ from pathlib import Path
 import pytest
 
 from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
+from vhdl_rag_mcp.embeddings.assets import bundled_model_dir
 from vhdl_rag_mcp.models import CollectionName
 from vhdl_rag_mcp.server import VhdlRagApp
 
 CACHE = os.environ.get("VHDL_RAG_EMBED_CACHE")
+BUNDLED = bundled_model_dir("jinaai/jina-embeddings-v2-small-en")
 
 pytestmark = pytest.mark.skipif(
-    not CACHE,
+    not (CACHE or BUNDLED),
     reason=(
-        "air-gap acceptance: set VHDL_RAG_EMBED_CACHE to a pre-provisioned "
-        "fastembed cache holding jinaai/jina-embeddings-v2-small-en"
+        "air-gap acceptance: requires the default model either bundled in "
+        "the package (src/vhdl_rag_mcp/assets/, provisioned by "
+        "tools/bundle_model.py) or a pre-provisioned fastembed cache "
+        "(VHDL_RAG_EMBED_CACHE)"
     ),
 )
 
@@ -114,7 +120,11 @@ async def test_air_gapped_index_and_search(
     repo = _make_repo(tmp_path)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    (data_dir / "embed-cache").symlink_to(Path(CACHE))
+    if BUNDLED is None:
+        # Model not bundled in the package: provision it via the local
+        # fastembed cache instead.
+        assert CACHE is not None
+        (data_dir / "embed-cache").symlink_to(Path(CACHE))
     config = AppConfig(
         data_dir=data_dir,
         vhdl_ls_path="/nonexistent/vhdl_ls",

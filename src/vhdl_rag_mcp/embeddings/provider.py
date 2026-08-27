@@ -60,7 +60,9 @@ def _even_slices(count: int, workers: int) -> list[tuple[int, int]]:
 
 
 def _embed_slice(
-    args: tuple[str, str | None, int | None, bool, int | None, int, list[str]],
+    args: tuple[
+        str, str | None, str | None, int | None, bool, int | None, int, list[str]
+    ],
 ) -> list[np.ndarray]:
     """Worker for data-parallel dense embedding (#3).
 
@@ -71,6 +73,7 @@ def _embed_slice(
     (
         model_name,
         cache_dir,
+        offline_dir,
         threads,
         arena,
         max_tokens,
@@ -84,6 +87,7 @@ def _embed_slice(
         cache_dir=cache_dir,
         threads=threads,
         enable_cpu_mem_arena=arena,
+        specific_model_path=offline_dir,
     )
     if max_tokens is not None:
         tokenizer = getattr(te.model, "tokenizer", None)
@@ -111,6 +115,9 @@ class FastEmbedProvider:
     each inference — lower resident RAM at a ~35% indexing-time cost.
     ``batch_size`` defaults to 1: one passage per inference call, so
     the per-call peak is bounded by a single truncated passage.
+    ``offline_model_dir`` points at the model files bundled in the
+    package (air-gapped installs): when set, the model is loaded from
+    that directory directly and no download or cache lookup happens.
     """
 
     def __init__(
@@ -125,6 +132,7 @@ class FastEmbedProvider:
         index_max_tokens: int | None = None,
         indexing_workers: int = 1,
         dense_cache_dir: Path | None = None,
+        offline_model_dir: Path | None = None,
     ) -> None:
         self._dense_model = dense_model
         self._batch_size = batch_size
@@ -134,21 +142,41 @@ class FastEmbedProvider:
         self._index_max_tokens = index_max_tokens
         self._indexing_workers = indexing_workers
         self._dense_cache_dir = dense_cache_dir
+        self._offline_model_dir = offline_model_dir
         self._dense: DenseModelLike | None = dense
         self._cache_dir = cache_dir
 
     def _ensure_dense(self) -> None:
-        """Lazily load the dense model (and only the dense model)."""
+        """Lazily load the dense model (and only the dense model).
+
+        When ``offline_model_dir`` is set (a model bundled in the
+        package, air-gapped installs), fastembed loads the weights and
+        tokenizer from that directory directly and never touches the
+        network or the download cache.
+        """
         if self._dense is None:
             from fastembed import TextEmbedding
 
             cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
-            logger.info("loading dense model %s", self._dense_model)
+            offline_dir = (
+                str(self._offline_model_dir)
+                if self._offline_model_dir is not None
+                else None
+            )
+            if offline_dir is not None:
+                logger.info(
+                    "loading dense model %s from bundled assets %s",
+                    self._dense_model,
+                    offline_dir,
+                )
+            else:
+                logger.info("loading dense model %s", self._dense_model)
             self._dense = TextEmbedding(
                 self._dense_model,
                 cache_dir=cache_dir,
                 threads=self._threads,
                 enable_cpu_mem_arena=self._enable_arena,
+                specific_model_path=offline_dir,
             )
             self._apply_token_cap(self._dense)
             logger.debug(
@@ -267,6 +295,9 @@ class FastEmbedProvider:
             (
                 self._dense_model,
                 str(self._cache_dir) if self._cache_dir is not None else None,
+                str(self._offline_model_dir)
+                if self._offline_model_dir is not None
+                else None,
                 self._threads,
                 self._enable_arena,
                 self._max_tokens,

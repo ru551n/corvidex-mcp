@@ -24,6 +24,16 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Bundle the embedded model assets (ONNX weights + tokenizer/config
+# files) into the wheel so an air-gapped install needs no download.
+# The ONNX weights are large and are gitignored (provisioned into the
+# source tree by tools/bundle_model.py on the machine that builds the
+# wheel); the small JSON files are committed.
+[tool.setuptools.package-data]
+vhdl_rag_mcp = [
+    "assets/**/*",
+]
+
 [dependency-groups]
 dev = [
     "mypy",

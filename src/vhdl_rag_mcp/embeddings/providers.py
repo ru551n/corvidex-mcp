@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ..config import AppConfig
 from ..models import CollectionName
+from .assets import bundled_model_dir
 from .provider import FastEmbedProvider
 
 
@@ -43,6 +44,7 @@ class EmbeddingProviders:
                 index_max_tokens=eb.index_max_tokens,
                 indexing_workers=eb.indexing_workers,
                 dense_cache_dir=self._config.dense_cache_dir,
+                offline_model_dir=bundled_model_dir(name),
             )
             self._dense[name] = provider
         return provider
