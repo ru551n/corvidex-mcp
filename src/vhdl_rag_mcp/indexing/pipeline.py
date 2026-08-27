@@ -415,17 +415,25 @@ class IndexPipeline:
             await lsp.shutdown()
         return chunks
 
+    #: Embed/upsert stream size: passages are embedded and upserted in
+    #: groups this large, so the resident passage/vector buffers (and
+    #: each durable store commit) stay bounded no matter how large the
+    #: repository index is.
+    _STREAM_CHUNK = 256
+
     def _upsert(self, cfg: RepositoryConfig, chunks: list[Chunk]) -> None:
-        """Embed (dense per collection) and upsert."""
+        """Embed (dense per collection) and upsert, in bounded streams."""
         indexes_by_collection: dict[CollectionName, list[int]] = {}
         for i, chunk in enumerate(chunks):
             indexes_by_collection.setdefault(chunk.collection, []).append(i)
         for collection, indexes in indexes_by_collection.items():
             items = [chunks[i] for i in indexes]
-            dense = self._providers.embed_passages(
-                collection, [c.content for c in items]
-            )
-            self._store.upsert_chunks(items, dense)
+            for start in range(0, len(items), self._STREAM_CHUNK):
+                group = items[start : start + self._STREAM_CHUNK]
+                dense = self._providers.embed_passages(
+                    collection, [c.content for c in group]
+                )
+                self._store.upsert_chunks(group, dense)
 
     # -- bulk maintenance ------------------------------------------------------
 

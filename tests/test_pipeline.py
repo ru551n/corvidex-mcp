@@ -20,7 +20,7 @@ from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
 from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
 from vhdl_rag_mcp.git_manager import GitError, GitManager
 from vhdl_rag_mcp.indexing.pipeline import IndexPipeline
-from vhdl_rag_mcp.models import CollectionName, ContentType
+from vhdl_rag_mcp.models import Chunk, CollectionName, ContentType
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
 
@@ -923,3 +923,48 @@ async def test_all_analyzers_unavailable_falls_back(
             assert chunk.collection is CollectionName.HDL
     finally:
         store.close()
+
+
+# -- embed/upsert streaming ---------------------------------------------------
+
+
+class _SpyProviders:
+    """Records embed_passages call sizes; returns fixed dim-4 vectors."""
+
+    def __init__(self) -> None:
+        self.sizes: list[int] = []
+
+    def embed_passages(self, collection, texts) -> list[list[float]]:
+        self.sizes.append(len(texts))
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+
+def test_upsert_streams_embeds_and_commits(tmp_path: Path, config: AppConfig) -> None:
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    states = StateStore(config.sqlite_index_path)
+    spy = _SpyProviders()
+    pipeline = IndexPipeline(config, GitManager(config.repos_dir), store, spy, states)
+    chunks = [
+        Chunk(
+            repository="repo",
+            branch="main",
+            commit="c" * 40,
+            file=f"rtl/c{n}.vhd",
+            content_type=ContentType.SOURCE,
+            language="vhdl",
+            collection=CollectionName.HDL,
+            symbol=f"c{n}",
+            symbol_kind="entity",
+            start_line=1,
+            end_line=3,
+            content=f"entity c{n} is\nend entity c{n};\n",
+        )
+        for n in range(300)
+    ]
+    pipeline._upsert(config.repository("repo"), chunks)
+    # Bounded streams: 256 + 44, not one 300-passages call.
+    assert spy.sizes == [256, 44]
+    # Every chunk is durably upserted.
+    assert store.count(CollectionName.HDL) == 300
+    store.close()

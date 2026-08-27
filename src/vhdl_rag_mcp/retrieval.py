@@ -160,9 +160,7 @@ class RetrievalService:
         """One collection in the given search mode: (score, chunk) pairs."""
         # The lexical leg never embeds the query: no model work at all.
         dense = (
-            self._providers.embed_query(collection, query)
-            if mode != "lexical"
-            else []
+            self._providers.embed_query(collection, query) if mode != "lexical" else []
         )
         must: dict[str, str] = {}
         if repository is not None:

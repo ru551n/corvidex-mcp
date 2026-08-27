@@ -184,6 +184,9 @@ log_level = "INFO"
 # dense_enable_cpu_mem_arena = false   # ONNX CPU memory arena (fast but
 #                                      # retains peak buffers, ~+2.5 GB;
 #                                      # false = lower RAM, ~35% slower)
+# dense_batch_size = 1                 # passages per ONNX inference call
+#                                      # (1 = strict per-passage memory
+#                                      # bound; higher trades memory for speed)
 # index_max_tokens = 512               # indexed passages are truncated to
 #                                      # this many tokens (queries are
 #                                      # unaffected; must be <= dense_max_tokens)
@@ -248,7 +251,13 @@ Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
     disables the ONNX CPU memory arena: buffers are released after each
     inference, halving peak RAM (measured 5.4 → 2.9 GB) at a ~35%
     indexing-time cost — set true when indexing speed matters more and
-    RAM is plentiful. `index_max_tokens` (default 512) truncates
+    RAM is plentiful. `dense_batch_size` (default 1) limits passages
+    per ONNX inference call — at 1, peak inference memory is bounded by
+    a single truncated passage regardless of batch content (raise it
+    only when throughput matters more than memory). Indexing itself
+    embeds and upserts in bounded streams (256 chunks per round), so
+    resident passage/vector buffers never grow with repository size.
+    `index_max_tokens` (default 512) truncates
     *indexed* passages before embedding (queries are unaffected — they
     are short): on the measured corpus quality is unchanged at 512 while
     indexing is faster and lighter. `indexing_workers` (default 1) runs

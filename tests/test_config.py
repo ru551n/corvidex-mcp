@@ -165,6 +165,17 @@ def test_domains_validation() -> None:
         RepositoryConfig(name="r", url="u", domains=["vhdl", "nope"])
 
 
+def test_dense_batch_size_validation() -> None:
+    from vhdl_rag_mcp.config import EmbeddingsConfig
+
+    assert EmbeddingsConfig().dense_batch_size == 1  # strict per-passage bound
+    assert EmbeddingsConfig(dense_batch_size=4).dense_batch_size == 4
+    with pytest.raises(ValidationError):
+        EmbeddingsConfig(dense_batch_size=0)
+    with pytest.raises(ValidationError):
+        EmbeddingsConfig(dense_batch_size=1024)
+
+
 def test_priority_validation() -> None:
     assert RepositoryConfig(name="r", url="u").priority == 1
     assert RepositoryConfig(name="r", url="u", priority=3).priority == 3

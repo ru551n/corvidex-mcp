@@ -39,6 +39,7 @@ class EmbeddingProviders:
                 max_tokens=eb.dense_max_tokens,
                 threads=eb.dense_threads,
                 enable_arena=eb.dense_enable_cpu_mem_arena,
+                batch_size=eb.dense_batch_size,
                 index_max_tokens=eb.index_max_tokens,
                 indexing_workers=eb.indexing_workers,
                 dense_cache_dir=self._config.dense_cache_dir,

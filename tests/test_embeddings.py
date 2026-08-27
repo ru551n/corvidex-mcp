@@ -145,7 +145,9 @@ def test_dense_no_token_cap_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_dense_batch_size_default_is_bounded() -> None:
     provider, _ = make_provider()
-    assert provider._batch_size == 8
+    # Default 1: one passage per inference call — peak inference memory
+    # bounded by a single truncated passage.
+    assert provider._batch_size == 1
 
 
 class _WordTokens:
@@ -186,6 +188,7 @@ def _word_provider(
     dense_cache_dir: Path | None = None,
     index_max_tokens: int = 16,
     indexing_workers: int = 1,
+    batch_size: int = 8,
 ) -> tuple[FastEmbedProvider, WordFakeDense]:
     dense = WordFakeDense()
     provider = FastEmbedProvider(
@@ -194,6 +197,7 @@ def _word_provider(
         dense=dense,
         index_max_tokens=index_max_tokens,
         indexing_workers=indexing_workers,
+        batch_size=batch_size,
         dense_cache_dir=dense_cache_dir,
     )
     return provider, dense
@@ -256,7 +260,7 @@ def test_dense_vector_cache_corrupt_recomputes(tmp_path) -> None:
 def test_parallel_fallback_when_misses_small() -> None:
     # workers > 1 but misses <= batch_size stay on the serial path
     # (no pool spawn).
-    provider, dense = _word_provider(indexing_workers=4)
+    provider, dense = _word_provider(indexing_workers=4, batch_size=8)
     out = provider.embed_passages(["a", "b c", "d e f"])
     assert dense.passage_calls == [["a", "b c", "d e f"]]
     assert len(out) == 3

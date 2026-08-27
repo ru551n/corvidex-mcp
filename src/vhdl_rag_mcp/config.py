@@ -86,6 +86,19 @@ class EmbeddingsConfig(BaseModel):
             "matters more and RAM is plentiful."
         ),
     )
+    dense_batch_size: int = Field(
+        default=1,
+        ge=1,
+        le=128,
+        description=(
+            "Passages per ONNX inference call during embedding. 1 "
+            "(default) bounds each inference to a single truncated "
+            "passage, so peak inference memory never grows with batch "
+            "content; higher values trade memory for throughput "
+            "(padding to the longest passage in the batch, and ONNX "
+            "Runtime arena retention, scale with the batch)."
+        ),
+    )
     index_max_tokens: int = Field(
         default=512,
         ge=64,
@@ -471,6 +484,9 @@ log_level = "INFO"
 # # ONNX CPU memory arena (fast but retains peak buffers, ~+2.5 GB;
 # # false = lower memory, ~35% slower indexing):
 # dense_enable_cpu_mem_arena = false
+# # Passages per ONNX inference call (1 = strict per-passage memory
+# # bound; higher values trade memory for throughput):
+# dense_batch_size = 1
 # # Max tokens an indexed passage is truncated to before embedding
 # # (queries are unaffected; 512 is measured quality-neutral):
 # index_max_tokens = 512

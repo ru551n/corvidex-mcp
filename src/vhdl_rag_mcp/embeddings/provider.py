@@ -109,6 +109,8 @@ class FastEmbedProvider:
     chunk length. The ONNX CPU memory arena can additionally be disabled
     (``enable_arena=False``, the default) to release peak buffers after
     each inference — lower resident RAM at a ~35% indexing-time cost.
+    ``batch_size`` defaults to 1: one passage per inference call, so
+    the per-call peak is bounded by a single truncated passage.
     """
 
     def __init__(
@@ -116,7 +118,7 @@ class FastEmbedProvider:
         dense_model: str,
         cache_dir: Path | None = None,
         dense: DenseModelLike | None = None,
-        batch_size: int = 8,
+        batch_size: int = 1,
         max_tokens: int | None = None,
         threads: int | None = None,
         enable_arena: bool = False,
