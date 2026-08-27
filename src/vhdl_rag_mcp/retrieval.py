@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .config import AppConfig
+from .config import AppConfig, ConfigError
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitError, GitManager
 from .models import Chunk, CollectionName, SearchResult
@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 #: RRF rank constant (the standard value; originally taken from
 #: Qdrant's FusionQuery default).
 RRF_K = 60
+
+#: Scale of the bounded repository-priority bonus (see
+#: :meth:`RetrievalService._priority_bonus`). One priority unit is
+#: worth one RRF adjacent-rank step at the top of a list; the bonus
+#: saturates at a quarter of the best single-list term, so the maximum
+#: possible bonus swing (0.5/(K+1)) is smaller than that term itself —
+#: a chunk ranked in more lists than another always outranks it,
+#: regardless of repository priority.
+_PRIORITY_BONUS_STEP = 1.0 / (RRF_K * (RRF_K + 1))
+_PRIORITY_BONUS_CAP = 0.25 / (RRF_K + 1)
 
 #: Languages indexed into the hdl collection (routing-derived).
 HDL_LANGUAGES = ("vhdl", "verilog", "systemverilog")
@@ -46,6 +56,7 @@ class RepositoryStatus:
     name: str
     ref: str
     domains: tuple[str, ...]
+    priority: int
     indexed_commit: str | None
     indexed_at: str | None
     last_sync_at: str | None
@@ -98,6 +109,25 @@ class RetrievalService:
             raise RetrievalError("language must not be empty")
         return language
 
+    def _priority_bonus(self, repository: str) -> float:
+        """Bounded post-RRF score bonus for a repository's priority.
+
+        Each unit of ``priority`` (default 1) adds one RRF adjacent-rank
+        step; the result is saturated at :data:`_PRIORITY_BONUS_CAP` so
+        the bonus reorders chunks within a relevance tier but can never
+        promote a chunk across tiers (see the constant's docstring).
+        Unconfigured repositories get no bonus.
+        """
+        try:
+            cfg = self._config.repository(repository)
+        except ConfigError:
+            return 0.0
+        delta = cfg.priority - 1
+        if delta == 0:
+            return 0.0
+        bonus = delta * _PRIORITY_BONUS_STEP
+        return max(-_PRIORITY_BONUS_CAP, min(_PRIORITY_BONUS_CAP, bonus))
+
     # -- store-level search ------------------------------------------------------
 
     def _search_collection(
@@ -144,7 +174,9 @@ class RetrievalService:
         given identifiers (cross-referencing). ``language`` restricts
         results to one payload language (e.g. ``verilog`` within the
         hdl collection); for the hdl collection the value is validated
-        against :data:`HDL_LANGUAGES`.
+        against :data:`HDL_LANGUAGES`. The fused RRF score carries a
+        bounded per-repository priority bonus (see
+        :meth:`_priority_bonus`).
         """
         query = self._check_query(query)
         self._repository(repository)
@@ -161,7 +193,19 @@ class RetrievalService:
         pairs = self._search_collection(
             collection, query, limit, repository, symbols, language
         )
-        return [self._to_result(score, chunk) for score, chunk in pairs]
+        boosted = [
+            (score + self._priority_bonus(chunk.repository), chunk)
+            for score, chunk in pairs
+        ]
+        boosted.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].repository,
+                item[1].file,
+                item[1].start_line,
+            )
+        )
+        return [self._to_result(score, chunk) for score, chunk in boosted]
 
     def search_knowledge(
         self,
@@ -174,9 +218,10 @@ class RetrievalService:
         """Hybrid search over all three collections, RRF-fused.
 
         Each collection contributes a rank list; the fused score is the
-        sum of ``1/(RRF_K + rank)`` over the lists. ``language`` filters
-        every collection (collections without that language simply
-        contribute nothing).
+        sum of ``1/(RRF_K + rank)`` over the lists, plus the bounded
+        per-repository priority bonus (see :meth:`_priority_bonus`).
+        ``language`` filters every collection (collections without that
+        language simply contribute nothing).
         """
         query = self._check_query(query)
         self._repository(repository)
@@ -198,13 +243,16 @@ class RetrievalService:
         ranked = sorted(
             fused.values(),
             key=lambda item: (
-                -item[0],
+                -(item[0] + self._priority_bonus(item[1].repository)),
                 item[1].repository,
                 item[1].file,
                 item[1].start_line,
             ),
         )
-        return [self._to_result(score, chunk) for score, chunk in ranked[:limit]]
+        return [
+            self._to_result(score + self._priority_bonus(chunk.repository), chunk)
+            for score, chunk in ranked[:limit]
+        ]
 
     # -- source access ------------------------------------------------------------
 
@@ -256,6 +304,7 @@ class RetrievalService:
                     name=cfg.name,
                     ref=cfg.ref,
                     domains=tuple(d.value for d in cfg.domains),
+                    priority=cfg.priority,
                     indexed_commit=state.indexed_commit,
                     indexed_at=(
                         state.indexed_at.isoformat()

@@ -220,6 +220,19 @@ class RepositoryConfig(BaseModel):
             "semantics as vhdl_ls_hook."
         ),
     )
+    priority: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Retrieval authority weight, applied as a bounded post-RRF "
+            "score bonus. 1 (default) adds no bonus; each unit above 1 "
+            "ranks this repository's chunks slightly ahead of equally "
+            "relevant chunks elsewhere, each unit below 1 slightly "
+            "behind. The bonus saturates at a small fraction of the RRF "
+            "scale, so it reorders within a relevance tier but can "
+            "never promote a chunk across tiers."
+        ),
+    )
 
     @field_validator("name")
     @classmethod

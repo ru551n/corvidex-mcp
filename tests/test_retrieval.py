@@ -87,6 +87,7 @@ def make_chunk(
     commit: str,
     symbols: tuple[str, ...] = (),
     language: str | None = None,
+    repository: str = "repo",
 ) -> Chunk:
     content_type = {
         CollectionName.HDL: ContentType.SOURCE,
@@ -100,7 +101,7 @@ def make_chunk(
             CollectionName.CODE: "c",
         }[collection]
     return Chunk(
-        repository="repo",
+        repository=repository,
         branch="main",
         commit=commit,
         file=file,
@@ -350,5 +351,120 @@ async def test_repository_status(env) -> None:
     assert st.name == "repo"
     assert st.ref == "main"
     assert st.domains == ("hdl", "docs", "code")
+    assert st.priority == 1
     assert st.indexed_commit is not None
     assert st.last_sync_error is None
+
+
+# -- repository priority (bounded post-RRF bonus) ---------------------------
+
+
+async def _priority_env(
+    tmp_path: Path, priorities: dict[str, int], contents: dict[str, str]
+) -> tuple[VectorStore, RetrievalService, StateStore, AppConfig]:
+    """One git remote; each repository name indexes its own copy of the
+    content under rtl/<name>.vhd (identical remote for all repos)."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "main")
+    (up / "rtl").mkdir()
+    for name, content in contents.items():
+        (up / "rtl" / f"{name}.vhd").write_text(content)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "first")
+
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        repositories=[
+            RepositoryConfig(
+                name=name,
+                url=str(up),
+                ref="main",
+                priority=priorities.get(name, 1),
+            )
+            for name in priorities
+        ],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    providers = fake_providers(config)
+    git_manager = GitManager(config.repos_dir)
+    states = StateStore(config.sqlite_index_path)
+
+    chunks = []
+    for name in priorities:
+        plan = await git_manager.sync(config.repository(name), None)
+        states.set_indexed(name, plan.commit)
+        chunks.append(
+            make_chunk(
+                CollectionName.HDL,
+                f"rtl/{name}.vhd",
+                name,
+                "design_unit",
+                1,
+                1,
+                contents[name],
+                plan.commit,
+                repository=name,
+            )
+        )
+    dense = providers.embed_passages(CollectionName.HDL, [c.content for c in chunks])
+    store.upsert_chunks(chunks, dense)
+    return (
+        store,
+        RetrievalService(config, git_manager, store, providers, states),
+        states,
+        config,
+    )
+
+
+async def test_priority_bonus_adds_one_step_per_unit(tmp_path: Path) -> None:
+    # Neither chunk matches the query's terms: the full-text leg is empty
+    # for both, so the fused RRF score is the single dense-leg rank term.
+    # "base" (priority 1) is the denser vector (rank 1, 1/61); "extra"
+    # (priority 2) is rank 2 (1/62) plus exactly one bonus step — which
+    # overtakes the one-rank relevance gap.
+    store, retrieval, _states, _config = await _priority_env(
+        tmp_path,
+        priorities={"base": 1, "extra": 2},
+        contents={"base": "gamma delta", "extra": "gamma delta extra"},
+    )
+    step = 1.0 / (60 * 61)
+    results = retrieval.search(CollectionName.HDL, "alpha beta")
+    assert [r.repository for r in results] == ["extra", "base"]
+    assert results[0].score == pytest.approx(1.0 / 62 + step)
+    assert results[1].score == pytest.approx(1.0 / 61)
+    # The same bonus applies in cross-domain fusion.
+    fused = retrieval.search_knowledge("alpha beta")
+    assert [r.repository for r in fused] == ["extra", "base"]
+    store.close()
+
+
+async def test_priority_bonus_saturates_and_cannot_cross_tiers(
+    tmp_path: Path,
+) -> None:
+    # "anchor" matches the query (rank 1 in both legs: 2/61). "extra" has
+    # an extreme priority (1000): its bonus saturates at the cap, which
+    # is far too small to promote its single-list score past the
+    # two-list anchor — the boundedness guarantee.
+    store, retrieval, _states, _config = await _priority_env(
+        tmp_path,
+        priorities={"anchor": 1, "base": 1, "extra": 1000},
+        contents={
+            "anchor": "alpha beta",
+            "base": "gamma delta",
+            "extra": "gamma delta extra",
+        },
+    )
+    cap = 0.25 / 61
+    results = retrieval.search(CollectionName.HDL, "alpha beta")
+    assert results[0].repository == "anchor"
+    by_repo = {r.repository: r.score for r in results}
+    # Dense ranks: anchor (len 10, index 0), base (len 10, index 1),
+    # extra (len 16, index 2); FTS leg: anchor only.
+    assert by_repo["extra"] == pytest.approx(1.0 / 63 + cap)
+    assert by_repo["anchor"] == pytest.approx(2.0 / 61)
+    assert by_repo["anchor"] > by_repo["extra"]
+    # Saturation: 999 steps would be ~0.27; the bonus is capped.
+    assert cap < 999 * (1.0 / (60 * 61))
+    store.close()

@@ -165,6 +165,14 @@ def test_domains_validation() -> None:
         RepositoryConfig(name="r", url="u", domains=["vhdl", "nope"])
 
 
+def test_priority_validation() -> None:
+    assert RepositoryConfig(name="r", url="u").priority == 1
+    assert RepositoryConfig(name="r", url="u", priority=3).priority == 3
+    assert RepositoryConfig(name="r", url="u", priority=0).priority == 0
+    with pytest.raises(ValidationError):
+        RepositoryConfig(name="r", url="u", priority=-1)
+
+
 def test_data_dir_expanded(tmp_path: Path) -> None:
     cfg = AppConfig(data_dir=Path("~/x"))
     assert str(cfg.resolved_data_dir).startswith(str(Path.home()))

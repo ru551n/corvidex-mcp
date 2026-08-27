@@ -288,7 +288,7 @@ async def test_repository_status_tool(
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     result = await mcp.call_tool("repository_status", {})
     text = tool_text(result)
-    assert "- repo (ref main, domains: hdl, docs, code)" in text
+    assert "- repo (ref main, priority 1, domains: hdl, docs, code)" in text
     assert "indexed:" in text
     # Chunk and file counts are reported per domain with a total.
     assert "chunks: " in text

@@ -523,7 +523,8 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 per_domain.append(f"{count} {domain}")
             total = app.store.count_repository(status.name)
             lines.append(
-                f"- {status.name} (ref {status.ref}, domains: {domains})\n"
+                f"- {status.name} (ref {status.ref}, priority {status.priority}, "
+                f"domains: {domains})\n"
                 f"  indexed: {commit}, synced: {synced}\n"
                 f"  chunks: {' + '.join(per_domain)} ({total} total), "
                 f"files: {status.file_count}{error}"
