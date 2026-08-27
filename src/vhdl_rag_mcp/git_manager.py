@@ -311,7 +311,11 @@ class GitManager:
             "--format=%(refname:short)",
             "refs/remotes/origin",
         )
-        names = [n.strip() for n in (available or "").splitlines() if n.strip()]
+        names = [
+            n.strip()
+            for n in (available or "").splitlines()
+            if n.strip() and "/" in n.strip()
+        ]
         hint = f"; available remote refs: {', '.join(names)}" if names else ""
         raise GitError(
             f"ref {ref!r} does not resolve to a commit in {cfg.name!r}{hint}"

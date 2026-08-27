@@ -286,6 +286,15 @@ class VhdlRagApp:
 
     async def reindex(self, repository: str) -> dict[str, str]:
         """Full reindex of one repository (error contained)."""
+        if repository == CODING_STANDARDS_REPO:
+            if self.config.coding_standards is None:
+                raise RetrievalError("no coding_standards file is configured")
+            report = sync_coding_standards(
+                self.config, self.providers, self.store, self.states
+            )
+            if report is None:  # only when unconfigured; guarded above
+                raise RetrievalError("no coding_standards file is configured")
+            return report
         cfg = self._config_or_error(repository)
         try:
             await self.pipeline.reindex_repository(cfg)
@@ -299,8 +308,12 @@ class VhdlRagApp:
         }
 
     def drop_unconfigured_repositories(self) -> list[str]:
-        """Drop index chunks and state for repos removed from the config."""
+        """Drop index chunks and state for repos removed from the config
+        (the coding-standards pseudo-repository counts as configured when
+        the ``coding_standards`` option is set)."""
         configured = {cfg.name for cfg in self.config.repositories}
+        if self.config.coding_standards is not None:
+            configured.add(CODING_STANDARDS_REPO)
         dropped = [
             state.name for state in self.states.all() if state.name not in configured
         ]
@@ -393,10 +406,11 @@ def _render(results: list[SearchResult], empty: str) -> str:
 def _render_report(reports: list[dict[str, str]]) -> str:
     lines: list[str] = []
     for report in reports:
-        if report["status"] == "ok":
+        if report["status"] in ("ok", "up-to-date"):
             commit = report.get("commit", "")
+            unchanged = " (unchanged)" if report["status"] == "up-to-date" else ""
             lines.append(
-                f"- {report['repository']}: ok"
+                f"- {report['repository']}: ok{unchanged}"
                 + (f" (commit {commit[:12]})" if commit else "")
             )
         else:

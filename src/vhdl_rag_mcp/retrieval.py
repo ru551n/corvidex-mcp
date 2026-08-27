@@ -24,6 +24,7 @@ from .config import CODING_STANDARDS_REPO, AppConfig, ConfigError
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitError, GitManager
 from .models import Chunk, CollectionName, SearchResult
+from .standards import StandardsError, extract_standards_text
 from .state import StateStore
 from .vector_store import ALL_COLLECTIONS, VectorStore
 
@@ -68,6 +69,32 @@ class RepositoryStatus:
     last_sync_at: str | None
     last_sync_error: str | None
     file_count: int
+
+
+def _slice_text(
+    repository: str,
+    file: str,
+    text: str,
+    commit: str,
+    start_line: int | None,
+    end_line: int | None,
+) -> str:
+    """The source header plus a (default full) line slice of ``text``."""
+    lines = text.splitlines()
+    if not lines:
+        raise RetrievalError(f"file {file!r} is empty")
+    start = max(1, start_line if start_line is not None else 1)
+    end = min(len(lines), end_line if end_line is not None else len(lines))
+    if start > end:
+        raise RetrievalError(
+            f"invalid line range {start}-{end} (file has {len(lines)} lines)"
+        )
+    body = "\n".join(lines[start - 1 : end])
+    return (
+        f"{repository}:{file} @ {commit[:12]} "
+        f"(lines {start}-{end} of {len(lines)})\n"
+        f"{body}"
+    )
 
 
 class RetrievalService:
@@ -325,6 +352,8 @@ class RetrievalService:
     ) -> str:
         """Full (or sliced) source of an indexed file, with attribution."""
         self._repository(repository)
+        if repository == CODING_STANDARDS_REPO:
+            return self._standards_source(file, start_line, end_line)
         cfg = self._config.repository(repository)
         state = self._states.get(repository)
         if state.indexed_commit is None:
@@ -336,20 +365,41 @@ class RetrievalService:
             text = self._git.read_file(cfg, file)
         except GitError as exc:
             raise RetrievalError(str(exc)) from exc
-        lines = text.splitlines()
-        if not lines:
-            raise RetrievalError(f"file {file!r} is empty")
-        start = max(1, start_line if start_line is not None else 1)
-        end = min(len(lines), end_line if end_line is not None else len(lines))
-        if start > end:
+        return _slice_text(
+            repository, file, text, state.indexed_commit, start_line, end_line
+        )
+
+    def _standards_source(
+        self,
+        file: str,
+        start_line: int | None,
+        end_line: int | None,
+    ) -> str:
+        """Source of the coding-standards file (extracted text; line
+        numbers refer to the indexed extraction)."""
+        path = self._config.coding_standards
+        assert path is not None  # validated by _repository
+        if file != path.name:
             raise RetrievalError(
-                f"invalid line range {start}-{end} (file has {len(lines)} lines)"
+                f"the coding-standards repository holds a single file: {path.name!r}"
             )
-        body = "\n".join(lines[start - 1 : end])
-        return (
-            f"{repository}:{file} @ {state.indexed_commit[:12]} "
-            f"(lines {start}-{end} of {len(lines)})\n"
-            f"{body}"
+        state = self._states.get(CODING_STANDARDS_REPO)
+        if state.indexed_commit is None:
+            raise RetrievalError(
+                "the coding-standards file has not been indexed yet; "
+                "call sync_repositories first"
+            )
+        try:
+            text = extract_standards_text(path)
+        except StandardsError as exc:
+            raise RetrievalError(str(exc)) from exc
+        return _slice_text(
+            CODING_STANDARDS_REPO,
+            path.name,
+            text,
+            state.indexed_commit,
+            start_line,
+            end_line,
         )
 
     # -- status ----------------------------------------------------------------------

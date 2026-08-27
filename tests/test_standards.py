@@ -494,3 +494,133 @@ def test_check_coding_standards(tmp_path: Path) -> None:
         assert check_coding_standards(app3) is None
     finally:
         app3.close()
+
+
+# -- integration fixes ------------------------------------------------------------
+
+
+def test_drop_unconfigured_keeps_standards(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    std = tmp_path / "standards.md"
+    std.write_text(STANDARD_MD, encoding="utf-8")
+    config = make_config(tmp_path, std)
+    app = make_app(config)
+    try:
+        sync_coding_standards(config, app.providers, app.store, app.states)
+        assert app.store.count_repository(CODING_STANDARDS_REPO) > 0
+        # A startup drop must not treat the pseudo-repository as
+        # unconfigured while the option is set.
+        dropped = app.drop_unconfigured_repositories()
+        assert dropped == []
+        assert app.store.count_repository(CODING_STANDARDS_REPO) > 0
+        assert CODING_STANDARDS_REPO in {st.name for st in app.states.all()}
+    finally:
+        app.close()
+
+
+def test_drop_unconfigured_drops_stale_standards(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    std = tmp_path / "standards.md"
+    std.write_text(STANDARD_MD, encoding="utf-8")
+    config = make_config(tmp_path, std)
+    app = make_app(config)
+    sync_coding_standards(config, app.providers, app.store, app.states)
+    app.close()
+    # Option removed from the config: the next startup drops the chunks.
+    config_none = make_config(tmp_path, None)
+    app2 = make_app(config_none)
+    try:
+        dropped = app2.drop_unconfigured_repositories()
+        assert dropped == [CODING_STANDARDS_REPO]
+        assert app2.store.count_repository(CODING_STANDARDS_REPO) == 0
+        assert CODING_STANDARDS_REPO not in {st.name for st in app2.states.all()}
+    finally:
+        app2.close()
+
+
+def test_get_source_standards(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    std = tmp_path / "standards.md"
+    std.write_text(STANDARD_MD, encoding="utf-8")
+    config = make_config(tmp_path, std)
+    app = make_app(config)
+    try:
+        sync_coding_standards(config, app.providers, app.store, app.states)
+        out = app.retrieval.get_source(CODING_STANDARDS_REPO, std.name)
+        assert "coding-standards:standards.md @" in out
+        assert "rst_n" in out
+        # Line slicing works on the indexed extraction.
+        sliced = app.retrieval.get_source(
+            CODING_STANDARDS_REPO, std.name, start_line=2, end_line=2
+        )
+        assert "(lines 2-2" in sliced
+        # A different file name is rejected...
+        with pytest.raises(RetrievalError, match="single file"):
+            app.retrieval.get_source(CODING_STANDARDS_REPO, "other.md")
+        # ...as is an invalid range.
+        with pytest.raises(RetrievalError, match="invalid line range"):
+            app.retrieval.get_source(
+                CODING_STANDARDS_REPO, std.name, start_line=9, end_line=2
+            )
+        # Unconfigured: rejected as unknown.
+        config_none = make_config(tmp_path, None)
+        service_none = RetrievalService(
+            config_none,
+            GitManager(config_none.repos_dir),
+            VectorStore(config_none),
+            EmbeddingProviders(config_none),
+            StateStore(config_none.sqlite_index_path),
+        )
+        with pytest.raises(RetrievalError, match="unknown repository"):
+            service_none.get_source(CODING_STANDARDS_REPO, std.name)
+    finally:
+        app.close()
+
+
+def test_render_report_up_to_date() -> None:
+    from vhdl_rag_mcp.server import _render_report
+
+    out = _render_report(
+        [
+            {
+                "repository": CODING_STANDARDS_REPO,
+                "status": "up-to-date",
+                "commit": "abcdef1234567890",
+            }
+        ]
+    )
+    assert "ok (unchanged)" in out
+    assert "commit abcdef1234" in out
+    assert "ERROR" not in out
+
+
+async def test_reindex_standards(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    std = tmp_path / "standards.md"
+    std.write_text(STANDARD_MD, encoding="utf-8")
+    config = make_config(tmp_path, std)
+    app = make_app(config)
+    try:
+        report = await app.reindex(CODING_STANDARDS_REPO)
+        assert report["status"] == "ok", report
+        # Unchanged reindex is an up-to-date no-op.
+        report = await app.reindex(CODING_STANDARDS_REPO)
+        assert report["status"] == "up-to-date", report
+        # Edited file: reindex picks up the new content.
+        std.write_text(STANDARD_MD_V2, encoding="utf-8")
+        report = await app.reindex(CODING_STANDARDS_REPO)
+        assert report["status"] == "ok", report
+        # Unconfigured: a clear error.
+        config_none = make_config(tmp_path, None)
+        app2 = make_app(config_none)
+        try:
+            with pytest.raises(RetrievalError, match="no coding_standards"):
+                await app2.reindex(CODING_STANDARDS_REPO)
+        finally:
+            app2.close()
+    finally:
+        app.close()
