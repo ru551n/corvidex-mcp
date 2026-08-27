@@ -1923,17 +1923,17 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
+    { name = "lancedb" },
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "pylance" },
     { name = "qdrant-client" },
     { name = "tree-sitter-language-pack" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "lancedb" },
     { name = "mypy" },
-    { name = "pylance" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1942,17 +1942,17 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastembed", specifier = ">=0.8" },
+    { name = "lancedb", specifier = ">=0.37.1" },
     { name = "mcp", specifier = ">=1.29,<2" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pylance", specifier = ">=10.0.0" },
     { name = "qdrant-client", specifier = ">=1.19" },
     { name = "tree-sitter-language-pack", specifier = ">=1.15.8" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "lancedb", specifier = ">=0.37.1" },
     { name = "mypy" },
-    { name = "pylance", specifier = ">=10.0.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },

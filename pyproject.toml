@@ -12,6 +12,8 @@ dependencies = [
     "fastembed>=0.8",
     "pydantic>=2.0",
     "tree-sitter-language-pack>=1.15.8",
+    "lancedb>=0.37.1",
+    "pylance>=10.0.0",
 ]
 
 [project.scripts]
@@ -26,9 +28,7 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
-    "lancedb>=0.37.1",
     "mypy",
-    "pylance>=10.0.0",
     "pytest",
     "pytest-asyncio",
     "ruff",
