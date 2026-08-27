@@ -7,6 +7,13 @@ errors yield partial or empty trees), a structural line scanner finds
 top-level constructs; when even that finds nothing, the whole file
 becomes one chunk so no VHDL is ever lost from the index.
 
+Chunk content is bounded (MAX_CONTENT_CHARS, the shared character
+bound on chunk size — a token-size proxy for the embedding models): a
+construct that exceeds the bound is not truncated but split along its
+own structure (declaration part / statement part for architectures and
+package bodies, statement by statement), so every line still reaches
+the index in a bounded, coherent unit.
+
 Every chunk carries the identifiers it defines or references in its
 ``symbols`` field — the cross-referencing key used by retrieval. The
 function is synchronous: the (async) indexing pipeline owns the LSP
@@ -23,6 +30,7 @@ from pathlib import Path
 from ..config import RepositoryConfig
 from ..lsp.client import SymbolInfo
 from ..models import Chunk, CollectionName, ContentType
+from .common import MAX_CONTENT_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -378,22 +386,144 @@ def _specs_from_scan(lines: list[str]) -> list[ChunkSpec]:
     return sorted(specs, key=lambda s: (s.start_line, s.end_line))
 
 
-# -- chunk assembly -----------------------------------------------------------
+# -- size-bounded assembly ----------------------------------------------------
 
 
-def _make_chunk(
+def _windows(lines: list[str], max_chars: int) -> list[list[str]]:
+    """Split lines into ordered windows whose joined text is <= max_chars.
+
+    Breaks prefer blank lines; a hard break is the last resort. Every
+    line appears in exactly one window, in order. A single line longer
+    than max_chars becomes a window of its own — it cannot be split
+    without corrupting the line.
+    """
+    windows: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    for line in lines:
+        cost = len(line) + 1
+        if cur and size + cost > max_chars:
+            cut = 0
+            for i in range(1, len(cur)):
+                if not cur[i - 1].strip():
+                    cut = i
+            if cut == 0:
+                cut = len(cur)
+            windows.append(cur[:cut])
+            rest = cur[cut:]
+            cur = []
+            size = 0
+            for prev in rest:
+                cur.append(prev)
+                size += len(prev) + 1
+        cur.append(line)
+        size += cost
+    if cur:
+        windows.append(cur)
+    return windows
+
+
+_END_LINE_RE = re.compile(r"^\s*end\b")
+
+
+def _split_statements(
+    lines: list[str], base_indent: int, max_chars: int
+) -> list[list[str]]:
+    """Windows for a statement part (the lines from ``begin`` to the
+    construct's ``end``).
+
+    A new concurrent statement (process, block, generate, assign, ...)
+    starts at a line indented no more than the ``begin`` line; the
+    construct's closing ``end ...;`` attaches to the last statement.
+    Statements are packed into windows of at most max_chars; a statement
+    that alone exceeds the bound is windowed on its own.
+    """
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        code = line.split("--", 1)[0]
+        if code.strip():
+            indent = len(line) - len(line.lstrip())
+            if cur and indent <= base_indent and not _END_LINE_RE.match(code):
+                blocks.append(cur)
+                cur = []
+        cur.append(line)
+    if cur:
+        blocks.append(cur)
+
+    windows: list[list[str]] = []
+    cur_window: list[str] = []
+    size = 0
+    for block in blocks:
+        block_len = sum(len(ln) + 1 for ln in block)
+        if block_len > max_chars and not cur_window:
+            windows.extend(_windows(block, max_chars))
+            continue
+        if cur_window and size + block_len > max_chars:
+            windows.append(cur_window)
+            cur_window = []
+            size = 0
+        cur_window.extend(block)
+        size += block_len
+    if cur_window:
+        windows.append(cur_window)
+    return windows
+
+
+def _find_begin(lines: list[str], base_indent: int) -> int | None:
+    """Index of the construct's ``begin`` line, or None.
+
+    The construct's begin is aligned with the construct header; subprogram
+    bodies declared in the declaration part are indented deeper, so the
+    first column-aligned ``begin`` is the construct's own.
+    """
+    for i, line in enumerate(lines):
+        if i == 0:
+            continue
+        if (
+            line.split("--", 1)[0].strip() == "begin"
+            and len(line) - len(line.lstrip()) == base_indent
+        ):
+            return i
+    return None
+
+
+def _split_structural(kind: str, part: list[str]) -> list[list[str]]:
+    """Windows for one construct that exceeds MAX_CONTENT_CHARS.
+
+    Architectures and package bodies split at their ``begin`` line — the
+    declaration part first, then the statement part packed by statement —
+    so oversized constructs are split along their own structure.
+    Everything else is windowed on blank lines.
+    """
+    if kind in ("architecture", "package_body"):
+        header_indent = len(part[0]) - len(part[0].lstrip())
+        begin = _find_begin(part, header_indent)
+        if begin is not None:
+            declaration = part[:begin]
+            statement = part[begin:]
+            windows: list[list[str]] = (
+                _windows(declaration, MAX_CONTENT_CHARS)
+                if len("\n".join(declaration)) > MAX_CONTENT_CHARS
+                else [declaration]
+            )
+            windows.extend(
+                _split_statements(statement, header_indent, MAX_CONTENT_CHARS)
+            )
+            return windows
+    return _windows(part, MAX_CONTENT_CHARS)
+
+
+def _build_chunk(
     cfg: RepositoryConfig,
     file: str,
-    lines: list[str],
     commit: str,
     spec: ChunkSpec,
-    branch: str | None = None,
+    part: list[str],
+    abs_start: int,
+    branch: str | None,
 ) -> Chunk:
-    if not lines:
-        raise ValueError(f"empty VHDL file {file!r}")
-    start = max(1, min(spec.start_line, len(lines)))
-    end = max(start, min(spec.end_line, len(lines)))
-    text = "\n".join(lines[start - 1 : end])
+    content = "\n".join(part)
     return Chunk(
         repository=cfg.name,
         branch=branch if branch is not None else cfg.ref,
@@ -404,14 +534,43 @@ def _make_chunk(
         collection=CollectionName.HDL,
         symbol=spec.symbol,
         symbol_kind=spec.symbol_kind,
-        start_line=start,
-        end_line=end,
-        content=text,
+        start_line=abs_start,
+        end_line=abs_start + len(part) - 1,
+        content=content,
         library=spec.library,
         entity=spec.entity,
         architecture=spec.architecture,
-        symbols=extract_identifiers(text),
+        symbols=extract_identifiers(content),
     )
+
+
+def _chunks_for_spec(
+    cfg: RepositoryConfig,
+    file: str,
+    lines: list[str],
+    commit: str,
+    spec: ChunkSpec,
+    branch: str | None = None,
+) -> list[Chunk]:
+    """One chunk, or — for a construct whose content exceeds
+    MAX_CONTENT_CHARS — its structural split: several chunks that tile
+    the construct's line range exactly. All parts keep the construct's
+    symbol and kind; the distinct line ranges keep their point IDs
+    (and canonical IDs) distinct and deterministic.
+    """
+    if not lines:
+        raise ValueError(f"empty VHDL file {file!r}")
+    start = max(1, min(spec.start_line, len(lines)))
+    end = max(start, min(spec.end_line, len(lines)))
+    part = lines[start - 1 : end]
+    if len("\n".join(part)) <= MAX_CONTENT_CHARS:
+        return [_build_chunk(cfg, file, commit, spec, part, start, branch)]
+    chunks: list[Chunk] = []
+    offset = start
+    for group in _split_structural(spec.symbol_kind, part):
+        chunks.append(_build_chunk(cfg, file, commit, spec, group, offset, branch))
+        offset += len(group)
+    return chunks
 
 
 def chunk_vhdl_file(
@@ -455,4 +614,8 @@ def chunk_vhdl_file(
         )
         for spec in specs
     ]
-    return [_make_chunk(cfg, file, lines, commit, spec, branch) for spec in specs]
+    return [
+        chunk
+        for spec in specs
+        for chunk in _chunks_for_spec(cfg, file, lines, commit, spec, branch)
+    ]

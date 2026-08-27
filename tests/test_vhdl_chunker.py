@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from vhdl_rag_mcp.config import RepositoryConfig
@@ -286,3 +288,134 @@ def test_spec_is_frozen():
     spec = ChunkSpec("x", "entity", 1, 2)
     with pytest.raises(FrozenInstanceError):
         spec.symbol = "y"  # type: ignore[misc]
+
+
+# -- size bound + structural split -------------------------------------------
+
+from vhdl_rag_mcp.indexing.common import MAX_CONTENT_CHARS  # noqa: E402
+
+
+def _big_architecture(n_proc: int = 16, decl_lines: int = 80) -> tuple[str, int]:
+    """An architecture far larger than MAX_CONTENT_CHARS: a long
+    declaration part and n_proc sizeable processes. Returns (content,
+    1-based begin line)."""
+    decl = "\n".join(
+        f"  signal sig_{i:03d} : std_logic_vector(31 downto 0) := '0' & '1'; -- d{i}"
+        for i in range(decl_lines)
+    )
+    procs = []
+    for p in range(n_proc):
+        body = "\n".join(
+            f"      reg_{p}_{i} <= data_{p}_{i} & sig_{p % decl_lines}; -- s{p}.{i}"
+            for i in range(20)
+        )
+        procs.append(
+            f"  p_proc_{p} : process (clk, rst)\n"
+            f"  begin\n"
+            f"{body}\n"
+            f"  end process p_proc_{p};"
+        )
+    content = (
+        "architecture big of top is\n"
+        f"{decl}\n"
+        "begin\n" + "\n".join(procs) + "\n"
+        "end architecture big;\n"
+    )
+    return content, 2 + decl_lines
+
+
+def test_small_constructs_are_single_chunks():
+    # The canonical FIFO file is far below the bound: unchanged behaviour
+    # (one chunk per spec, exact line ranges).
+    chunks = chunk_vhdl_file(CFG, "rtl/fifo.vhd", FIFO_VHDL, "abc123")
+    assert len(chunks) == 3
+    arch = next(c for c in chunks if c.symbol_kind == "architecture")
+    assert (arch.start_line, arch.end_line) == (11, 24)
+
+
+def test_oversized_architecture_splits_along_its_structure():
+    content, begin_line = _big_architecture()
+    assert len(content) > MAX_CONTENT_CHARS
+    chunks = chunk_vhdl_file(CFG, "rtl/big.vhd", content, "abc123")
+    arch = [c for c in chunks if c.symbol_kind == "architecture" and c.symbol == "big"]
+    # Split into several parts, all keeping the construct's identity.
+    assert len(arch) >= 3
+    # Every part's content respects the bound (no pathological single line
+    # here, so the bound holds strictly).
+    assert all(len(c.content) <= MAX_CONTENT_CHARS for c in chunks)
+    # The parts tile the construct's line range exactly: contiguous,
+    # in order, no gaps, no overlaps.
+    arch.sort(key=lambda c: c.start_line)
+    assert arch[0].start_line == 1
+    assert arch[-1].end_line == len(content.splitlines())
+    for prev, cur in itertools.pairwise(arch):
+        assert cur.start_line == prev.end_line + 1
+    # The first part is the declaration part (ends before begin); the
+    # second part starts with the begin line.
+    assert arch[0].end_line == begin_line - 1
+    assert arch[1].content.splitlines()[0].strip() == "begin"
+    # The closing end line sits in the last part.
+    assert arch[-1].content.splitlines()[-1].startswith("end architecture")
+
+
+def test_oversized_architecture_statement_windows():
+    # A single process larger than the bound must still be windowed:
+    # every line stays in the index, and the bound holds.
+    body = "\n".join(
+        f"      sig_{i:04d} <= sig_{(i + 1) % 400} & '1';  -- filler {i}"
+        for i in range(400)
+    )
+    content = (
+        "architecture big of top is\n"
+        "  signal seed : std_logic;\n"
+        "begin\n"
+        "  p_huge : process (clk) is\n"
+        "  begin\n"
+        f"{body}\n"
+        "  end process p_huge;\n"
+        "end architecture big;\n"
+    )
+    assert len(content) > MAX_CONTENT_CHARS
+    chunks = chunk_vhdl_file(CFG, "rtl/huge.vhd", content, "abc123")
+    lines = content.splitlines()
+    assert len(content) > MAX_CONTENT_CHARS
+    # Coverage: the architecture parts tile the construct range.
+    arch = sorted((c for c in chunks if c.symbol == "big"), key=lambda c: c.start_line)
+    assert arch[0].start_line == 1
+    assert arch[-1].end_line == len(lines)
+    for prev, cur in itertools.pairwise(arch):
+        assert cur.start_line == prev.end_line + 1
+    # The oversized process also gets its own (split) chunks from its own
+    # spec.
+    huge = sorted(
+        (c for c in chunks if c.symbol == "p_huge"), key=lambda c: c.start_line
+    )
+    assert len(huge) >= 2
+    assert all(len(c.content) <= MAX_CONTENT_CHARS for c in huge)
+
+
+def test_oversized_entity_windows_on_blank_lines():
+    # An entity with a huge port list (no begin/end structure) is windowed
+    # generically, preferring blank-line breaks.
+    ports = ",\n".join(
+        f"    port_{i:03d} : in std_logic_vector(31 downto 0)" for i in range(300)
+    )
+    content = f"entity wide is\n  port (\n{ports}\n  );\nend entity wide;\n"
+    assert len(content) > MAX_CONTENT_CHARS
+    chunks = chunk_vhdl_file(CFG, "rtl/wide.vhd", content, "abc123")
+    ents = sorted((c for c in chunks if c.symbol == "wide"), key=lambda c: c.start_line)
+    assert len(ents) >= 2
+    assert all(len(c.content) <= MAX_CONTENT_CHARS for c in ents)
+    # Exact tiling of the entity range.
+    assert ents[0].start_line == 1
+    assert ents[-1].end_line == len(content.splitlines())
+    for prev, cur in itertools.pairwise(ents):
+        assert cur.start_line == prev.end_line + 1
+
+
+def test_split_is_deterministic_and_ids_distinct():
+    content, _begin = _big_architecture()
+    a = chunk_vhdl_file(CFG, "rtl/big.vhd", content, "abc123")
+    b = chunk_vhdl_file(CFG, "rtl/big.vhd", content, "abc123")
+    assert [c.canonical_id for c in a] == [c.canonical_id for c in b]
+    assert len({c.canonical_id for c in a}) == len(a)
