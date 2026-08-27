@@ -51,6 +51,10 @@ class EmbeddingProviders:
         """Dense dimension for a collection (loads the model)."""
         return self._dense_provider(collection).dimension
 
+    def model_name(self, collection: CollectionName) -> str:
+        """Configured dense model name for a collection."""
+        return self._dense_model_name(collection)
+
     def embed_passages(
         self, collection: CollectionName, texts: list[str]
     ) -> list[list[float]]:

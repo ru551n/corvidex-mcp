@@ -15,9 +15,11 @@ Exposes eight tools to coding agents:
 
 Lifecycle: load config, log to stderr/file (stdout is reserved for
 the MCP protocol), take a single-instance lock, create the vector-store
-tables (downloading the embedding models on first run), run an
-initial sync, then serve stdio while a background task syncs every
-``sync_interval`` seconds. All failures are contained per repository:
+tables (loading the embedding models from the local model cache), run
+the startup self-check (required components abort startup; optional
+ones degrade), migrate the index, run an initial sync, then serve
+stdio while a background task syncs every ``sync_interval`` seconds.
+All failures are contained per repository:
 one broken repository records its error and does not affect the
 others or stop the server.
 """
@@ -57,8 +59,9 @@ from .logging_setup import setup_logging
 from .lsp import build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
 from .retrieval import RetrievalError, RetrievalService
+from .selfcheck import SelfCheckResult, run_self_check
 from .state import StateStore
-from .vector_store import VectorStore
+from .vector_store import ALL_COLLECTIONS, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -143,17 +146,54 @@ class VhdlRagApp:
         self.retrieval = RetrievalService(
             config, self.git, self.store, self.providers, self.states
         )
+        # Collections whose embedding model failed to load (degraded
+        # startup; see ensure_collections / selfcheck).
+        self._collection_errors: dict[CollectionName, str] = {}
         self._closed = False
 
     # -- collections ---------------------------------------------------------
 
     def ensure_collections(self) -> None:
-        """Create the vector-store tables (loads the embedding models)."""
+        """Create the vector-store tables (loads the embedding models).
+
+        A model that fails to load (e.g. not present in the offline
+        model cache) does not abort startup: the collection is left
+        uncreated and the error recorded — the startup self-check
+        reports it as degraded, and embedding search/indexing of that
+        collection fails with a clear error until the model is
+        provisioned (lexical search is unaffected).
+        """
+        dims: dict[CollectionName, int] = {}
+        for collection in (
+            CollectionName.HDL,
+            CollectionName.DOCS,
+            CollectionName.CODE,
+        ):
+            try:
+                dims[collection] = self.providers.dimension(collection)
+            except Exception as exc:
+                logger.error(
+                    "embedding model for the %s collection unavailable: %s; "
+                    "the collection is degraded until the model is provisioned",
+                    collection.value,
+                    exc,
+                )
+                self._collection_errors[collection] = str(exc)
+                dims[collection] = 0
         self.store.ensure_collections(
-            hdl_dim=self.providers.dimension(CollectionName.HDL),
-            docs_dim=self.providers.dimension(CollectionName.DOCS),
-            code_dim=self.providers.dimension(CollectionName.CODE),
+            hdl_dim=dims[CollectionName.HDL],
+            docs_dim=dims[CollectionName.DOCS],
+            code_dim=dims[CollectionName.CODE],
         )
+
+    def collection_error(self, collection: CollectionName) -> str | None:
+        """Why the collection's embedding model is unavailable, or None
+        when it loaded."""
+        return self._collection_errors.get(collection)
+
+    def selfcheck(self) -> SelfCheckResult:
+        """Run the startup self-check (after collections + migration)."""
+        return run_self_check(self)
 
     def migrate_index(self) -> bool:
         """Migrate the index to the current schema layout (v1 -> v2).
@@ -569,6 +609,16 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
             else:
                 line = f"- {analyzer.name}: {analyzer.mode} — {analyzer.error}"
             lines.append(line)
+        lines.append("")
+        lines.append("Embedding models:")
+        for collection in ALL_COLLECTIONS:
+            model_error = app.collection_error(collection)
+            if model_error is None:
+                lines.append(
+                    f"- {collection.value}: {app.providers.model_name(collection)}"
+                )
+            else:
+                lines.append(f"- {collection.value}: unavailable — {model_error}")
         return "\n".join(lines)
 
     @mcp.tool(annotations=_READ_WRITE)
@@ -657,9 +707,23 @@ async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
 
 
 async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
-    logger.info("ensuring collections (embedding models download on first run)")
+    logger.info("ensuring collections (embedding models load from the local cache)")
     app.ensure_collections()
     app.migrate_index()
+    check = app.selfcheck()
+    if not check.required_ok:
+        for component in check.components:
+            if not component.ok and not component.optional:
+                logger.error(
+                    "startup self-check %s: %s", component.name, component.detail
+                )
+        logger.error(
+            "startup self-check failed (%s); not serving. Fix the missing "
+            "component and restart.",
+            ", ".join(check.degraded),
+        )
+        raise SystemExit(1)
+    logger.info("startup self-check: %s", check.summary())
     dropped = app.drop_unconfigured_repositories()
     if dropped:
         logger.info(

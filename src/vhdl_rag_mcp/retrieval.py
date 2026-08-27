@@ -126,6 +126,17 @@ class RetrievalService:
             )
         return mode
 
+    def _embed_query(self, collection: CollectionName, query: str) -> list[float]:
+        """Query embedding with a clear error on a degraded model."""
+        try:
+            return self._providers.embed_query(collection, query)
+        except Exception as exc:
+            raise RetrievalError(
+                f"the embedding model for the {collection.value} collection "
+                f"is unavailable ({exc}); provision the model and retry, "
+                "or search with mode='lexical'"
+            ) from exc
+
     def _priority_bonus(self, repository: str) -> float:
         """Bounded post-RRF score bonus for a repository's priority.
 
@@ -159,9 +170,9 @@ class RetrievalService:
     ) -> list[tuple[float, Chunk]]:
         """One collection in the given search mode: (score, chunk) pairs."""
         # The lexical leg never embeds the query: no model work at all.
-        dense = (
-            self._providers.embed_query(collection, query) if mode != "lexical" else []
-        )
+        dense: list[float] = []
+        if mode != "lexical":
+            dense = self._embed_query(collection, query)
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
@@ -257,6 +268,17 @@ class RetrievalService:
         mode = self._check_mode(mode)
         fused: dict[tuple[str, str, int], tuple[float, Chunk]] = {}
         for collection in ALL_COLLECTIONS:
+            if mode != "lexical":
+                try:
+                    self._providers.dimension(collection)  # load the model
+                except Exception as exc:
+                    logger.warning(
+                        "search_knowledge: skipping the %s collection: "
+                        "embedding model unavailable (%s)",
+                        collection.value,
+                        exc,
+                    )
+                    continue
             pairs = self._search_collection(
                 collection, query, limit, repository, symbols, language, mode
             )

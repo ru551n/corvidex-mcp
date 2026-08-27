@@ -308,6 +308,19 @@ and local working repositories are additionally change-checked every
 A single-instance lock (`data_dir/server.lock`) prevents two servers
 from sharing one data directory.
 
+At startup the server runs a self-check of its runtime components —
+`git`, the SQLite runtime (including FTS5), the `sqlite-vec`
+extension, the index schema version, the per-collection embedding
+models, and the HDL analyzers — and logs a one-line summary
+(`startup self-check: ok` or a list of what is degraded). Missing
+*required* components (git, FTS5, sqlite-vec) abort startup with an
+actionable error; missing *optional* components degrade gracefully:
+without `vhdl_ls`/Veridian the affected files fall back to structural
+parsing, and without an embedding model that collection's embedding
+search and indexing are unavailable (lexical search still works) until
+the model is provisioned. `repository_status` reports the current
+component state (analyzers + embedding models).
+
 ### Register with an MCP client
 
 Claude Code:
@@ -329,13 +342,13 @@ args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-
 
 | Tool | What it does |
 | --- | --- |
-| `search_hdl(query, limit, repository, symbols, language)` | Hybrid search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
+| `search_hdl(query, limit, repository, symbols, language, mode)` | Search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
 | `search_vhdl(query, limit, repository, symbols)` | `search_hdl` restricted to VHDL (back-compat name). |
 | `search_docs(...)` | Same over documentation sections. |
 | `search_code(...)` | Same over general code units (functions/classes). |
 | `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
 | `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
-| `repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode). |
+| `repository_status()` | Per repository: ref, priority, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode) and the per-collection embedding-model state. |
 | `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
 | `reindex_repository(repository)` | Drop and rebuild one repository's index. |
 
@@ -343,6 +356,13 @@ All search tools take an optional `repository` (name) filter plus
 `symbols: list[str]` — restrict results to chunks referencing any of
 the given identifiers. `search_hdl`/`search_knowledge` additionally
 accept `language` (e.g. `"verilog"`) to restrict results by language.
+Every search tool also takes `mode`: `hybrid` (default; semantic +
+full-text, RRF-fused), `semantic` (embedding similarity only), or
+`lexical` (full-text match only; no embedding involved). Each
+repository's `priority` (config, default 1) applies a bounded
+post-RRF bonus so higher-priority repositories rank slightly ahead of
+equally relevant chunks elsewhere without ever crossing relevance
+tiers.
 Results are rendered as markdown with source attribution, score,
 language, and referenced identifiers; HDL content is fenced by
 language.

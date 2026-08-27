@@ -488,13 +488,18 @@ class VectorStore:
 
         A changed embedding model changes the dense vector size; silently
         mixing dimensions would corrupt retrieval, so this is an error
-        with an actionable message.
+        with an actionable message. A dimension of 0 means the
+        collection's embedding model is unavailable (degraded startup):
+        the collection is skipped rather than created with an unknown
+        size.
         """
         for name, dim in (
             (COLLECTION_HDL, hdl_dim),
             (COLLECTION_DOCS, docs_dim),
             (COLLECTION_CODE, code_dim),
         ):
+            if dim == 0:
+                continue
             if not self._table_exists(f"chunks_{name}"):
                 self._create_collection(name, dim)
                 continue
@@ -523,13 +528,16 @@ class VectorStore:
         return int(row[0]) if row is not None else None
 
     def _infer_version(self) -> int:
-        """Infer the layout version from the tables present (no meta row)."""
+        """Infer the layout version from the tables present (no meta row).
+
+        A database with no collection tables at all — fresh, or created
+        while every embedding model was unavailable — is current-layout
+        by definition: there is nothing to migrate.
+        """
         tables = self._tables()
         if "vhdl" in tables:
             return 1
-        if tables & {COLLECTION_HDL, COLLECTION_DOCS, COLLECTION_CODE}:
-            return 2
-        return 0
+        return INDEX_SCHEMA_VERSION
 
     def _stamp_version(self, version: int) -> None:
         self._conn.execute(
