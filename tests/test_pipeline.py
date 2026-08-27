@@ -801,7 +801,7 @@ def _all_hdl_chunks(store: VectorStore, providers: EmbeddingProviders) -> list:
     scored = store.query(
         CollectionName.HDL,
         providers.embed_query(CollectionName.HDL, "fifo"),
-        providers.embed_sparse_query("fifo"),
+        "fifo",
         limit=50,
     )
     return [sc.chunk for sc in scored]
@@ -850,11 +850,10 @@ async def test_cross_language_cross_reference(hdl_env) -> None:
     config, store, pipeline, providers = hdl_env
     await pipeline.sync_repository(config.repository("hdl"))
     dense = providers.embed_query(CollectionName.HDL, "FIFO_DEPTH")
-    sparse = providers.embed_sparse_query("FIFO_DEPTH")
     scored = store.query(
         CollectionName.HDL,
         dense,
-        sparse,
+        "FIFO_DEPTH",
         limit=50,
         should={"symbols": ("FIFO_DEPTH",)},
     )

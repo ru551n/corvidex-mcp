@@ -235,8 +235,7 @@ async def env(tmp_path: Path):
         ),
     ]
     dense = providers.embed_passages(CollectionName.HDL, [c.content for c in chunks])
-    sparse = providers.embed_sparse_passages([c.content for c in chunks])
-    store.upsert_chunks(chunks, dense, sparse)
+    store.upsert_chunks(chunks, dense)
 
     retrieval = RetrievalService(config, git_manager, store, providers, states)
     yield store, retrieval

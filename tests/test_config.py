@@ -12,7 +12,6 @@ from vhdl_rag_mcp.config import (
     AppConfig,
     ConfigError,
     EmbeddingsConfig,
-    QdrantConfig,
     RepositoryConfig,
     load_config,
 )
@@ -23,9 +22,6 @@ data_dir = "~/vhdl-rag-data"
 sync_interval = 60
 vhdl_ls_path = "/opt/vhdl_ls/bin/vhdl_ls"
 log_level = "DEBUG"
-
-[qdrant]
-mode = "local"
 
 [embeddings]
 dense_max_tokens = 2048
@@ -74,8 +70,6 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.vhdl_ls_path == "vhdl_ls"
     assert cfg.log_level == "INFO"
     assert cfg.repositories == []
-    assert cfg.qdrant.mode == "local"
-    assert cfg.qdrant.url is None
     assert cfg.embeddings.dense_max_tokens == 1024
     assert cfg.embeddings.dense_threads == 4
     assert cfg.embeddings.dense_enable_cpu_mem_arena is False
@@ -101,7 +95,6 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.sync_interval == 60
     assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
     assert cfg.log_level == "DEBUG"
-    assert cfg.qdrant.mode == "local"
     assert cfg.embeddings.dense_max_tokens == 2048
     assert cfg.embeddings.dense_threads == 8
     assert cfg.embeddings.dense_enable_cpu_mem_arena is True
@@ -179,7 +172,7 @@ def test_data_dir_expanded(tmp_path: Path) -> None:
     assert cfg.repos_dir == cfg.resolved_data_dir / "repos"
     assert cfg.state_dir == cfg.resolved_data_dir / "state"
     assert cfg.log_file == cfg.resolved_data_dir / "logs" / "vhdl-rag.log"
-    assert cfg.qdrant_local_path == cfg.resolved_data_dir / "qdrant"
+    assert cfg.lance_local_path == cfg.resolved_data_dir / "lancedb"
 
 
 def test_local_sync_interval_bounds(tmp_path: Path) -> None:
@@ -249,12 +242,6 @@ def test_malformed_toml_rejected(tmp_path: Path) -> None:
     path.write_text("data_dir = [unclosed\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="cannot read configuration"):
         load_config(path)
-
-
-def test_qdrant_server_mode_requires_url() -> None:
-    with pytest.raises(ValidationError, match=r"qdrant.url is required"):
-        QdrantConfig(mode="server", url=None)
-    assert QdrantConfig(mode="server", url="http://qdrant:6333").mode == "server"
 
 
 @pytest.mark.parametrize(

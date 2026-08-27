@@ -7,7 +7,7 @@ added/modified files, renamed files, and deleted files. For local
 working repositories (configured with ``path``) the user's own checkout
 is indexed in place — HEAD plus uncommitted changes and untracked files
 — without ever cloning, fetching, or mutating the tree. Nothing here
-touches Qdrant or embeddings; the indexing pipeline consumes the
+touches the vector store or embeddings; the indexing pipeline consumes the
 :class:`SyncPlan`.
 
 Refs

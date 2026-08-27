@@ -1,4 +1,4 @@
-"""Tests for the Qdrant-backed vector store (local mode, temp directories)."""
+"""Tests for the LanceDB-backed vector store (embedded, temp directories)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from vhdl_rag_mcp.models import (
     CollectionName,
     ContentType,
     SearchResult,
-    SparseVectorData,
 )
 from vhdl_rag_mcp.vector_store import VectorStore, VectorStoreError, point_id
 
@@ -59,15 +58,6 @@ def dense(i: int) -> list[float]:
     return [float(i), 0.0, 0.0, 0.0]
 
 
-def sparse(
-    indices: tuple[int, ...] = (1,),
-    values: tuple[float, ...] | None = None,
-) -> SparseVectorData:
-    if values is None:
-        values = tuple(1.0 for _ in indices)
-    return SparseVectorData(indices=indices, values=values)
-
-
 @pytest.fixture
 def store(tmp_path: Path):
     config = AppConfig(data_dir=tmp_path / "data")
@@ -97,16 +87,10 @@ def test_ensure_collection_dimension_drift(tmp_path: Path) -> None:
 def test_delete_legacy_vhdl_drops_only_the_v1_collection(
     store: VectorStore,
 ) -> None:
-    from qdrant_client.models import Distance, VectorParams
-
-    store._client.create_collection(
-        "vhdl",
-        vectors_config={"dense": VectorParams(size=4, distance=Distance.COSINE)},
-    )
-    store._existing = None  # fresh process: no cached collection set
+    store._db.create_table("vhdl", [{"id": "x"}])
     assert store.delete_legacy_vhdl() is True
-    assert "vhdl" not in store._collections()
-    assert {"hdl", "docs", "code"} <= store._collections()
+    assert "vhdl" not in store._tables()
+    assert {"hdl", "docs", "code"} <= store._tables()
     assert store.delete_legacy_vhdl() is False  # idempotent
 
 
@@ -131,12 +115,19 @@ def test_point_id_deterministic_and_stable_across_commits() -> None:
 def test_upsert_across_collections_and_query(store: VectorStore) -> None:
     chunks = [
         make_chunk(symbol="p_write", content="write process"),
-        make_chunk(symbol="p_read", kind="process", start=21, end=30),
+        make_chunk(
+            symbol="p_read",
+            kind="process",
+            start=21,
+            end=30,
+            content="read process",
+        ),
         make_chunk(
             repo="repoB",
             file="rtl/other.vhd",
             symbol="top",
             kind="entity",
+            content="top entity",
         ),
         make_chunk(
             collection=CollectionName.CODE,
@@ -145,18 +136,28 @@ def test_upsert_across_collections_and_query(store: VectorStore) -> None:
             file="src/fifo.c",
             symbol="fifo_write",
             kind="function",
+            content="c fifo function",
         ),
     ]
     store.upsert_chunks(
         chunks,
-        dense=[dense(0), dense(1), dense(2), dense(3)],
-        sparse=[sparse(), sparse(), sparse(), sparse()],
+        dense=[
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
     )
     assert store.count() == 4
     assert store.count(CollectionName.HDL) == 3
     assert store.count(CollectionName.CODE) == 1
-    results = store.query(CollectionName.HDL, dense=dense(2), sparse=sparse(), limit=10)
-    assert [r.chunk.symbol for r in results] == ["top", "p_read", "p_write"]
+    results = store.query(
+        CollectionName.HDL,
+        dense=[0.0, 0.0, 1.0, 0.0],
+        query_text="top",
+        limit=10,
+    )
+    assert results[0].chunk.symbol == "top"
 
 
 def test_count_repository(store: VectorStore) -> None:
@@ -174,11 +175,7 @@ def test_count_repository(store: VectorStore) -> None:
             kind="function",
         ),
     ]
-    store.upsert_chunks(
-        chunks,
-        dense=[dense(0), dense(1), dense(2), dense(3)],
-        sparse=[sparse(), sparse(), sparse(), sparse()],
-    )
+    store.upsert_chunks(chunks, dense=[dense(0), dense(1), dense(2), dense(3)])
     assert store.count_repository("repoA") == 2
     assert store.count_repository("repoB") == 2
     assert store.count_repository("repoB", CollectionName.HDL) == 1
@@ -189,18 +186,12 @@ def test_count_repository(store: VectorStore) -> None:
 
 def test_upsert_mismatched_lengths_raise(store: VectorStore) -> None:
     with pytest.raises(VectorStoreError, match="1 chunks, 2 dense"):
-        store.upsert_chunks(
-            [make_chunk()], dense=[dense(0), dense(1)], sparse=[sparse(), sparse()]
-        )
-    with pytest.raises(VectorStoreError, match="1 chunks, 1 dense vectors, 2"):
-        store.upsert_chunks(
-            [make_chunk()], dense=[dense(0)], sparse=[sparse(), sparse()]
-        )
+        store.upsert_chunks([make_chunk()], dense=[dense(0), dense(1)])
 
 
 def test_upsert_is_idempotent(store: VectorStore) -> None:
-    store.upsert_chunks([make_chunk()], dense=[dense(0)], sparse=[sparse()])
-    store.upsert_chunks([make_chunk()], dense=[dense(0)], sparse=[sparse()])
+    store.upsert_chunks([make_chunk()], dense=[dense(1)])
+    store.upsert_chunks([make_chunk()], dense=[dense(1)])
     assert store.count() == 1
 
 
@@ -217,15 +208,11 @@ def test_query_payload_filters(store: VectorStore) -> None:
             kind="function",
         ),
     ]
-    store.upsert_chunks(
-        chunks,
-        dense=[dense(0), dense(1), dense(2)],
-        sparse=[sparse(), sparse(), sparse()],
-    )
+    store.upsert_chunks(chunks, dense=[dense(1), dense(1), dense(1)])
     by_repo = store.query(
         CollectionName.HDL,
-        dense=dense(0),
-        sparse=sparse(),
+        dense=dense(1),
+        query_text="process",
         limit=10,
         must={"repository": "repoB"},
     )
@@ -233,16 +220,16 @@ def test_query_payload_filters(store: VectorStore) -> None:
     assert by_repo[0].chunk.repository == "repoB"
     by_entity = store.query(
         CollectionName.HDL,
-        dense=dense(0),
-        sparse=sparse(),
+        dense=dense(1),
+        query_text="process",
         limit=10,
         must={"entity": "fifo"},
     )
     assert [r.chunk.symbol for r in by_entity] == ["p_write"]
     by_lang = store.query(
         CollectionName.CODE,
-        dense=dense(0),
-        sparse=sparse(),
+        dense=dense(1),
+        query_text="function",
         limit=10,
         must={"language": "c"},
     )
@@ -250,8 +237,8 @@ def test_query_payload_filters(store: VectorStore) -> None:
     assert (
         store.query(
             CollectionName.HDL,
-            dense=dense(0),
-            sparse=sparse(),
+            dense=dense(1),
+            query_text="process",
             limit=10,
             must={"repository": "nope"},
         )
@@ -263,8 +250,8 @@ def test_query_unknown_filter_key_raises(store: VectorStore) -> None:
     with pytest.raises(VectorStoreError, match="unknown filter key"):
         store.query(
             CollectionName.HDL,
-            dense=dense(0),
-            sparse=sparse(),
+            dense=dense(1),
+            query_text="process",
             limit=5,
             must={"not_a_key": "x"},
         )
@@ -283,6 +270,7 @@ def test_should_filter_matches_symbols_list(store: VectorStore) -> None:
             heading="Reset conventions",
             section="Standard",
             symbols=("p_write", "rst_n"),
+            content="reset conventions rst_n",
         ),
         make_chunk(
             collection=CollectionName.DOCS,
@@ -296,13 +284,14 @@ def test_should_filter_matches_symbols_list(store: VectorStore) -> None:
             heading="Naming",
             section="Standard",
             symbols=("C_TIMEOUT",),
+            content="naming timeout",
         ),
     ]
-    store.upsert_chunks(chunks, dense=[dense(0), dense(1)], sparse=[sparse(), sparse()])
+    store.upsert_chunks(chunks, dense=[dense(1), dense(2)])
     hits = store.query(
         CollectionName.DOCS,
-        dense=dense(0),
-        sparse=sparse(),
+        dense=dense(1),
+        query_text="reset",
         limit=10,
         should={"symbols": ["p_write"]},
     )
@@ -310,43 +299,46 @@ def test_should_filter_matches_symbols_list(store: VectorStore) -> None:
     # OR across multiple candidate symbols
     hits = store.query(
         CollectionName.DOCS,
-        dense=dense(0),
-        sparse=sparse(),
+        dense=dense(1),
+        query_text="naming",
         limit=10,
         should={"symbols": ["C_TIMEOUT", "nope"]},
     )
     assert [r.chunk.symbol for r in hits] == ["Naming"]
 
 
-def test_sparse_leg_influences_ranking(store: VectorStore) -> None:
-    """When the dense legs are a tie, the sparse (BM25) leg decides order."""
+def test_fts_leg_influences_ranking(store: VectorStore) -> None:
+    """When the dense legs are a tie, the full-text leg decides order."""
     chunks = [
-        make_chunk(symbol="p_write", content="a"),
-        make_chunk(symbol="p_read", kind="process", start=21, end=30, content="b"),
+        make_chunk(symbol="p_write", content="alpha token"),
+        make_chunk(
+            symbol="p_read",
+            kind="process",
+            start=21,
+            end=30,
+            content="beta token",
+        ),
     ]
-    # Identical dense vectors -> dense leg cannot discriminate.
-    store.upsert_chunks(
-        chunks,
-        dense=[dense(0), dense(0)],
-        sparse=[sparse(indices=(7, 8)), sparse(indices=(9,))],
-    )
-    # Sparse query matches only p_write's tokens.
+    # Identical dense vectors -> the dense leg cannot discriminate.
+    store.upsert_chunks(chunks, dense=[dense(1), dense(1)])
+    # Dense query is orthogonal to both passages (cosine 0 for both); the
+    # full-text query matches only p_write's content.
     results = store.query(
         CollectionName.HDL,
-        dense=dense(1),  # orthogonal to passages: cosine 0 for both
-        sparse=sparse(indices=(7,)),
+        dense=[0.0, 1.0, 0.0, 0.0],
+        query_text="alpha",
         limit=10,
     )
     assert results, "expected results"
     assert results[0].chunk.symbol == "p_write"
 
 
-def test_empty_sparse_falls_back_to_dense(store: VectorStore) -> None:
-    store.upsert_chunks([make_chunk()], dense=[dense(0)], sparse=[sparse()])
+def test_empty_query_text_falls_back_to_dense(store: VectorStore) -> None:
+    store.upsert_chunks([make_chunk(content="write process")], dense=[dense(1)])
     results = store.query(
         CollectionName.HDL,
-        dense=dense(0),
-        sparse=SparseVectorData(indices=(), values=()),
+        dense=dense(1),
+        query_text="",
         limit=10,
     )
     assert [r.chunk.symbol for r in results] == ["p_write"]
@@ -355,8 +347,14 @@ def test_empty_sparse_falls_back_to_dense(store: VectorStore) -> None:
 def test_delete_file_across_collections(store: VectorStore) -> None:
     store.upsert_chunks(
         [
-            make_chunk(symbol="p_write"),
-            make_chunk(symbol="p_read", kind="process", start=21, end=30),
+            make_chunk(symbol="p_write", content="write process"),
+            make_chunk(
+                symbol="p_read",
+                kind="process",
+                start=21,
+                end=30,
+                content="read process",
+            ),
             make_chunk(
                 collection=CollectionName.DOCS,
                 content_type=ContentType.DOCUMENTATION,
@@ -364,15 +362,15 @@ def test_delete_file_across_collections(store: VectorStore) -> None:
                 file="docs/standard.md",
                 symbol="FIFO",
                 kind="section",
+                content="fifo documentation",
             ),
         ],
-        dense=[dense(0), dense(1), dense(2)],
-        sparse=[sparse(), sparse(), sparse()],
+        dense=[dense(1), dense(2), dense(3)],
     )
     assert store.delete_file("repoA", "rtl/fifo.vhd") == 2
     assert store.count() == 1
     remaining = store.query(
-        CollectionName.DOCS, dense=dense(2), sparse=sparse(), limit=10
+        CollectionName.DOCS, dense=dense(3), query_text="documentation", limit=10
     )
     assert remaining[0].chunk.symbol == "FIFO"
     assert store.delete_file("repoA", "missing.vhd") == 0
@@ -381,16 +379,16 @@ def test_delete_file_across_collections(store: VectorStore) -> None:
 def test_delete_repository(store: VectorStore) -> None:
     store.upsert_chunks(
         [
-            make_chunk(symbol="p_write"),
+            make_chunk(symbol="p_write", content="write process"),
             make_chunk(
                 repo="repoB",
                 file="rtl/other.vhd",
                 symbol="top",
                 kind="entity",
+                content="top entity",
             ),
         ],
-        dense=[dense(0), dense(1)],
-        sparse=[sparse(), sparse()],
+        dense=[dense(1), dense(2)],
     )
     assert store.delete_repository("repoA") == 1
     assert store.delete_repository("repoB") == 1
@@ -400,7 +398,7 @@ def test_delete_repository(store: VectorStore) -> None:
 def test_chunks_for_file_spans_collections(store: VectorStore) -> None:
     store.upsert_chunks(
         [
-            make_chunk(symbol="p_write", entity="fifo"),
+            make_chunk(symbol="p_write", entity="fifo", content="write process"),
             make_chunk(
                 collection=CollectionName.CODE,
                 content_type=ContentType.CODE,
@@ -408,10 +406,10 @@ def test_chunks_for_file_spans_collections(store: VectorStore) -> None:
                 file="tb/test_fifo.py",
                 symbol="test_fifo",
                 kind="function",
+                content="test fifo python",
             ),
         ],
-        dense=[dense(0), dense(1)],
-        sparse=[sparse(), sparse()],
+        dense=[dense(1), dense(2)],
     )
     vhdl_file = store.chunks_for_file("repoA", "rtl/fifo.vhd")
     assert [c.symbol for c in vhdl_file] == ["p_write"]
@@ -424,14 +422,24 @@ def test_chunks_for_file_spans_collections(store: VectorStore) -> None:
 def test_get_by_symbol(store: VectorStore) -> None:
     store.upsert_chunks(
         [
-            make_chunk(symbol="p_write", entity="fifo"),
+            make_chunk(symbol="p_write", entity="fifo", content="write process"),
             make_chunk(
-                symbol="p_read", kind="process", start=21, end=30, entity="fifo"
+                symbol="p_read",
+                kind="process",
+                start=21,
+                end=30,
+                entity="fifo",
+                content="read process",
             ),
-            make_chunk(symbol="log2", kind="function", start=31, end=40),
+            make_chunk(
+                symbol="log2",
+                kind="function",
+                start=31,
+                end=40,
+                content="log2 function",
+            ),
         ],
-        dense=[dense(0), dense(1), dense(2)],
-        sparse=[sparse(), sparse(), sparse()],
+        dense=[dense(1), dense(2), dense(3)],
     )
     by_symbol = store.get_by_symbol("repoA", "log2", "function")
     assert [c.symbol for c in by_symbol] == ["log2"]
@@ -449,8 +457,10 @@ def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
         symbols=("wr_ptr", "C_FIFO_DEPTH"),
         content="p_write : process (clk, rst_n)\nbegin\nend process;\n",
     )
-    store.upsert_chunks([chunk], dense=[dense(0)], sparse=[sparse()])
-    results = store.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=1)
+    store.upsert_chunks([chunk], dense=[dense(1)])
+    results = store.query(
+        CollectionName.HDL, dense=dense(1), query_text="p_write process", limit=1
+    )
     assert len(results) == 1
     got = results[0].chunk
     assert got.content == chunk.content
@@ -504,7 +514,7 @@ def test_persistence_across_reopen(tmp_path: Path) -> None:
     store = VectorStore(config)
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     store.upsert_chunks(
-        [make_chunk(symbol="p_write")], dense=[dense(0)], sparse=[sparse()]
+        [make_chunk(symbol="p_write", content="write process")], dense=[dense(1)]
     )
     store.close()
 
@@ -512,9 +522,9 @@ def test_persistence_across_reopen(tmp_path: Path) -> None:
     reopened.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     assert reopened.count() == 1
     assert (
-        reopened.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=5)[
-            0
-        ].chunk.symbol
+        reopened.query(
+            CollectionName.HDL, dense=dense(1), query_text="write process", limit=5
+        )[0].chunk.symbol
         == "p_write"
     )
     reopened.close()
@@ -524,7 +534,8 @@ def test_queries_on_missing_collection_are_safe(tmp_path: Path) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     store = VectorStore(config)
     assert (
-        store.query(CollectionName.HDL, dense=dense(0), sparse=sparse(), limit=5) == []
+        store.query(CollectionName.HDL, dense=dense(1), query_text="process", limit=5)
+        == []
     )
     assert store.count() == 0
     assert store.delete_file("repoA", "f.vhd") == 0

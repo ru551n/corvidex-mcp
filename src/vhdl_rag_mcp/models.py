@@ -136,7 +136,7 @@ class Chunk:
         )
 
     def payload(self) -> dict[str, Any]:
-        """Full metadata + content stored as the Qdrant point payload."""
+        """Full metadata + content stored as the vector-store row."""
         data: dict[str, Any] = {
             "repository": self.repository,
             "branch": self.branch,

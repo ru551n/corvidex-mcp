@@ -38,28 +38,6 @@ class ConfigError(RuntimeError):
     """Raised when the configuration cannot be loaded or validated."""
 
 
-class QdrantConfig(BaseModel):
-    """Qdrant connection settings.
-
-    Local (embedded) mode is the default: no separate Qdrant server is
-    required; data lives under ``<data_dir>/qdrant``. Server mode is
-    supported for the future; only this module and the vector-store
-    layer know about Qdrant.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    mode: str = Field(default="local", pattern="^(local|server)$")
-    #: Server-mode endpoint, e.g. ``http://qdrant:6333``.
-    url: str | None = None
-
-    @model_validator(mode="after")
-    def _check_mode(self) -> QdrantConfig:
-        if self.mode == "server" and not self.url:
-            raise ValueError('qdrant.url is required when qdrant.mode = "server"')
-        return self
-
-
 class EmbeddingsConfig(BaseModel):
     """Runtime bounds for dense embedding inference (memory safety).
 
@@ -361,7 +339,6 @@ class AppConfig(BaseModel):
     log_level: str = Field(
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
-    qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
 
@@ -405,8 +382,9 @@ class AppConfig(BaseModel):
         return self.resolved_data_dir / "dense-cache"
 
     @property
-    def qdrant_local_path(self) -> Path:
-        return self.resolved_data_dir / "qdrant"
+    def lance_local_path(self) -> Path:
+        """Embedded LanceDB instance directory (columnar table files)."""
+        return self.resolved_data_dir / "lancedb"
 
     @property
     def log_file(self) -> Path:
@@ -469,12 +447,6 @@ sync_interval = 300
 vhdl_ls_path = "vhdl_ls"
 veridian_path = "veridian"
 log_level = "INFO"
-
-# [qdrant]
-# mode = "local"
-# # or, for a remote Qdrant server:
-# # mode = "server"
-# # url = "http://qdrant:6333"
 
 # [embeddings]
 # # Max tokens a passage is truncated to before dense embedding (the

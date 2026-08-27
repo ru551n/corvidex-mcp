@@ -9,8 +9,7 @@ currently resolves to:
    for deleted/renamed-away files);
 3. per-domain chunking of the changed files (VHDL via vhdl_ls, docs,
    general code) respecting the repository's ``domains`` and ``exclude``;
-4. embedding (per-collection dense + shared sparse) and upsert into the
-   vector store;
+4. embedding (per-collection dense) and upsert into the vector store;
 5. state update — only after the index update fully succeeded, so a
    failed run leaves the previous commit as the last indexed one and the
    next sync retries the same diff.
@@ -31,7 +30,7 @@ from ..config import AppConfig, RepositoryConfig
 from ..embeddings.providers import EmbeddingProviders
 from ..git_manager import GitManager, SyncPlan
 from ..lsp import VeridianLsp, VhdlLsp, default_libraries_dir, resolve_binary
-from ..models import Chunk, CollectionName, ContentType, SparseVectorData
+from ..models import Chunk, CollectionName, ContentType
 from ..routing import FileKind, classify_file
 from ..state import StateStore
 from ..vector_store import VectorStore
@@ -417,11 +416,7 @@ class IndexPipeline:
         return chunks
 
     def _upsert(self, cfg: RepositoryConfig, chunks: list[Chunk]) -> None:
-        """Embed (dense per collection, sparse shared) and upsert."""
-        texts = [c.content for c in chunks]
-        sparse_all: list[SparseVectorData] = self._providers.embed_sparse_passages(
-            texts
-        )
+        """Embed (dense per collection) and upsert."""
         indexes_by_collection: dict[CollectionName, list[int]] = {}
         for i, chunk in enumerate(chunks):
             indexes_by_collection.setdefault(chunk.collection, []).append(i)
@@ -430,8 +425,7 @@ class IndexPipeline:
             dense = self._providers.embed_passages(
                 collection, [c.content for c in items]
             )
-            sparse = [sparse_all[i] for i in indexes]
-            self._store.upsert_chunks(items, dense, sparse)
+            self._store.upsert_chunks(items, dense)
 
     # -- bulk maintenance ------------------------------------------------------
 

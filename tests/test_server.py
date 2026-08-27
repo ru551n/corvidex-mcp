@@ -206,8 +206,7 @@ async def test_search_hdl_tool_language_filter(env) -> None:
     dense = app.providers.embed_passages(
         CollectionName.HDL, [c.content for c in chunks]
     )
-    sparse = app.providers.embed_sparse_passages([c.content for c in chunks])
-    app.store.upsert_chunks(chunks, dense, sparse)
+    app.store.upsert_chunks(chunks, dense)
 
     # No language: all HDL languages are searchable together.
     all_text = tool_text(await mcp.call_tool("search_hdl", {"query": "fifo"}))
@@ -509,16 +508,10 @@ async def test_migrate_index_migrates_a_v1_deployment(env) -> None:
 
 
 async def test_migrate_index_drops_legacy_vhdl_collection(env) -> None:
-    from qdrant_client.models import Distance, VectorParams
-
     app, _mcp, _up = env
-    # Simulate a v1 deployment: the legacy collection exists and the
+    # Simulate a v1 deployment: the legacy table exists and the
     # state document predates the schema version.
-    app.store._client.create_collection(
-        "vhdl",
-        vectors_config={"dense": VectorParams(size=4, distance=Distance.COSINE)},
-    )
-    app.store._existing = None  # fresh process: no cached collection set
+    app.store._db.create_table("vhdl", [{"id": "x"}])
     path = app.config.state_dir / "repositories.json"
     path.write_text(
         json.dumps({"repo": {"name": "repo", "indexed_commit": "deadbeef"}}),
@@ -527,8 +520,8 @@ async def test_migrate_index_drops_legacy_vhdl_collection(env) -> None:
     app.states = StateStore(path)
 
     assert app.migrate_index() is True
-    assert "vhdl" not in app.store._collections()
-    assert "hdl" in app.store._collections()
+    assert "vhdl" not in app.store._tables()
+    assert "hdl" in app.store._tables()
 
 
 CLI_CONFIG = """\

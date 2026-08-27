@@ -142,7 +142,7 @@ class VhdlRagApp:
     # -- collections ---------------------------------------------------------
 
     def ensure_collections(self) -> None:
-        """Create the Qdrant collections (loads the embedding models)."""
+        """Create the vector-store tables (loads the embedding models)."""
         self.store.ensure_collections(
             hdl_dim=self.providers.dimension(CollectionName.HDL),
             docs_dim=self.providers.dimension(CollectionName.DOCS),

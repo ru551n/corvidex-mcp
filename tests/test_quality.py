@@ -17,8 +17,8 @@ Notes:
 
 - ``vhdl_ls``/``veridian`` are deliberately not used: the pipeline
   falls back to structural chunking when the binaries are absent, and
-  the quality assertions (file-level, dense + BM25 legs) do not depend
-  on LSP symbols. This keeps CI and local runs identical.
+  the quality assertions (file-level, dense + full-text legs) do not
+  depend on LSP symbols. This keeps CI and local runs identical.
 - Embedding determinism is asserted separately: the same text must
   embed to bit-identical vectors (guards against non-deterministic
   model or ORT upgrades).
@@ -80,7 +80,7 @@ def git(cwd: Path, *args: str) -> str:
 
 
 def quality_data_dir() -> Path:
-    """Base for Qdrant + state; embed-cache lives under it.
+    """Base for vector store + state; embed-cache lives under it.
 
     CI points ``VHDL_RAG_QUALITY_DATA`` at the actions/cache path so
     model downloads happen once; locally this is a temp dir.

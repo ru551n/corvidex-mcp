@@ -4,11 +4,13 @@ Hides the concrete implementation (FastEmbed ONNX models, no server)
 behind a small interface. The vector store and retrieval only deal in
 plain floats and :class:`~vhdl_rag_mcp.models.SparseVectorData`.
 
-Two model families are used per collection:
+Two model families are available per collection:
 
 - dense  ``jinaai/jina-embeddings-v2-*`` — semantic similarity
-- sparse ``Qdrant/bm25`` — exact token matching (identifier search),
-  fused with the dense leg by Qdrant's native hybrid (RRF) query.
+- sparse ``Qdrant/bm25`` — exact token matching (identifier search);
+  the vector store may use it as the hybrid exact-match leg. The
+  LanceDB backend instead uses a full-text index and never calls the
+  sparse entry points, so the BM25 model is never loaded there.
 
 Queries and indexed passages use different entry points: jina v2 models
 require task prefixes ("query:"/"passage:"), which FastEmbed applies

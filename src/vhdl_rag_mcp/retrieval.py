@@ -1,7 +1,7 @@
 """Retrieval service: hybrid search, cross-domain fusion, source access.
 
-Search is Qdrant's native hybrid query (dense + sparse BM25, RRF
-fusion) with payload filters.
+Search is the vector store's native hybrid query (dense vectors +
+full-text over the chunk content, RRF fusion) with row filters.
 
 Cross-domain search (``search_knowledge``) fuses the per-collection
 rank lists with RRF again (one list per collection, rank-based, so
@@ -110,7 +110,6 @@ class RetrievalService:
     ) -> list[tuple[float, Chunk]]:
         """Hybrid query of one collection: (fused score, chunk) pairs."""
         dense = self._providers.embed_query(collection, query)
-        sparse = self._providers.embed_sparse_query(query)
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
@@ -120,7 +119,7 @@ class RetrievalService:
         scored = self._store.query(
             collection,
             dense,
-            sparse,
+            query,
             limit=limit,
             must=must or None,
             should=should,
