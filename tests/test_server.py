@@ -466,6 +466,7 @@ async def test_migrate_index_migrates_a_v1_deployment(env) -> None:
     app, _mcp, _up = env
     # Simulate a v1 deployment: a flat (pre-schema) state document.
     path = app.config.state_dir / "repositories.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -475,16 +476,15 @@ async def test_migrate_index_migrates_a_v1_deployment(env) -> None:
         ),
         encoding="utf-8",
     )
-    app.states = StateStore(path)
+    app.states = StateStore(app.config.sqlite_index_path, path)
     assert app.states.needs_migration
-    assert app.states.get("repo").indexed_commit == "deadbeef"
 
     assert app.migrate_index() is True
     assert app.states.get("repo").indexed_commit is None
     assert app.states.get("broken").indexed_commit is None
     assert not app.states.needs_migration
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == INDEX_SCHEMA_VERSION
+    # The imported document is marked as consumed (the import runs once).
+    assert (app.config.state_dir / "repositories.json.migrated").exists()
     assert app.migrate_index() is False  # idempotent
 
 
@@ -497,11 +497,12 @@ async def test_migrate_index_drops_legacy_vhdl_collection(env) -> None:
     conn.execute("CREATE VIRTUAL TABLE vec_vhdl USING vec0(embedding float[4])")
     conn.execute("CREATE VIRTUAL TABLE fts_vhdl USING fts5(content)")
     path = app.config.state_dir / "repositories.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"repo": {"name": "repo", "indexed_commit": "deadbeef"}}),
         encoding="utf-8",
     )
-    app.states = StateStore(path)
+    app.states = StateStore(app.config.sqlite_index_path, path)
 
     assert app.migrate_index() is True
     assert "vhdl" not in app.store._tables()

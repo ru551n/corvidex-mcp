@@ -272,7 +272,7 @@ def env(tmp_path: Path, config: AppConfig):
         GitManager(config.repos_dir),
         store,
         fake_providers(config),
-        StateStore(config.state_dir / "repositories.json"),
+        StateStore(config.sqlite_index_path),
     )
     yield store, pipeline
     store.close()
@@ -377,7 +377,7 @@ async def test_sync_error_keeps_previous_state(config: AppConfig, env) -> None:
             ]
         }
     )
-    states = StateStore(broken.state_dir / "repositories.json")
+    states = StateStore(broken.sqlite_index_path)
     pipeline2 = IndexPipeline(
         broken, GitManager(broken.repos_dir), store, fake_providers(broken), states
     )
@@ -423,7 +423,7 @@ async def test_domains_and_excludes(
         GitManager(config.repos_dir),
         store,
         fake_providers(config),
-        StateStore(config.state_dir / "repositories.json"),
+        StateStore(config.sqlite_index_path),
     )
     await pipeline.sync_repository(config.repository("repo"))
     # docs disabled, sim excluded: fifo.vhd(3) + badfile.vhd(1) + fifo.c(2)
@@ -466,7 +466,7 @@ async def test_local_amend_without_content_change_advances_commit(
     )
     store = VectorStore(config)
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
-    states = StateStore(config.state_dir / "repositories.json")
+    states = StateStore(config.sqlite_index_path)
     pipeline = IndexPipeline(
         config,
         GitManager(config.repos_dir),
@@ -513,7 +513,7 @@ async def test_local_untracked_file_lifecycle(tmp_path: Path, fake_lsp: Path) ->
     )
     store = VectorStore(config)
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
-    states = StateStore(config.state_dir / "repositories.json")
+    states = StateStore(config.sqlite_index_path)
     pipeline = IndexPipeline(
         config,
         GitManager(config.repos_dir),
@@ -772,7 +772,7 @@ def hdl_env(tmp_path: Path, hdl_remote: Path, fake_lsp: Path, fake_veridian: Pat
         GitManager(config.repos_dir),
         store,
         providers,
-        StateStore(config.state_dir / "repositories.json"),
+        StateStore(config.sqlite_index_path),
     )
     yield config, store, pipeline, providers
     store.close()
@@ -860,7 +860,7 @@ async def test_verilog_sv_fallback_without_veridian(
         GitManager(config.repos_dir),
         store,
         providers,
-        StateStore(config.state_dir / "repositories.json"),
+        StateStore(config.sqlite_index_path),
     )
     try:
         await pipeline.sync_repository(config.repository("hdl"))
@@ -897,7 +897,7 @@ async def test_all_analyzers_unavailable_falls_back(
         GitManager(config.repos_dir),
         store,
         providers,
-        StateStore(config.state_dir / "repositories.json"),
+        StateStore(config.sqlite_index_path),
     )
     try:
         await pipeline.sync_repository(config.repository("hdl"))

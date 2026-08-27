@@ -139,7 +139,7 @@ async def env(tmp_path: Path):
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     providers = fake_providers(config)
     git_manager = GitManager(config.repos_dir)
-    states = StateStore(config.state_dir / "repositories.json")
+    states = StateStore(config.sqlite_index_path)
 
     cfg = config.repository("repo")
     plan = await git_manager.sync(cfg, None)

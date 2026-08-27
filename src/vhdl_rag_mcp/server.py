@@ -129,7 +129,10 @@ class VhdlRagApp:
         self.states = (
             states
             if states is not None
-            else StateStore(config.state_dir / "repositories.json")
+            else StateStore(
+                config.sqlite_index_path,
+                config.state_dir / "repositories.json",
+            )
         )
         self.pipeline = IndexPipeline(
             config, self.git, self.store, self.providers, self.states
@@ -152,13 +155,15 @@ class VhdlRagApp:
     def migrate_index(self) -> bool:
         """Migrate the index to the current schema layout (v1 -> v2).
 
-        Both the SQLite store layout and the repository state document
-        carry the schema version; whichever is behind is migrated. The
-        legacy ``vhdl`` collection is dropped and every repository's
-        indexed commit is forgotten, so the next sync rebuilds the index
-        deterministically from git (no manual data migration). Safe to
-        call on every start: a current deployment is left untouched.
-        Returns True when a migration ran.
+        The SQLite store layout carries the schema version; a legacy
+        store has the legacy ``vhdl`` collection dropped. Repository
+        state now lives in the same database (created current at
+        construction time); a legacy ``state/repositories.json``
+        document is imported on first start. After any migration every
+        repository's indexed commit is forgotten, so the next sync
+        rebuilds the index deterministically from git (no manual data
+        migration). Safe to call on every start: a current deployment
+        is left untouched. Returns True when a migration ran.
         """
         db_migrated = self.store.migrate()
         state_migrated = self.states.migrate()
@@ -308,6 +313,7 @@ class VhdlRagApp:
         if self._closed:
             return
         self._closed = True
+        self.states.close()
         self.store.close()
 
 
