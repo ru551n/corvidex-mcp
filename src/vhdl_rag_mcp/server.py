@@ -3,7 +3,7 @@
 Exposes eight tools to coding agents:
 
 - ``search_vhdl`` / ``search_docs`` / ``search_code`` — hybrid
-  (dense + sparse) semantic search in one domain, with optional
+  (dense + full-text) semantic search in one domain, with optional
   repository/category filters and identifier cross-references;
 - ``search_knowledge`` — the same search fused across all three
   domains (RRF over the per-domain rank lists);
@@ -14,8 +14,8 @@ Exposes eight tools to coding agents:
   (incremental sync of selected repos, full reindex of one).
 
 Lifecycle: load config, log to stderr/file (stdout is reserved for
-the MCP protocol), take a single-instance lock, create the Qdrant
-collections (downloading the embedding models on first run), run an
+the MCP protocol), take a single-instance lock, create the vector-store
+tables (downloading the embedding models on first run), run an
 initial sync, then serve stdio while a background task syncs every
 ``sync_interval`` seconds. All failures are contained per repository:
 one broken repository records its error and does not affect the
@@ -142,7 +142,7 @@ class VhdlRagApp:
     # -- collections ---------------------------------------------------------
 
     def ensure_collections(self) -> None:
-        """Create the Qdrant collections (loads the embedding models)."""
+        """Create the vector-store tables (loads the embedding models)."""
         self.store.ensure_collections(
             hdl_dim=self.providers.dimension(CollectionName.HDL),
             docs_dim=self.providers.dimension(CollectionName.DOCS),

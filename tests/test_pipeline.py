@@ -214,29 +214,10 @@ class FakeDense:
         yield np.array([float(len(query)), 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-class FakeSparseVec:
-    def __init__(self, indices, values) -> None:
-        self.indices = np.asarray(indices, dtype=np.int32)
-        self.values = np.asarray(values, dtype=np.float32)
-
-
-class FakeSparse:
-    def passage_embed(self, texts, mode="passage"):
-        for text in texts:
-            yield FakeSparseVec([len(text), 42], [1.0, 2.0])
-
-    def query_embed(self, query, mode="query"):
-        yield FakeSparseVec([len(query)], [1.0])
-
-
 def fake_providers(config: AppConfig) -> EmbeddingProviders:
     providers = EmbeddingProviders(config)
-    dense = FastEmbedProvider(
-        "fake/dense", "fake/sparse", dense=FakeDense(), sparse=FakeSparse()
-    )
-    sparse = FastEmbedProvider("fake/sparse", "fake/sparse", sparse=FakeSparse())
+    dense = FastEmbedProvider("fake/dense", dense=FakeDense())
     providers._dense_provider = lambda _collection: dense  # type: ignore[method-assign]
-    providers._sparse_provider = lambda: sparse  # type: ignore[method-assign]
     return providers
 
 
@@ -801,7 +782,7 @@ def _all_hdl_chunks(store: VectorStore, providers: EmbeddingProviders) -> list:
     scored = store.query(
         CollectionName.HDL,
         providers.embed_query(CollectionName.HDL, "fifo"),
-        providers.embed_sparse_query("fifo"),
+        "fifo",
         limit=50,
     )
     return [sc.chunk for sc in scored]
@@ -850,11 +831,10 @@ async def test_cross_language_cross_reference(hdl_env) -> None:
     config, store, pipeline, providers = hdl_env
     await pipeline.sync_repository(config.repository("hdl"))
     dense = providers.embed_query(CollectionName.HDL, "FIFO_DEPTH")
-    sparse = providers.embed_sparse_query("FIFO_DEPTH")
     scored = store.query(
         CollectionName.HDL,
         dense,
-        sparse,
+        "FIFO_DEPTH",
         limit=50,
         should={"symbols": ("FIFO_DEPTH",)},
     )

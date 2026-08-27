@@ -6,7 +6,7 @@ description: Semantic search over the organization's VHDL code, VHDL-related doc
 # vhdl-rag-mcp — VHDL knowledge base
 
 The `vhdl-rag-mcp` server indexes configured Git repositories into three
-hybrid (dense + BM25) search collections: **vhdl** (per-construct
+hybrid (dense + full-text) search collections: **hdl** (per-construct
 chunks), **docs** (per-section chunks), and **code** (per-function/class
 chunks). Every result carries exact source attribution (repository,
 file, lines, commit) and the identifiers the chunk references
@@ -71,7 +71,7 @@ file, lines, commit) and the identifiers the chunk references
 - Results are chunks, not whole files: `content` is the construct/
   section itself, self-contained by design; line numbers refer to the
   repository file at the shown commit.
-- The `score` line is the hybrid RRF relevance (dense + BM25
+- The `score` line is the hybrid RRF relevance (dense + full-text
   fusion).
 - VHDL chunking is LSP-primary: files with syntax errors fall back to a
   structural scan — still indexed, coarser chunks.

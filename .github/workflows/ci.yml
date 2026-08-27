@@ -33,8 +33,9 @@ jobs:
     # Full-pipeline RAG quality gate: indexes a small fixture corpus
     # with the real fastembed models and asserts a fixed query battery
     # retrieves the expected files (see docs/quality-testing.md).
-    # ubuntu-latest only: it downloads ~1.5 GB of models (cached below)
-    # and runs ONNX inference, so it does not join the cross-OS matrix.
+    # ubuntu-latest only: it downloads the embedding model (~0.1 GB,
+    # cached below) and runs ONNX inference, so it does not join the
+    # cross-OS matrix.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

@@ -75,7 +75,7 @@ class StateStore:
             raw: dict[str, Any] = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             # A corrupt state file must not kill the server; the index in
-            # Qdrant remains usable. Log loudly and start empty — the next
+            # the vector store remains usable. Log loudly and start empty — the next
             # sync reindexes conservatively (full index when commit is
             # unknown).
             logger.error(

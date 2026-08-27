@@ -16,7 +16,6 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 # Third-party loggers kept at WARNING to keep stderr readable.
 _NOISY_LOGGERS = (
-    "qdrant_client",
     "fastembed",
     "onnxruntime",
     "huggingface_hub",

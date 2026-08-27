@@ -3,8 +3,8 @@
 The unit/e2e suite runs entirely offline with fake embedding providers.
 That verifies *plumbing*, not *retrieval quality*. The quality job
 (`quality-e2e` in `.github/workflows/ci.yml`) closes that gap: it runs
-the **real** production pipeline — git sync, chunking, dense + sparse
-embedding, Qdrant hybrid (RRF) search — on a small fixture corpus with
+the **real** production pipeline — git sync, chunking, dense
+embedding, hybrid (dense + full-text, RRF) search — on a small fixture corpus with
 the **real** fastembed models, and asserts that a fixed query battery
 retrieves the expected source files.
 
@@ -13,7 +13,7 @@ retrieves the expected source files.
 | Job / env | OS | Models | Purpose |
 |---|---|---|---|
 | `test` matrix | ubuntu / windows / macos / RHEL / arm64 | fakes | plumbing, fast, offline |
-| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en, Qdrant/bm25) | end-to-end retrieval quality |
+| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en + FTS5) | end-to-end retrieval quality |
 | `tests/test_quality.py` locally | any | real | same gate, on demand |
 
 `tests/test_quality.py` is skipped unless
@@ -109,7 +109,7 @@ quality battery (real models, structural chunking):
   topics). After adding, run the local command above and, if the new
   query is borderline, lower `MIN_TOP3_HITS` or keep it non-strict.
 - **Add/change corpus content**: keep topics *distinguishable* and
-  identifiers unique per file (the BM25 leg leans on identifiers; the
+  identifiers unique per file (the full-text leg leans on identifiers; the
   dense leg on topic separation). Re-run locally.
 - **Changing the default model** (the `hdl_model`/`docs_model`/
   `code_model` config defaults): re-run locally, re-tune thresholds if

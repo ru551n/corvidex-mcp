@@ -69,29 +69,10 @@ class FakeDense:
         yield np.array([float(len(query)), 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-class FakeSparseVec:
-    def __init__(self, indices, values) -> None:
-        self.indices = np.asarray(indices, dtype=np.int32)
-        self.values = np.asarray(values, dtype=np.float32)
-
-
-class FakeSparse:
-    def passage_embed(self, texts, mode="passage"):
-        for text in texts:
-            yield FakeSparseVec([len(text), len(text) + 7], [1.0, 2.0])
-
-    def query_embed(self, query, mode="query"):
-        yield FakeSparseVec([len(query)], [1.0])
-
-
 def fake_providers(config: AppConfig) -> EmbeddingProviders:
     providers = EmbeddingProviders(config)
-    dense = FastEmbedProvider(
-        "fake/dense", "fake/sparse", dense=FakeDense(), sparse=FakeSparse()
-    )
-    sparse = FastEmbedProvider("fake/sparse", "fake/sparse", sparse=FakeSparse())
+    dense = FastEmbedProvider("fake/dense", dense=FakeDense())
     providers._dense_provider = lambda _collection: dense  # type: ignore[method-assign]
-    providers._sparse_provider = lambda: sparse  # type: ignore[method-assign]
     return providers
 
 
@@ -235,8 +216,7 @@ async def env(tmp_path: Path):
         ),
     ]
     dense = providers.embed_passages(CollectionName.HDL, [c.content for c in chunks])
-    sparse = providers.embed_sparse_passages([c.content for c in chunks])
-    store.upsert_chunks(chunks, dense, sparse)
+    store.upsert_chunks(chunks, dense)
 
     retrieval = RetrievalService(config, git_manager, store, providers, states)
     yield store, retrieval

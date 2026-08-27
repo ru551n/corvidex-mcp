@@ -4,9 +4,9 @@ HDL covers VHDL, Verilog, and SystemVerilog (one collection).
 
 The :class:`Chunk` model is the single currency between the indexers, the
 embedding layer, and the vector store. Its ``canonical_id`` feeds the
-deterministic Qdrant point ID; the git commit is deliberately NOT part of
-the ID, so re-indexing a file at a new commit reuses stable point IDs and
-stale chunks are removed via payload filters (repository + file) before
+deterministic vector-store row ID; the git commit is deliberately NOT part of
+the ID, so re-indexing a file at a new commit reuses stable row IDs and
+stale chunks are removed via row filters (repository + file) before
 the new ones are upserted. The commit stays in the payload for attribution.
 
 Cross-referencing
@@ -53,18 +53,6 @@ class ContentType(StrEnum):
 #: The index is derived from git, so upgrading past a layout change is a
 #: safe deterministic full reindex (no manual data migration).
 INDEX_SCHEMA_VERSION = 2
-
-
-@dataclass(frozen=True)
-class SparseVectorData:
-    """A sparse vector in storage-agnostic form (model vocab indices)."""
-
-    indices: tuple[int, ...]
-    values: tuple[float, ...]
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.indices
 
 
 @dataclass(frozen=True)
@@ -136,7 +124,7 @@ class Chunk:
         )
 
     def payload(self) -> dict[str, Any]:
-        """Full metadata + content stored as the Qdrant point payload."""
+        """Full metadata + content stored as the vector-store row."""
         data: dict[str, Any] = {
             "repository": self.repository,
             "branch": self.branch,
@@ -177,8 +165,8 @@ class SearchResult:
     commit: str
     file: str
     content: str
-    #: Fused hybrid relevance score from the vector store (dense + sparse
-    #: RRF).
+    #: Fused hybrid relevance score from the vector store (dense +
+    #: full-text RRF).
     score: float
     language: str | None = None
     symbol: str | None = None

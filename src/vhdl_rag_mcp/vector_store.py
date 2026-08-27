@@ -1,61 +1,65 @@
-"""Qdrant-backed vector store — the only module that knows Qdrant.
+"""sqlite-vec-backed vector store — the only module that knows sqlite-vec.
 
 Design notes
 ------------
-- One embedded (local) Qdrant instance under ``<data_dir>/qdrant`` by
-  default; server mode (``[qdrant] mode = "server"``) is supported via the
-  same interface. No separate Qdrant server is required and no second
-  instance is run.
-- Three collections in that single instance:
-    ``hdl``   — semantically chunked HDL (VHDL, Verilog, SystemVerilog)
-    ``docs``  — HDL-related documentation
-    ``code``  — general source code (C/C++, Python, ...)
-  Collections may use different dense embedding models; the store keeps
-  them isolated. Upgrading from the v1 layout (a ``vhdl`` collection)
-  is a deterministic full reindex; :meth:`VectorStore.delete_legacy_vhdl`
-  drops the old collection safely because every chunk is reproducible
-  from the git history.
-- Every collection carries two named vectors:
-    ``dense``  — dense vector from the domain's embedding model
-    ``sparse`` — BM25 sparse vector (Qdrant-native sparse index)
-  Search is a native Qdrant hybrid query: both legs are prefetched and
-  fused with RRF, so results combine semantic similarity and exact
-  identifier/token matching in one ranked list.
-- Local mode only accepts UUID point IDs, so chunk IDs are mapped to
-  deterministic ``uuid5`` values over :meth:`Chunk.canonical_id`.
-  Determinism makes re-upserts idempotent; stale-chunk cleanup happens via
-  payload filters (repository/file), never by recomputing IDs.
+- One embedded SQLite database file (``index.sqlite`` under ``data_dir``)
+  via the stdlib ``sqlite3`` module plus the ``sqlite-vec`` extension.
+  No separate server process is required.
+- Three collections (``hdl``, ``docs``, ``code``) live in the same
+  database, each as a triplet of tables:
+    ``chunks_<c>``  — regular table: the chunk payload (id, attribution,
+                      content, symbols as a JSON list, ...);
+    ``vec_<c>``     — a sqlite-vec ``vec0`` table holding the dense
+                      vectors, rowid-joined to ``chunks_<c>``;
+    ``fts_<c>``     — a SQLite FTS5 table over the chunk content,
+                      rowid-joined to ``chunks_<c>``.
+  Upgrading from the v1 layout (a ``vhdl`` collection) is a
+  deterministic full reindex; :meth:`VectorStore.delete_legacy_vhdl`
+  drops the old tables safely because every chunk is reproducible from
+  the git history.
+- Chunk rows are keyed by a deterministic ``uuid5`` id over
+  :meth:`Chunk.canonical_id` (unique column), so re-upserts are
+  idempotent ``ON CONFLICT(id) DO UPDATE`` merges; stale-chunk cleanup
+  happens via SQL predicates (repository/file), never by recomputing
+  IDs.
+- Search is hybrid: the dense leg is a flat (exact) vec0 KNN over
+  unit-normalized vectors (L2 order equals cosine order), the full-text
+  leg is an FTS5 BM25 rank. The two rank lists are fused with RRF
+  (rank-based, K=60) in this module. FTS5's ``unicode61`` tokenizer is
+  configured with ``tokenchars '_'`` so HDL identifiers stay whole
+  (``fifo_ctrl`` is one token; a query for it matches only documents
+  containing it). English stop words are dropped from the FTS query so
+  common words in a natural-language query do not pollute the leg.
+  This full-text leg replaces the BM25 sparse-vector leg of the Qdrant
+  layout — and with it the separate BM25 embedding model.
+- Vector search is flat (exact) KNN: at repository scale (hundreds to
+  tens of thousands of chunks) that is both fast and exact (sqlite-vec
+  scores L2 distance with SIMD). If a deployment grows beyond that, a
+  different vector engine can be swapped in without touching the rest
+  of the store.
+- The database runs in WAL mode so the periodic sync writer never
+  blocks concurrent queries.
 - The MCP layer only ever talks about repositories, files, symbols, and
-  results — Qdrant terminology does not leak out of this module.
+  results — SQLite/sqlite-vec terminology does not leak out of this
+  module.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Condition,
-    Distance,
-    FieldCondition,
-    Filter,
-    Fusion,
-    FusionQuery,
-    MatchValue,
-    PointStruct,
-    Prefetch,
-    SparseIndexParams,
-    SparseVector,
-    SparseVectorParams,
-    VectorParams,
-)
+import numpy as np
+import sqlite_vec  # type: ignore[import-untyped]
 
 from .config import AppConfig
-from .models import Chunk, CollectionName, SparseVectorData
+from .models import Chunk, CollectionName
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +72,179 @@ ALL_COLLECTIONS: tuple[CollectionName, ...] = (
     CollectionName.CODE,
 )
 
-DENSE_VECTOR_NAME = "dense"
-SPARSE_VECTOR_NAME = "sparse"
+# RRF rank constant for fusing the per-collection dense and full-text
+# legs (the standard value; originally taken from Qdrant's FusionQuery
+# default).
+_RRF_K = 60
 
-# Namespace for deterministic point IDs (local Qdrant requires UUIDs).
-_ID_NAMESPACE = uuid.NAMESPACE_URL
-_ID_PREFIX = "vhdl-rag-mcp::"
+#: Rows returned by get_by_symbol are capped (a symbol rarely appears in
+#: more than a few constructs of one kind).
+_SYMBOL_LOOKUP_LIMIT = 64
 
-# Payload fields that may be used as equality filters in queries.
+# English stop words dropped from FTS queries: with a pure OR-of-tokens
+# query they would match nearly every document and blur the exact-match
+# leg. HDL identifiers (rst_n, fifo_ctrl, ...) are never stop words.
+_STOP_WORDS = frozenset(
+    (
+        "a",
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "all",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "because",
+        "been",
+        "before",
+        "being",
+        "below",
+        "between",
+        "both",
+        "but",
+        "by",
+        "can",
+        "did",
+        "do",
+        "does",
+        "doing",
+        "down",
+        "during",
+        "each",
+        "few",
+        "for",
+        "from",
+        "further",
+        "had",
+        "has",
+        "have",
+        "having",
+        "he",
+        "her",
+        "here",
+        "hers",
+        "herself",
+        "him",
+        "himself",
+        "his",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "itself",
+        "just",
+        "like",
+        "made",
+        "make",
+        "many",
+        "me",
+        "more",
+        "most",
+        "my",
+        "myself",
+        "no",
+        "nor",
+        "not",
+        "now",
+        "of",
+        "off",
+        "on",
+        "once",
+        "only",
+        "or",
+        "other",
+        "our",
+        "ours",
+        "ourselves",
+        "out",
+        "over",
+        "own",
+        "same",
+        "she",
+        "should",
+        "so",
+        "some",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "themselves",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "through",
+        "to",
+        "too",
+        "under",
+        "until",
+        "up",
+        "very",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "why",
+        "will",
+        "with",
+        "you",
+        "your",
+        "yours",
+        "yourself",
+        "yourselves",
+    )
+)
+
+_FTS_QUERY_TOKEN_RE = re.compile(r"[^0-9a-zA-Z_]+")
+_VEC_DIM_RE = re.compile(r"float\[(\d+)\]")
+
+# Metadata columns (everything :meth:`Chunk.payload` stores).
+_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "repository",
+    "branch",
+    "commit",
+    "file",
+    "content_type",
+    "language",
+    "collection",
+    "symbol",
+    "symbol_kind",
+    "start_line",
+    "end_line",
+    "content",
+    "library",
+    "entity",
+    "architecture",
+    "module",
+    "native_symbol_kind",
+    "heading",
+    "section",
+    "symbols",
+)
+
+# Metadata fields that may be used as equality filters in queries.
 _FILTER_KEYS = frozenset(
     {
         "repository",
@@ -91,14 +260,24 @@ _FILTER_KEYS = frozenset(
     }
 )
 
+# Namespace for deterministic row IDs (stable across commits and
+# processes; makes re-upserts idempotent).
+_ID_NAMESPACE = uuid.NAMESPACE_URL
+_ID_PREFIX = "vhdl-rag-mcp::"
+
 
 class VectorStoreError(RuntimeError):
     """Raised when the vector store cannot perform an operation."""
 
 
 def point_id(chunk: Chunk) -> str:
-    """Deterministic UUIDv5 point ID for a chunk (local mode requires UUIDs)."""
+    """Deterministic UUIDv5 row ID for a chunk (stable across commits)."""
     return str(uuid.uuid5(_ID_NAMESPACE, _ID_PREFIX + chunk.canonical_id))
+
+
+def _col(field: str) -> str:
+    """Double-quoted column identifier (``commit`` is a SQLite keyword)."""
+    return '"' + field + '"'
 
 
 def _check_filter_key(key: str) -> None:
@@ -106,49 +285,73 @@ def _check_filter_key(key: str) -> None:
         raise VectorStoreError(f"unknown filter key: {key!r}")
 
 
-def _build_filter(
+def _where_clause(
     must: Mapping[str, str] | None,
     should: Mapping[str, Sequence[str]] | None,
-) -> Filter | None:
-    """AND of ``must`` equalities plus an optional OR of ``should`` values.
+) -> tuple[str, list[Any]] | None:
+    """SQL predicate over the ``chunks`` table alias plus bound params.
 
-    ``should`` maps a payload key to a list of values: a point matches if
-    the key equals ANY of them (this is how the cross-referencing ``symbols``
-    list field is queried).
+    ``must`` maps columns to equality values; ``should`` maps a column
+    to a list of values the row matches if it contains ANY of them
+    (``json_each`` over the cross-referencing ``symbols`` list).
     """
-    must_conditions: list[Condition] = []
-    should_conditions: list[Condition] = []
+    parts: list[str] = []
+    params: list[Any] = []
     if must:
         for key, value in must.items():
             _check_filter_key(key)
-            must_conditions.append(
-                FieldCondition(key=key, match=MatchValue(value=value))
-            )
+            parts.append(f"c.{_col(key)} = ?")
+            params.append(value)
     if should:
         for key, values in should.items():
             _check_filter_key(key)
+            ors: list[str] = []
             for value in values:
-                should_conditions.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
+                ors.append(
+                    f"EXISTS (SELECT 1 FROM json_each(c.{_col(key)}) "
+                    "WHERE json_each.value = ?)"
                 )
-    if not must_conditions and not should_conditions:
+                params.append(value)
+            if ors:
+                parts.append("(" + " OR ".join(ors) + ")")
+    if not parts:
         return None
-    return Filter(must=must_conditions or None, should=should_conditions or None)
+    return " AND ".join(parts), params
 
 
-@dataclass(frozen=True)
-class ScoredChunk:
-    """A chunk with its hybrid (RRF-fused) relevance score."""
+def _fts_query(text: str) -> str | None:
+    """FTS5 query for the full-text leg, or None when it cannot match.
 
-    score: float
-    chunk: Chunk
+    The raw query is tokenized the way the index tokenizer sees it
+    (split on anything but letters/digits/underscore) so the query is a
+    safe OR of identifier tokens — no FTS5 metacharacters reach the
+    engine. English stop words are dropped (see ``_STOP_WORDS``).
+    """
+    tokens = [
+        token
+        for token in _FTS_QUERY_TOKEN_RE.split(text or "")
+        if token and token.lower() not in _STOP_WORDS
+    ]
+    return " OR ".join(tokens) if tokens else None
+
+
+def _unit_vector(vector: Sequence[float]) -> np.ndarray:
+    """Normalize to unit length (L2 order over unit vectors == cosine)."""
+    arr = np.asarray(vector, dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm > 0.0:
+        arr = arr / norm
+    return arr
 
 
 def chunk_from_payload(payload: dict[str, Any]) -> Chunk:
-    """Rebuild a Chunk from its stored payload."""
+    """Rebuild a Chunk from its stored metadata row."""
     from .models import CollectionName, ContentType
 
-    symbols_raw = payload.get("symbols") or []
+    symbols_raw = payload.get("symbols")
+    if isinstance(symbols_raw, str):
+        symbols_raw = json.loads(symbols_raw)
+    symbols_raw = symbols_raw or []
     return Chunk(
         repository=payload["repository"],
         branch=payload["branch"],
@@ -173,134 +376,202 @@ def chunk_from_payload(payload: dict[str, Any]) -> Chunk:
     )
 
 
-def _sparse_qdrant(data: SparseVectorData) -> SparseVector:
-    return SparseVector(indices=list(data.indices), values=list(data.values))
+@dataclass(frozen=True)
+class ScoredChunk:
+    """A chunk with its hybrid (RRF-fused) relevance score."""
+
+    score: float
+    chunk: Chunk
 
 
 class VectorStore:
-    """Thin, typed wrapper around a single (local or server) Qdrant."""
+    """Thin, typed wrapper around an embedded SQLite + sqlite-vec index."""
 
     def __init__(self, config: AppConfig) -> None:
-        if config.qdrant.mode == "local":
-            path = config.qdrant_local_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._client = QdrantClient(path=str(path))
-            logger.info("qdrant local mode: %s", path)
-        elif config.qdrant.url:
-            self._client = QdrantClient(url=config.qdrant.url)
-            logger.info("qdrant server mode: %s", config.qdrant.url)
-        else:
-            raise VectorStoreError(
-                'qdrant.mode = "server" requires qdrant.url to be configured'
-            )
-        self._existing: set[str] | None = None
+        path = config.sqlite_index_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        # sqlite-vec is a loadable extension; the stdlib connection
+        # refuses loadable extensions until explicitly enabled.
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        # WAL: the periodic sync writer never blocks concurrent queries.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn = conn
+        logger.info("sqlite-vec embedded store: %s", path)
 
     def close(self) -> None:
-        self._client.close()
+        self._conn.close()
 
-    # -- collections ----------------------------------------------------
+    # -- tables ---------------------------------------------------------
 
-    def _collections(self) -> set[str]:
-        if self._existing is None:
-            self._existing = {
-                c.name for c in self._client.get_collections().collections
-            }
-        return self._existing
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
-    def _dense_dimension(self, name: str) -> int | None:
-        vectors = self._client.get_collection(name).config.params.vectors
-        if isinstance(vectors, VectorParams):
-            return vectors.size
-        if isinstance(vectors, dict):
-            dense = vectors.get(DENSE_VECTOR_NAME)
-            return dense.size if isinstance(dense, VectorParams) else None
-        return None
+    def _tables(self) -> set[str]:
+        """Collection names that have a ``chunks_<name>`` table."""
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        return {
+            name[7:] for name in (row[0] for row in rows) if name.startswith("chunks_")
+        }
+
+    def _vec_dimension(self, collection: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (f"vec_{collection}",),
+        ).fetchone()
+        if row is None:
+            return None
+        match = _VEC_DIM_RE.search(row[0])
+        return int(match.group(1)) if match else None
+
+    def _create_collection(self, collection: str, dim: int) -> None:
+        cols = ", ".join(
+            f'"{field}" '
+            + ("INTEGER" if field in ("start_line", "end_line") else "TEXT")
+            for field in _PAYLOAD_FIELDS
+        )
+        self._conn.execute(
+            f"CREATE TABLE chunks_{collection} (id TEXT PRIMARY KEY, {cols})"
+        )
+        repo, file, kind = (
+            _col("repository"),
+            _col("file"),
+            _col("symbol_kind"),
+        )
+        self._conn.execute(
+            f"CREATE INDEX idx_{collection}_repo ON chunks_{collection}({repo})"
+        )
+        self._conn.execute(
+            f"CREATE INDEX idx_{collection}_repo_file "
+            f"ON chunks_{collection}({repo}, {file})"
+        )
+        self._conn.execute(
+            f"CREATE INDEX idx_{collection}_symbol "
+            f"ON chunks_{collection}({kind}, {repo})"
+        )
+        # The vec0 table's declared dimension is the drift guard (see
+        # ensure_collections).
+        self._conn.execute(
+            f"CREATE VIRTUAL TABLE vec_{collection} USING vec0(embedding float[{dim}])"
+        )
+        # FTS5 over the content; tokenchars '_' keeps HDL identifiers
+        # (fifo_ctrl, rst_n) single tokens so exact-identifier queries
+        # match whole identifiers, not just their parts.
+        self._conn.execute(
+            f"CREATE VIRTUAL TABLE fts_{collection} "
+            "USING fts5(content, tokenize=\"unicode61 tokenchars '_'\")"
+        )
+        self._conn.commit()
+        logger.info("created sqlite-vec collection %r (dim=%d)", collection, dim)
 
     def ensure_collections(self, hdl_dim: int, docs_dim: int, code_dim: int) -> None:
         """Create the collections if missing; fail loudly on dimension drift.
 
         A changed embedding model changes the dense vector size; silently
-        mixing dimensions would corrupt retrieval, so this is an error with
-        an actionable message.
+        mixing dimensions would corrupt retrieval, so this is an error
+        with an actionable message.
         """
         for name, dim in (
             (COLLECTION_HDL, hdl_dim),
             (COLLECTION_DOCS, docs_dim),
             (COLLECTION_CODE, code_dim),
         ):
-            if name in self._collections():
-                size = self._dense_dimension(name)
-                if size != dim:
-                    raise VectorStoreError(
-                        f"collection {name!r} has dense vector size {size}, "
-                        f"expected {dim}. The embedding model changed — "
-                        "delete the collection (or the qdrant data directory) "
-                        "and reindex."
-                    )
+            if not self._table_exists(f"chunks_{name}"):
+                self._create_collection(name, dim)
                 continue
-            self._client.create_collection(
-                name,
-                vectors_config={
-                    DENSE_VECTOR_NAME: VectorParams(size=dim, distance=Distance.COSINE)
-                },
-                sparse_vectors_config={
-                    SPARSE_VECTOR_NAME: SparseVectorParams(index=SparseIndexParams())
-                },
-            )
-            if self._existing is not None:
-                self._existing.add(name)
-            logger.info("created qdrant collection %r (dim=%d)", name, dim)
+            size = self._vec_dimension(name)
+            if size != dim:
+                raise VectorStoreError(
+                    f"collection {name!r} has dense vector size {size}, "
+                    f"expected {dim}. The embedding model changed — "
+                    "delete the index (or the data directory) and reindex."
+                )
 
     def delete_legacy_vhdl(self) -> bool:
         """Drop the v1-layout ``vhdl`` collection (safe: reproducible).
 
-        Returns True when a legacy collection was removed.
+        Returns True when a legacy table was removed.
         """
-        name = "vhdl"
-        if name not in self._collections():
-            return False
-        self._client.delete_collection(name)
-        if self._existing is not None:
-            self._existing.discard(name)
-        logger.info("deleted legacy qdrant collection %r (v1 layout)", name)
-        return True
+        dropped = False
+        for name in ("chunks_vhdl", "vec_vhdl", "fts_vhdl"):
+            if self._table_exists(name):
+                self._conn.execute(f"DROP TABLE {name}")
+                dropped = True
+        if dropped:
+            self._conn.commit()
+            logger.info("deleted legacy sqlite-vec collection 'vhdl' (v1 layout)")
+        return dropped
 
     # -- writes ---------------------------------------------------------
 
-    def upsert_chunks(
-        self,
-        chunks: list[Chunk],
-        dense: list[list[float]],
-        sparse: list[SparseVectorData],
-    ) -> None:
-        """Upsert chunks with precomputed vectors (same order, same length)."""
-        if len(chunks) != len(dense) or len(chunks) != len(sparse):
+    def upsert_chunks(self, chunks: list[Chunk], dense: list[list[float]]) -> None:
+        """Upsert chunks with precomputed dense vectors (same order/length)."""
+        if len(chunks) != len(dense):
             raise VectorStoreError(
-                f"got {len(chunks)} chunks, {len(dense)} dense vectors, "
-                f"{len(sparse)} sparse vectors"
+                f"got {len(chunks)} chunks, {len(dense)} dense vectors"
             )
-        by_collection: dict[str, list[tuple[Chunk, list[float], SparseVectorData]]] = {}
-        for chunk, d, s in zip(chunks, dense, sparse, strict=True):
-            by_collection.setdefault(chunk.collection.value, []).append((chunk, d, s))
+        by_collection: dict[str, list[tuple[Chunk, list[float]]]] = {}
+        for chunk, d in zip(chunks, dense, strict=True):
+            by_collection.setdefault(chunk.collection.value, []).append((chunk, d))
         for collection_name, items in by_collection.items():
-            self._client.upsert(
-                collection_name,
-                points=[
-                    PointStruct(
-                        id=point_id(chunk),
-                        vector={
-                            DENSE_VECTOR_NAME: d,
-                            SPARSE_VECTOR_NAME: _sparse_qdrant(s),
-                        },
-                        payload=chunk.payload(),
-                    )
-                    for chunk, d, s in items
-                ],
-                wait=True,
-            )
-            logger.info(
-                "upserted %d chunks into collection %r", len(items), collection_name
-            )
+            if not items:
+                continue
+            self._upsert_collection(collection_name, items)
+
+    def _payload_row(self, chunk: Chunk) -> tuple[Any, ...]:
+        payload = chunk.payload()
+        values: list[Any] = []
+        for field in _PAYLOAD_FIELDS:
+            value = payload.get(field)
+            if field == "symbols":
+                value = json.dumps(list(value)) if value else "[]"
+            values.append(value)
+        return (point_id(chunk), *values)
+
+    def _upsert_collection(
+        self, collection: str, items: list[tuple[Chunk, list[float]]]
+    ) -> None:
+        conn = self._conn
+        fields_sql = ", ".join(_col(f) for f in _PAYLOAD_FIELDS)
+        placeholders = ", ".join("?" * len(_PAYLOAD_FIELDS))
+        updates_sql = ", ".join(
+            f"{_col(f)} = excluded.{_col(f)}" for f in _PAYLOAD_FIELDS
+        )
+        upsert_sql = (
+            f"INSERT INTO chunks_{collection} (id, {fields_sql}) "
+            f"VALUES (?, {placeholders}) ON CONFLICT(id) DO UPDATE SET "
+            f"{updates_sql} RETURNING rowid"
+        )
+        vec_sql = f"INSERT INTO vec_{collection} (rowid, embedding) VALUES (?, ?)"
+        fts_sql = f"INSERT INTO fts_{collection} (rowid, content) VALUES (?, ?)"
+        try:
+            for chunk, d in items:
+                rowid = conn.execute(upsert_sql, self._payload_row(chunk)).fetchone()[0]
+                vector = _unit_vector(d)
+                # vec0/fts5 are virtual tables: no OR REPLACE, so an
+                # upsert is delete-then-insert (same transaction).
+                conn.execute(f"DELETE FROM vec_{collection} WHERE rowid = ?", (rowid,))
+                conn.execute(
+                    vec_sql, (rowid, sqlite_vec.serialize_float32(vector.tolist()))
+                )
+                conn.execute(f"DELETE FROM fts_{collection} WHERE rowid = ?", (rowid,))
+                conn.execute(fts_sql, (rowid, chunk.content))
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise VectorStoreError(
+                f"upsert into collection {collection!r} failed: {exc}"
+            ) from exc
+        logger.info("upserted %d chunks into collection %r", len(items), collection)
 
     def delete_file(self, repository: str, file: str) -> int:
         """Remove all chunks for one file from every collection."""
@@ -319,24 +590,41 @@ class VectorStore:
 
     def _delete(self, collection: CollectionName, must: Mapping[str, str]) -> int:
         name = collection.value
-        if name not in self._collections():
+        if not self._table_exists(f"chunks_{name}"):
             return 0
-        before = self._client.count(name, exact=True).count
-        conditions: list[Condition] = [
-            FieldCondition(key=key, match=MatchValue(value=value))
-            for key, value in must.items()
-        ]
-        self._client.delete(name, points_selector=Filter(must=conditions), wait=True)
-        after = self._client.count(name, exact=True).count
-        deleted = before - after
-        if deleted:
+        predicate = " AND ".join(f"{_col(key)} = ?" for key in must)
+        params = [must[key] for key in must]
+        conn = self._conn
+        try:
+            rowids = [
+                row[0]
+                for row in conn.execute(
+                    f"SELECT rowid FROM chunks_{name} WHERE {predicate}", params
+                )
+            ]
+            if not rowids:
+                return 0
+            conn.executemany(
+                f"DELETE FROM vec_{name} WHERE rowid = ?", [(r,) for r in rowids]
+            )
+            conn.executemany(
+                f"DELETE FROM fts_{name} WHERE rowid = ?", [(r,) for r in rowids]
+            )
+            conn.execute(f"DELETE FROM chunks_{name} WHERE {predicate}", params)
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise VectorStoreError(
+                f"delete from collection {name!r} failed: {exc}"
+            ) from exc
+        if rowids:
             logger.info(
                 "deleted %d stale chunks from %r for %s",
-                deleted,
+                len(rowids),
                 name,
                 " ".join(f"{k}={v}" for k, v in must.items()),
             )
-        return deleted
+        return len(rowids)
 
     # -- reads ----------------------------------------------------------
 
@@ -344,72 +632,105 @@ class VectorStore:
         self,
         collection: CollectionName,
         dense: list[float],
-        sparse: SparseVectorData,
+        query_text: str,
         limit: int,
         must: Mapping[str, str] | None = None,
         should: Mapping[str, Sequence[str]] | None = None,
     ) -> list[ScoredChunk]:
-        """Hybrid (dense + sparse, RRF-fused) search with payload filters.
+        """Hybrid (dense + full-text, RRF-fused) search with row filters.
 
-        The filter is applied to every prefetch leg: for fusion queries
-        Qdrant does not apply a top-level ``query_filter`` to the fused
-        results, so filtering must happen on each leg.
+        Each leg contributes its top ``limit`` rows (after the row
+        filters); the rank lists are fused with RRF. ``query_text``
+        feeds the full-text leg (the raw query string); an empty text
+        falls back to the dense leg alone.
         """
         name = collection.value
-        if name not in self._collections():
+        if not self._table_exists(f"chunks_{name}"):
             return []
-        query_filter = _build_filter(must, should)
-        prefetch = [
-            Prefetch(
-                query=list(dense),
-                using=DENSE_VECTOR_NAME,
-                filter=query_filter,
-            )
-        ]
-        if not sparse.is_empty:
-            prefetch.append(
-                Prefetch(
-                    query=_sparse_qdrant(sparse),
-                    using=SPARSE_VECTOR_NAME,
-                    filter=query_filter,
-                )
-            )
-        response = self._client.query_points(
-            name,
-            query=FusionQuery(fusion=Fusion.RRF),
-            prefetch=prefetch,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
+        where = _where_clause(must, should)
+        where_sql = f" AND {where[0]}" if where else ""
+        where_params = where[1] if where else []
+        conn = self._conn
+
+        vector = _unit_vector(dense)
+        dense_sql = (
+            f"SELECT v.rowid, v.distance FROM vec_{name} v "
+            f"JOIN chunks_{name} c ON c.rowid = v.rowid "
+            f"WHERE v.embedding MATCH ? AND v.k = ?{where_sql} "
+            "ORDER BY v.distance"
         )
-        return [
-            ScoredChunk(
-                score=point.score, chunk=chunk_from_payload(point.payload or {})
+        dense_rows = conn.execute(
+            dense_sql,
+            (sqlite_vec.serialize_float32(vector.tolist()), limit, *where_params),
+        ).fetchall()
+
+        fts_query = _fts_query(query_text or "")
+        fts_rows: list[Any] = []
+        if fts_query is not None:
+            fts_sql = (
+                f"SELECT f.rowid, bm25(fts_{name}) AS score FROM fts_{name} f "
+                f"JOIN chunks_{name} c ON c.rowid = f.rowid "
+                f"WHERE fts_{name} MATCH ?{where_sql} "
+                "ORDER BY score LIMIT ?"
             )
-            for point in response.points
-            if point.payload is not None
+            fts_rows = conn.execute(
+                fts_sql, (fts_query, *where_params, limit)
+            ).fetchall()
+
+        if fts_query is None:
+            # Dense-only: map the (cosine-equivalent) distance into the
+            # same [0, 1] range the hybrid score uses.
+            results = []
+            for rowid, distance in dense_rows:
+                distance = float(distance)
+                cosine_distance = distance * distance / 2.0  # unit vectors
+                results.append((rowid, max(0.0, 1.0 - cosine_distance / 2.0)))
+        else:
+            scores: dict[int, float] = {}
+            for rank, row in enumerate(dense_rows, start=1):
+                scores[row[0]] = scores.get(row[0], 0.0) + 1.0 / (_RRF_K + rank)
+            for rank, row in enumerate(fts_rows, start=1):
+                scores[row[0]] = scores.get(row[0], 0.0) + 1.0 / (_RRF_K + rank)
+            results = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+
+        top = results[:limit]
+        if not top:
+            return []
+        marks = ", ".join("?" * len(top))
+        rows = conn.execute(
+            f"SELECT rowid, * FROM chunks_{name} WHERE rowid IN ({marks})",
+            [rowid for rowid, _ in top],
+        ).fetchall()
+        by_rowid = {row["rowid"]: row for row in rows}
+        return [
+            ScoredChunk(score=score, chunk=chunk_from_payload(dict(by_rowid[rowid])))
+            for rowid, score in top
+            if rowid in by_rowid
         ]
 
     def count(self, collection: CollectionName | None = None) -> int:
         if collection is not None:
-            if collection.value not in self._collections():
-                return 0
-            return self._client.count(collection.value, exact=True).count
-        return sum(self.count(c) for c in ALL_COLLECTIONS)
+            return self._count(collection.value)
+        return sum(self._count(c.value) for c in ALL_COLLECTIONS)
+
+    def _count(self, collection: str) -> int:
+        if not self._table_exists(f"chunks_{collection}"):
+            return 0
+        row = self._conn.execute(f"SELECT count(*) FROM chunks_{collection}").fetchone()
+        return int(row[0])
 
     def count_repository(
         self, repository: str, collection: CollectionName | None = None
     ) -> int:
-        """Points of one repository, in one collection or all of them."""
-        flt = Filter(
-            must=[FieldCondition(key="repository", match=MatchValue(value=repository))]
-        )
+        """Rows of one repository, in one collection or all of them."""
         if collection is not None:
-            if collection.value not in self._collections():
+            if not self._table_exists(f"chunks_{collection.value}"):
                 return 0
-            return self._client.count(
-                collection.value, count_filter=flt, exact=True
-            ).count
+            row = self._conn.execute(
+                f"SELECT count(*) FROM chunks_{collection.value} WHERE repository = ?",
+                (repository,),
+            ).fetchone()
+            return int(row[0])
         return sum(self.count_repository(repository, c) for c in ALL_COLLECTIONS)
 
     def chunks_for_file(self, repository: str, file: str) -> list[Chunk]:
@@ -417,27 +738,14 @@ class VectorStore:
         chunks: list[Chunk] = []
         for collection in ALL_COLLECTIONS:
             name = collection.value
-            if name not in self._collections():
+            if not self._table_exists(f"chunks_{name}"):
                 continue
-            records, _ = self._client.scroll(
-                name,
-                limit=1024,
-                with_payload=True,
-                with_vectors=False,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="repository", match=MatchValue(value=repository)
-                        ),
-                        FieldCondition(key="file", match=MatchValue(value=file)),
-                    ]
-                ),
-            )
-            chunks.extend(
-                chunk_from_payload(r.payload or {})
-                for r in records
-                if r.payload is not None
-            )
+            rows = self._conn.execute(
+                f"SELECT * FROM chunks_{name} "
+                f"WHERE {_col('repository')} = ? AND {_col('file')} = ?",
+                (repository, file),
+            ).fetchall()
+            chunks.extend(chunk_from_payload(dict(row)) for row in rows)
         return chunks
 
     def get_by_symbol(
@@ -445,26 +753,12 @@ class VectorStore:
     ) -> list[Chunk]:
         """HDL chunks of one kind named ``symbol`` in ``repository``."""
         name = COLLECTION_HDL
-        if name not in self._collections():
+        if not self._table_exists(f"chunks_{name}"):
             return []
-        records, _ = self._client.scroll(
-            name,
-            limit=64,
-            with_payload=True,
-            with_vectors=False,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="repository", match=MatchValue(value=repository)
-                    ),
-                    FieldCondition(
-                        key="symbol_kind", match=MatchValue(value=symbol_kind)
-                    ),
-                ]
-            ),
-        )
-        return [
-            chunk_from_payload(r.payload or {})
-            for r in records
-            if r.payload is not None and r.payload.get("symbol") == symbol
-        ]
+        rows = self._conn.execute(
+            f"SELECT * FROM chunks_{name} "
+            f"WHERE {_col('repository')} = ? AND {_col('symbol_kind')} = ?",
+            (repository, symbol_kind),
+        ).fetchall()
+        chunks = [chunk_from_payload(dict(row)) for row in rows]
+        return [c for c in chunks if c.symbol == symbol][:_SYMBOL_LOOKUP_LIMIT]
