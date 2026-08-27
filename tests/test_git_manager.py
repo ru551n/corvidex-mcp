@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.git_manager import GitError, GitManager, parse_name_status_z
+from vhdl_rag_mcp.git_manager import (
+    GitError,
+    GitManager,
+    _hint,
+    parse_name_status_z,
+)
 from vhdl_rag_mcp.routing import classify_file
 
 ENV = {
@@ -168,6 +173,52 @@ def test_unknown_ref_raises(manager: GitManager, remote: Path):
     cfg = make_config(remote, ref="no-such-branch")
     with pytest.raises(GitError, match="does not resolve"):
         run(manager.sync(cfg, None))
+
+
+def test_unknown_ref_lists_available_refs(manager: GitManager, remote: Path) -> None:
+    cfg = make_config(remote, ref="no-such-branch")
+    with pytest.raises(GitError, match="does not resolve to a commit") as excinfo:
+        run(manager.sync(cfg, None))
+    # Actionable: the available remote refs are listed.
+    assert "available remote refs" in str(excinfo.value)
+    assert "origin/main" in str(excinfo.value)
+
+
+def test_non_repository_url_error_has_hint(manager: GitManager, tmp_path: Path) -> None:
+    # An existing directory that is not a git repository.
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    cfg = RepositoryConfig(name="repo", url=str(not_a_repo), ref="main")
+    with pytest.raises(GitError) as excinfo:
+        run(manager.sync(cfg, None))
+    message = str(excinfo.value)
+    assert "hint:" in message
+    assert "reachable git repository" in message
+
+
+def test_hint_classification() -> None:
+    assert "reachable git repository" in _hint(
+        "fatal: '/x' does not appear to be a git repository."
+    )
+    assert "reachable git repository" in _hint(
+        "fatal: repository '/x/not-a-repo' does not exist"
+    )
+    assert "name/spelling" in _hint(
+        "fatal: repository 'https://github.com/x/y/' not found."
+    )
+    assert "resolved" in _hint(
+        "ssh: Could not resolve hostname github.com: Temporary failure"
+    )
+    assert "known_hosts" in _hint("Host key verification failed.")
+    assert "ssh" in _hint("git@github.com: Permission denied (publickey).")
+    assert "token" in _hint(
+        "fatal: Authentication failed for 'https://github.com/x/y.git/'"
+    )
+    assert "timed out" in _hint("Connection timed out after 30 seconds")
+    assert "proxy" in _hint(
+        "fatal: unable to access 'https://x/': Could not resolve proxy"
+    )
+    assert _hint("fatal: some other obscure failure") == ""
 
 
 def test_missing_object_falls_back_to_full(manager: GitManager, remote: Path):

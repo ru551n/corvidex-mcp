@@ -44,6 +44,63 @@ class GitError(RuntimeError):
     """A git operation failed."""
 
 
+def _hint(stderr: str) -> str:
+    """An actionable hint for a common git failure ("" when unknown).
+
+    The raw git stderr is terse ("fatal: ... not found"); the hint tells
+    the user what to check, so a misconfigured url or ref produces a
+    log line that can be acted on directly.
+    """
+    e = stderr.lower()
+    if "does not appear to be a git repository" in e or (
+        "repository" in e and "does not exist" in e
+    ):
+        return (
+            "hint: the url does not point at a reachable git repository - "
+            "check the spelling and protocol (https://, git@host:..., "
+            "file://); for a local directory, 'url' must point at an "
+            "existing git checkout"
+        )
+    if "repository" in e and "not found" in e:
+        return (
+            "hint: the remote is reachable but the repository was not "
+            "found - check the repository name/spelling and that this "
+            "machine has access to it"
+        )
+    if "could not resolve hostname" in e:
+        return (
+            "hint: the host name could not be resolved - check the network "
+            "connection and the host spelling"
+        )
+    if "host key verification failed" in e:
+        return (
+            "hint: the ssh host key is not trusted - run "
+            "'ssh-keyscan <host>' and append the output to ~/.ssh/known_hosts"
+        )
+    if "permission denied" in e:
+        return (
+            "hint: authentication failed - for git@ urls check that an ssh "
+            "key for the host is loaded (ssh-add -l); for https:// urls "
+            "check the credentials (credential helper / token)"
+        )
+    if "authentication failed" in e:
+        return (
+            "hint: the remote rejected the credentials - check the username "
+            "and access token for this host"
+        )
+    if "connection timed out" in e:
+        return (
+            "hint: the connection timed out - check the network connection, "
+            "firewall, and proxy settings"
+        )
+    if "unable to access" in e:
+        return (
+            "hint: git could not reach the remote - check the network "
+            "connection, proxy settings, and the url"
+        )
+    return ""
+
+
 @dataclass(frozen=True)
 class SyncPlan:
     """What the indexing pipeline must do for one repository.
@@ -180,10 +237,11 @@ class GitManager:
     async def _run(self, cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
         code, out, err = await self._git(cwd, *args, timeout=timeout)
         if code != 0:
-            raise GitError(
-                f"git {args[0]} failed (exit {code}): "
-                f"{err.strip()[-500:] or out.strip()[-500:]}"
-            )
+            message = err.strip()[-500:] or out.strip()[-500:]
+            hint = _hint(err)
+            if hint:
+                message = f"{message}\n{hint}"
+            raise GitError(f"git {args[0]} failed (exit {code}): {message}")
         return out
 
     async def _try(
@@ -246,7 +304,18 @@ class GitManager:
             )
             if commit is not None:
                 return commit.strip()
-        raise GitError(f"ref {ref!r} does not resolve to a commit in {cfg.name!r}")
+        available = await self._try(
+            repo_dir,
+            "for-each-ref",
+            "--count=10",
+            "--format=%(refname:short)",
+            "refs/remotes/origin",
+        )
+        names = [n.strip() for n in (available or "").splitlines() if n.strip()]
+        hint = f"; available remote refs: {', '.join(names)}" if names else ""
+        raise GitError(
+            f"ref {ref!r} does not resolve to a commit in {cfg.name!r}{hint}"
+        )
 
     async def _list_files_at(
         self, cfg: RepositoryConfig, commit: str

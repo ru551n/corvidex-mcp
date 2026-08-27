@@ -774,6 +774,14 @@ async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
         logger.info(
             "dropped chunks of unconfigured repositories: %s", ", ".join(dropped)
         )
+    if not app.config.repositories and app.config.coding_standards is None:
+        logger.warning(
+            "no repositories and no coding_standards file configured: the "
+            "index stays empty. Add [[repositories]] entries (or a "
+            "coding_standards file) to the config file "
+            "($VHDL_RAG_MCP_CONFIG or ~/.config/vhdl-rag/config.toml) and "
+            "restart, or call sync_repositories after updating it."
+        )
     logger.info("initial sync of %d repositories", len(app.config.repositories))
     await app.sync_all()
     await _serve(app, mcp)

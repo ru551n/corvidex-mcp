@@ -149,6 +149,10 @@ def test_repository_url_xor_path() -> None:
         RepositoryConfig(name="r")
     with pytest.raises(ValidationError, match="url must not be empty"):
         RepositoryConfig(name="r", url="   ")
+    with pytest.raises(ValidationError, match="must not contain whitespace"):
+        RepositoryConfig(name="r", url="git@github.com:org/ repo.git")
+    with pytest.raises(ValidationError, match="must not contain whitespace"):
+        RepositoryConfig(name="r", url="https://github.com/org/repo .git")
     with pytest.raises(ValidationError, match="path must not be empty"):
         RepositoryConfig(name="r", path="   ")
     # Tilde in the path is expanded at validation time.

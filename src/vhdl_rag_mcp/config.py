@@ -273,6 +273,12 @@ class RepositoryConfig(BaseModel):
             return None
         if not value.strip():
             raise ValueError("repository url must not be empty")
+        if any(ch.isspace() for ch in value):
+            raise ValueError(
+                "repository url must not contain whitespace — paste the url "
+                "as a single token, e.g. 'https://github.com/org/repo.git' "
+                "or 'git@github.com:org/repo.git'"
+            )
         return value.strip()
 
     @field_validator("path")
@@ -557,25 +563,30 @@ log_level = "INFO"
 # docs_model = "jinaai/jina-embeddings-v2-small-en"
 # code_model = "jinaai/jina-embeddings-v2-small-en"
 
-[[repositories]]
-name = "company-standards"
-url = "git@github.com:company/vhdl-standards.git"
-ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
+# Add one [[repositories]] table per repository to index (uncomment a
+# template below or add your own). With none, the server runs with an
+# empty index. A repository is a remote Git url (cloned and synced by
+# the server) or a local path (your own checkout, indexed in place).
+#
+# [[repositories]]
+# name = "company-standards"
+# url = "git@github.com:company/vhdl-standards.git"
+# ref = "main"               # branch (tracked), tag, or commit SHA (pinned)
 # domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
 # vhdl_ls_hook = "make vhdl-ls-config"  # command to generate vhdl_ls.toml
 # veridian_hook = "make veridian-config"  # command to generate veridian.yaml
-
-[[repositories]]
-name = "common-ip"
-url = "git@github.com:company/common-ip.git"
-ref = "v2.1"               # pinned to a release tag
-
-[[repositories]]
-name = "current-project"
+#
+# [[repositories]]
+# name = "common-ip"
+# url = "git@github.com:company/common-ip.git"
+# ref = "v2.1"               # pinned to a release tag
+#
+# [[repositories]]
+# name = "current-project"
 # url = "git@github.com:company/current-project.git"  # remote (default ref: main)
-# ... or index the active checkout instead (never modified by the server):
-path = "~/work/current-project"
+# # ... or index the active checkout instead (never modified by the server):
+# path = "~/work/current-project"
 # ref = "main"               # tracked branch, tag, or SHA (pinned);
 #                             # ignored for path repositories
 # domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
