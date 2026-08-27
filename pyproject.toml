@@ -10,6 +10,7 @@ dependencies = [
     "mcp>=1.29,<2",
     "sqlite-vec>=0.1.9",
     "fastembed>=0.8",
+    "pypdf>=4.0",
     "pydantic>=2.0",
     "tree-sitter-language-pack>=1.15.8",
 ]

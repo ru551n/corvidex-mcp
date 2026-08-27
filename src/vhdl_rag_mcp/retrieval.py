@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .config import AppConfig, ConfigError
+from .config import CODING_STANDARDS_REPO, AppConfig, ConfigError
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitError, GitManager
 from .models import Chunk, CollectionName, SearchResult
@@ -90,10 +90,13 @@ class RetrievalService:
     # -- validation -----------------------------------------------------------
 
     def _repository(self, name: str | None) -> None:
-        """Validate a repository name against the configured set."""
+        """Validate a repository name against the configured set (the
+        coding-standards pseudo-repository counts when configured)."""
         if name is None:
             return
         known = [cfg.name for cfg in self._config.repositories]
+        if self._config.coding_standards is not None:
+            known.append(CODING_STANDARDS_REPO)
         if name not in known:
             raise RetrievalError(
                 f"unknown repository {name!r}; configured: {', '.join(known)}"
@@ -144,13 +147,19 @@ class RetrievalService:
         step; the result is saturated at :data:`_PRIORITY_BONUS_CAP` so
         the bonus reorders chunks within a relevance tier but can never
         promote a chunk across tiers (see the constant's docstring).
-        Unconfigured repositories get no bonus.
+        Unconfigured repositories get no bonus. The coding-standards
+        pseudo-repository uses ``coding_standards_priority``.
         """
-        try:
-            cfg = self._config.repository(repository)
-        except ConfigError:
-            return 0.0
-        delta = cfg.priority - 1
+        if repository == CODING_STANDARDS_REPO:
+            if self._config.coding_standards is None:
+                return 0.0
+            priority = self._config.coding_standards_priority
+        else:
+            try:
+                priority = self._config.repository(repository).priority
+            except ConfigError:
+                return 0.0
+        delta = priority - 1
         if delta == 0:
             return 0.0
         bonus = delta * _PRIORITY_BONUS_STEP

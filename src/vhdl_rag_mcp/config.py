@@ -33,6 +33,15 @@ ALL_DOMAINS: tuple[CollectionName, ...] = (
     CollectionName.CODE,
 )
 
+#: Reserved repository name: the configured coding-standards file is
+#: indexed as this pseudo-repository (see ``coding_standards``).
+CODING_STANDARDS_REPO = "coding-standards"
+
+#: Accepted extensions for the coding-standards file.
+STANDARDS_EXTENSIONS: frozenset[str] = frozenset(
+    {".txt", ".md", ".rst", ".pdf", ".docx"}
+)
+
 
 class ConfigError(RuntimeError):
     """Raised when the configuration cannot be loaded or validated."""
@@ -362,6 +371,31 @@ class AppConfig(BaseModel):
         description="Path to the Veridian binary (or a PATH name); Verilog/"
         "SystemVerilog fall back to structural parsing when unavailable",
     )
+    coding_standards: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the organization's coding-standards file (txt, md, "
+            "rst, pdf, or docx). It is indexed as the pseudo-repository "
+            "'coding-standards' in the docs collection with a high "
+            "retrieval priority (coding_standards_priority), so it is the "
+            "authoritative source for standards/convention questions "
+            "within its relevance tier. Absent: no standards file is "
+            "indexed."
+        ),
+    )
+    coding_standards_priority: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Retrieval priority of the coding-standards file "
+            "(pseudo-repository 'coding-standards'). 10 (default) is "
+            "well above any normal repository priority (1) and applies "
+            "the same bounded post-RRF bonus: standards chunks rank "
+            "ahead of equally relevant repository chunks, but relevance "
+            "still dominates (a standards chunk is not force-promoted "
+            "above far more relevant results)."
+        ),
+    )
     log_level: str = Field(
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
@@ -373,10 +407,30 @@ class AppConfig(BaseModel):
     def _expand_data_dir(cls, value: Path) -> Path:
         return Path(value).expanduser()
 
+    @field_validator("coding_standards")
+    @classmethod
+    def _validate_coding_standards(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        if not str(value).strip():
+            raise ValueError("coding_standards must not be empty")
+        path = Path(value).expanduser()
+        if path.suffix.lower() not in STANDARDS_EXTENSIONS:
+            raise ValueError(
+                "coding_standards must be a txt, md, rst, pdf, or docx "
+                f"file; got {path.suffix or 'no extension'!r}"
+            )
+        return path
+
     @model_validator(mode="after")
     def _unique_repository_names(self) -> AppConfig:
         seen: set[str] = set()
         for repo in self.repositories:
+            if repo.name == CODING_STANDARDS_REPO:
+                raise ValueError(
+                    f"repository name {CODING_STANDARDS_REPO!r} is reserved "
+                    "for the coding-standards file; choose another name"
+                )
             if repo.name in seen:
                 raise ValueError(f"duplicate repository name: {repo.name!r}")
             seen.add(repo.name)
@@ -473,6 +527,11 @@ sync_interval = 300
 vhdl_ls_path = "vhdl_ls"
 veridian_path = "veridian"
 log_level = "INFO"
+# # The organization's coding standards as one file (txt, md, rst, pdf,
+# # or docx): indexed as the 'coding-standards' pseudo-repository with a
+# # high retrieval priority (the golden source for conventions):
+# coding_standards = "~/standards/coding-standards.md"
+# coding_standards_priority = 10
 
 # [embeddings]
 # # Max tokens a passage is truncated to before dense embedding (the

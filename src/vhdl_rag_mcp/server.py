@@ -51,7 +51,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
-from .config import AppConfig, ConfigError, RepositoryConfig, load_config
+from .config import (
+    CODING_STANDARDS_REPO,
+    AppConfig,
+    ConfigError,
+    RepositoryConfig,
+    load_config,
+)
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitManager
 from .indexing import IndexPipeline
@@ -60,6 +66,7 @@ from .lsp import build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
 from .retrieval import RetrievalError, RetrievalService
 from .selfcheck import SelfCheckResult, run_self_check
+from .standards import sync_coding_standards
 from .state import StateStore
 from .vector_store import ALL_COLLECTIONS, VectorStore
 
@@ -91,7 +98,10 @@ INSTRUCTIONS = (
     "repository_status to see what is indexed and whether a sync failed; "
     "it also reports the HDL analyzer status (vhdl_ls / Veridian). "
     "sync_repositories to force an update, reindex_repository to rebuild "
-    "one repository's index."
+    "one repository's index. When a coding-standards file is "
+    "configured it is indexed as the 'coding-standards' "
+    "pseudo-repository with a high retrieval priority: search with "
+    "repository='coding-standards' to restrict to it."
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
@@ -234,7 +244,10 @@ class VhdlRagApp:
         """
         wanted = set(repositories) if repositories is not None else None
         if wanted is not None:
-            unknown = wanted - {cfg.name for cfg in self.config.repositories}
+            known = {cfg.name for cfg in self.config.repositories}
+            if self.config.coding_standards is not None:
+                known.add(CODING_STANDARDS_REPO)
+            unknown = wanted - known
             if unknown:
                 raise RetrievalError(
                     f"unknown repository: {', '.join(sorted(unknown))}"
@@ -261,6 +274,14 @@ class VhdlRagApp:
                         "error": str(exc),
                     }
                 )
+        if self.config.coding_standards is not None and (
+            wanted is None or CODING_STANDARDS_REPO in wanted
+        ):
+            report = sync_coding_standards(
+                self.config, self.providers, self.store, self.states
+            )
+            if report is not None:
+                reports.append(report)
         return reports
 
     async def reindex(self, repository: str) -> dict[str, str]:
@@ -570,9 +591,12 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
     async def repository_status() -> str:
         """Show every configured repository: ref, enabled domains, last
         indexed commit, chunk and file counts, last sync time, and any
-        sync error. Also reports the HDL analyzers (vhdl_ls for VHDL,
-        Veridian for Verilog/SystemVerilog): availability, version, and
-        whether semantic (lsp) or fallback parsing is in effect."""
+        sync error. When a coding-standards file is configured it is
+        shown as the 'coding-standards' pseudo-repository (its content
+        hash in place of a commit). Also reports the HDL analyzers
+        (vhdl_ls for VHDL, Veridian for Verilog/SystemVerilog):
+        availability, version, and whether semantic (lsp) or fallback
+        parsing is in effect."""
         lines: list[str] = []
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
@@ -595,9 +619,30 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 f"  chunks: {' + '.join(per_domain)} ({total} total), "
                 f"files: {status.file_count}{error}"
             )
-        if not lines:
+        standards_line: str | None = None
+        if app.config.coding_standards is not None:
+            state = app.states.get(CODING_STANDARDS_REPO)
+            commit = state.indexed_commit[:12] if state.indexed_commit else "never"
+            synced = state.last_sync_at.isoformat() if state.last_sync_at else "never"
+            error = (
+                f"\n  last error: {state.last_sync_error}"
+                if state.last_sync_error is not None
+                else ""
+            )
+            chunks = app.store.count_repository(CODING_STANDARDS_REPO)
+            standards_line = (
+                f"- {CODING_STANDARDS_REPO} (file {app.config.coding_standards}, "
+                f"priority {app.config.coding_standards_priority})\n"
+                f"  indexed: {commit}, synced: {synced}\n"
+                f"  chunks: {chunks} docs{error}"
+            )
+        if not lines and standards_line is None:
             return "No repositories configured."
-        lines.append("")
+        if lines:
+            lines.append("")
+        if standards_line is not None:
+            lines.append(standards_line)
+            lines.append("")
         lines.append("HDL analyzers:")
         for analyzer in build_analyzer_statuses(
             app.config.vhdl_ls_path, app.config.veridian_path

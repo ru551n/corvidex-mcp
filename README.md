@@ -177,6 +177,15 @@ local_sync_interval = 10               # fast poller for local working
 vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path (VHDL)
 veridian_path = "veridian"             # binary on PATH or full path (Verilog/SV)
 log_level = "INFO"
+# coding_standards = "~/standards/standards.md"  # the coding-standards file
+#                                                # (txt, md, rst, pdf, docx);
+#                                                # indexed as the
+#                                                # 'coding-standards'
+#                                                # pseudo-repository
+# coding_standards_priority = 10           # retrieval priority of that file
+                                           # (bounded post-RRF bonus; 10 ranks
+                                           # it ahead of equally relevant repo
+                                           # chunks, relevance still dominates)
 
 # [embeddings]
 # dense_max_tokens = 1024              # passages are truncated to this many
@@ -240,6 +249,14 @@ Notes:
   is fingerprinted at sync time: unchanged files are not re-chunked,
   edited files are re-chunked, and deleted untracked files are dropped
   from the index.
+- **`coding_standards`**: one file with the organization's coding
+  standards (txt, md, rst, pdf, or docx). It is indexed as the
+  `coding-standards` pseudo-repository in the docs collection with a
+  high retrieval priority (`coding_standards_priority`, default 10):
+  standards chunks rank ahead of equally relevant repository chunks
+  (bounded post-RRF bonus — relevance still dominates). The file's
+  content hash is its "commit", so edits are picked up on the next
+  sync. Search it with `repository="coding-standards"`.
 - **`ref`**: a branch name is fetched and tracked on every sync. A tag
   or commit SHA pins the repository (a full 40-hex SHA skips the
   network fetch entirely). `ref` is ignored for local working

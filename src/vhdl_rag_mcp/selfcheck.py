@@ -181,6 +181,18 @@ def check_models(app: VhdlRagApp) -> list[ComponentStatus]:
     return statuses
 
 
+def check_coding_standards(app: VhdlRagApp) -> ComponentStatus | None:
+    """Optional component: the configured coding-standards file (a
+    missing file degrades standards indexing, not the server; each sync
+    reports the error). Returns ``None`` when not configured."""
+    path = app.config.coding_standards
+    if path is None:
+        return None
+    if path.is_file():
+        return ComponentStatus("coding-standards", True, True, str(path))
+    return ComponentStatus("coding-standards", False, True, f"file not found: {path}")
+
+
 def check_analyzers(config: AppConfig) -> list[ComponentStatus]:
     statuses: list[ComponentStatus] = []
     for analyzer in build_analyzer_statuses(
@@ -204,6 +216,7 @@ def run_self_check(app: VhdlRagApp) -> SelfCheckResult:
     """Run every component check (the schema check reads the store after
     migration; the model checks read the errors recorded while the
     collections were being ensured)."""
+    standards = check_coding_standards(app)
     return SelfCheckResult(
         (
             check_git(),
@@ -213,5 +226,6 @@ def run_self_check(app: VhdlRagApp) -> SelfCheckResult:
             check_schema(app.store),
             *check_models(app),
             *check_analyzers(app.config),
+            *((standards,) if standards is not None else ()),
         )
     )
