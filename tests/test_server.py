@@ -280,6 +280,25 @@ async def test_get_source_tool(env) -> None:
     assert tool_text(result).startswith("Error:")
 
 
+async def test_search_tool_mode(env) -> None:
+    _app, mcp, _up = env
+    # A valid non-default mode reaches the store and returns results
+    # (this env indexes docs + code; "reset" hits the standard doc).
+    result = await mcp.call_tool(
+        "search_knowledge", {"query": "reset conventions", "mode": "lexical"}
+    )
+    text = tool_text(result)
+    assert "standard.md" in text
+    # An unknown mode is a tool-level error, not a crash.
+    result = await mcp.call_tool("search_hdl", {"query": "fifo", "mode": "cosine"})
+    assert "unknown search mode" in tool_text(result)
+    # search_knowledge accepts the mode too.
+    result = await mcp.call_tool(
+        "search_knowledge", {"query": "zzzqqq", "mode": "semantic"}
+    )
+    assert "Error" not in tool_text(result)
+
+
 async def test_repository_status_tool(
     env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -468,3 +468,81 @@ async def test_priority_bonus_saturates_and_cannot_cross_tiers(
     # Saturation: 999 steps would be ~0.27; the bonus is capped.
     assert cap < 999 * (1.0 / (60 * 61))
     store.close()
+
+
+# -- search modes (semantic / lexical / hybrid) -----------------------------
+
+
+async def test_semantic_mode_is_dense_only(env) -> None:
+    _store, retrieval = env
+    # A query with no full-text matches: the FTS leg is empty anyway, so
+    # the ordering is pure embedding similarity. The entity chunk's
+    # vector is the query-aligned one (first index, longest content):
+    # score 1.0, the rest within [0, 1] below it.
+    results = retrieval.search(CollectionName.HDL, "zzzqqq", mode="semantic")
+    assert results
+    assert results[0].file == "rtl/fifo.vhd"
+    assert results[0].start_line == 1
+    assert results[0].score == pytest.approx(1.0)
+    assert all(0.0 <= r.score <= 1.0 for r in results)
+    assert all(r.score < results[0].score for r in results[1:])
+    # Case-insensitive mode names.
+    again = retrieval.search(CollectionName.HDL, "zzzqqq", mode="SEMANTIC")
+    assert [r.file for r in again] == [r.file for r in results]
+
+
+async def test_lexical_mode_is_fulltext_only(env) -> None:
+    _store, retrieval = env
+    # "entity OR fifo": only the two fifo.vhd design units contain those
+    # tokens (fifo_tb / fifo_pkg are single '_'-joined tokens). Ranked
+    # by BM25; the display score is the rank's RRF term.
+    results = retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
+    assert [(r.file, r.start_line) for r in results] == [
+        ("rtl/fifo.vhd", 1),
+        ("rtl/fifo.vhd", 5),
+    ]
+    assert results[0].score == pytest.approx(1.0 / 61)
+    assert results[1].score == pytest.approx(1.0 / 62)
+    # No full-text matches: the lexical leg is empty (no dense fallback).
+    assert retrieval.search(CollectionName.HDL, "zzzqqq", mode="lexical") == []
+
+
+async def test_hybrid_mode_is_the_default(env) -> None:
+    _store, retrieval = env
+    default = retrieval.search(CollectionName.HDL, "entity fifo")
+    explicit = retrieval.search(CollectionName.HDL, "entity fifo", mode="hybrid")
+    assert [(r.file, r.start_line) for r in default] == [
+        (r.file, r.start_line) for r in explicit
+    ]
+    # Both legs contribute: the top score is the sum of two RRF terms.
+    assert default[0].score == pytest.approx(2.0 / 61)
+    # Hybrid is distinct from lexical on a query where the dense leg
+    # disagrees (the entity chunk is dense-best here too, but the
+    # scores live on different scales).
+    lexical = retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
+    assert default[0].score != lexical[0].score
+
+
+async def test_invalid_mode_is_rejected(env) -> None:
+    _store, retrieval = env
+    with pytest.raises(RetrievalError, match="unknown search mode"):
+        retrieval.search(CollectionName.HDL, "fifo", mode="cosine")
+    with pytest.raises(RetrievalError, match="unknown search mode"):
+        retrieval.search_knowledge("fifo", mode="")
+
+
+async def test_search_knowledge_modes(env) -> None:
+    _store, retrieval = env
+    # Lexical across domains: only hdl chunks contain the tokens.
+    lexical = retrieval.search_knowledge("entity fifo", mode="lexical")
+    assert [r.result_type for r in lexical] == ["hdl", "hdl"]
+    assert [(r.file, r.start_line) for r in lexical] == [
+        ("rtl/fifo.vhd", 1),
+        ("rtl/fifo.vhd", 5),
+    ]
+    # Semantic across domains: every collection contributes its dense
+    # top; scores are cosine similarities in [0, 1].
+    semantic = retrieval.search_knowledge("zzzqqq", mode="semantic")
+    assert semantic
+    assert {r.result_type for r in semantic} == {"hdl", "docs", "code"}
+    assert all(0.0 <= r.score <= 1.0 for r in semantic)

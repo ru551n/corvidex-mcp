@@ -79,7 +79,10 @@ INSTRUCTIONS = (
     "general C/C++/Python code, and search_knowledge when the answer may "
     "span any of them. Pass `symbols` to find every chunk that references "
     "specific identifiers (cross-referencing; works across HDL "
-    "languages). Use get_source for the full text of a known file (exact "
+    "languages). Every search tool takes a `mode` strategy: 'hybrid' "
+    "(default; semantic + full-text, RRF-fused), 'semantic' (embedding "
+    "similarity only), or 'lexical' (full-text match only). Use "
+    "get_source for the full text of a known file (exact "
     "lines, exact commit). Every result carries source attribution "
     "(repository, file, line range, commit, language). Use "
     "repository_status to see what is indexed and whether a sync failed; "
@@ -368,6 +371,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         repository: str | None = None,
         symbols: list[str] | None = None,
         language: str | None = None,
+        mode: str = "hybrid",
     ) -> str:
         """Search HDL source — VHDL, Verilog, and SystemVerilog share one
         index: entities/modules (design units), architectures, processes
@@ -377,7 +381,9 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         search all HDL. `symbols` restricts to chunks referencing the
         given identifiers (e.g. ["FIFO_DEPTH"]) — cross-referencing
         works across HDL languages. `repository` restricts to one
-        repository name."""
+        repository name. `mode` selects the search strategy: 'hybrid'
+        (default; semantic + full-text), 'semantic' (embedding
+        similarity only), or 'lexical' (full-text match only)."""
         return _render(
             retrieval.search(
                 CollectionName.HDL,
@@ -386,6 +392,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 repository,
                 tuple(symbols) if symbols else None,
                 language,
+                mode=mode,
             ),
             "No HDL results. Try a broader query or a different language, "
             "or check repository_status.",
@@ -398,6 +405,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
         symbols: list[str] | None = None,
+        mode: str = "hybrid",
     ) -> str:
         """Search VHDL source only (the language-restricted form of
         search_hdl; use search_hdl for Verilog/SystemVerilog or a mix):
@@ -405,7 +413,9 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         semantic + exact-identifier hybrid search. `symbols` restricts
         to chunks referencing the given identifiers (e.g.
         ["fifo_write", "rst_n"]). `repository` restricts to one
-        repository name."""
+        repository name. `mode` selects the search strategy: 'hybrid'
+        (default; semantic + full-text), 'semantic' (embedding
+        similarity only), or 'lexical' (full-text match only)."""
         return _render(
             retrieval.search(
                 CollectionName.HDL,
@@ -414,6 +424,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 repository,
                 tuple(symbols) if symbols else None,
                 "vhdl",
+                mode=mode,
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
         )
@@ -425,10 +436,14 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
         symbols: list[str] | None = None,
+        mode: str = "hybrid",
     ) -> str:
         """Search VHDL-related documentation: coding standards, design
         guides, conventions (one result per section). `symbols` matches
-        identifiers referenced in the section's code snippets."""
+        identifiers referenced in the section's code snippets. `mode`
+        selects the search strategy: 'hybrid' (default; semantic +
+        full-text), 'semantic' (embedding similarity only), or 'lexical'
+        (full-text match only)."""
         return _render(
             retrieval.search(
                 CollectionName.DOCS,
@@ -436,6 +451,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 limit,
                 repository,
                 tuple(symbols) if symbols else None,
+                mode=mode,
             ),
             "No documentation results. Try a broader query, or check "
             "repository_status.",
@@ -448,10 +464,14 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         limit: int = DEFAULT_LIMIT,
         repository: str | None = None,
         symbols: list[str] | None = None,
+        mode: str = "hybrid",
     ) -> str:
         """Search general source code (C/C++, Python, ...): one result per
         function/class. `symbols` matches identifiers referenced in the
-        unit (cross-reference to VHDL signal/port names, etc.)."""
+        unit (cross-reference to VHDL signal/port names, etc.). `mode`
+        selects the search strategy: 'hybrid' (default; semantic +
+        full-text), 'semantic' (embedding similarity only), or 'lexical'
+        (full-text match only)."""
         return _render(
             retrieval.search(
                 CollectionName.CODE,
@@ -459,6 +479,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 limit,
                 repository,
                 tuple(symbols) if symbols else None,
+                mode=mode,
             ),
             "No code results. Try a broader query, or check repository_status.",
         )
@@ -470,17 +491,22 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         limit: int = KNOWLEDGE_LIMIT,
         repository: str | None = None,
         symbols: list[str] | None = None,
+        mode: str = "hybrid",
     ) -> str:
         """Search ALL domains (VHDL, documentation, code) at once, fused
         with RRF so the domains interleave fairly. Use when the question
         may span domains (e.g. a design requirement in the docs
-        implemented in VHDL and tested in C)."""
+        implemented in VHDL and tested in C). `mode` selects the search
+        strategy: 'hybrid' (default; semantic + full-text), 'semantic'
+        (embedding similarity only), or 'lexical' (full-text match
+        only)."""
         return _render(
             retrieval.search_knowledge(
                 query,
                 limit,
                 repository,
                 tuple(symbols) if symbols else None,
+                mode=mode,
             ),
             "No results in any domain. Try a broader query, or check "
             "repository_status.",

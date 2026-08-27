@@ -23,10 +23,14 @@ Design notes
   idempotent ``ON CONFLICT(id) DO UPDATE`` merges; stale-chunk cleanup
   happens via SQL predicates (repository/file), never by recomputing
   IDs.
-- Search is hybrid: the dense leg is a flat (exact) vec0 KNN over
-  unit-normalized vectors (L2 order equals cosine order), the full-text
-  leg is an FTS5 BM25 rank. The two rank lists are fused with RRF
-  (rank-based, K=60) in this module. FTS5's ``unicode61`` tokenizer is
+- Search legs are selectable per query (``mode`` on
+  :meth:`VectorStore.query`): hybrid (the default — the dense leg is a
+  flat (exact) vec0 KNN over unit-normalized vectors, L2 order equals
+  cosine order; the full-text leg is an FTS5 BM25 rank; the two rank
+  lists are fused with RRF, rank-based, K=60, in this module),
+  semantic (dense leg only, cosine-equivalent similarity score), or
+  lexical (full-text leg only, ranked by BM25 with a rank-based
+  display score). In hybrid, FTS5's ``unicode61`` tokenizer is
   configured with ``tokenchars '_'`` so HDL identifiers stay whole
   (``fifo_ctrl`` is one token; a query for it matches only documents
   containing it). English stop words are dropped from the FTS query so
@@ -699,14 +703,23 @@ class VectorStore:
         limit: int,
         must: Mapping[str, str] | None = None,
         should: Mapping[str, Sequence[str]] | None = None,
+        mode: str = "hybrid",
     ) -> list[ScoredChunk]:
-        """Hybrid (dense + full-text, RRF-fused) search with row filters.
+        """Search one collection with row filters.
 
-        Each leg contributes its top ``limit`` rows (after the row
-        filters); the rank lists are fused with RRF. ``query_text``
-        feeds the full-text leg (the raw query string); an empty text
-        falls back to the dense leg alone.
+        ``mode`` selects the legs:
+
+        * ``"hybrid"`` (default) — dense + full-text, rank lists fused
+          with RRF; an empty full-text leg falls back to the dense leg
+          alone.
+        * ``"semantic"`` — the dense leg only; the score is the
+          cosine-equivalent similarity in [0, 1].
+        * ``"lexical"`` — the full-text leg only, ranked by BM25; the
+          score is the RRF term of the row's rank (same scale family
+          as hybrid, so scores stay comparable across modes).
         """
+        if mode not in ("hybrid", "semantic", "lexical"):
+            raise VectorStoreError(f"unknown query mode {mode!r}")
         name = collection.value
         if not self._table_exists(f"chunks_{name}"):
             return []
@@ -715,21 +728,23 @@ class VectorStore:
         where_params = where[1] if where else []
         conn = self._conn
 
-        vector = _unit_vector(dense)
-        dense_sql = (
-            f"SELECT v.rowid, v.distance FROM vec_{name} v "
-            f"JOIN chunks_{name} c ON c.rowid = v.rowid "
-            f"WHERE v.embedding MATCH ? AND v.k = ?{where_sql} "
-            "ORDER BY v.distance"
-        )
-        dense_rows = conn.execute(
-            dense_sql,
-            (sqlite_vec.serialize_float32(vector.tolist()), limit, *where_params),
-        ).fetchall()
+        dense_rows: list[Any] = []
+        if mode in ("hybrid", "semantic"):
+            vector = _unit_vector(dense)
+            dense_sql = (
+                f"SELECT v.rowid, v.distance FROM vec_{name} v "
+                f"JOIN chunks_{name} c ON c.rowid = v.rowid "
+                f"WHERE v.embedding MATCH ? AND v.k = ?{where_sql} "
+                "ORDER BY v.distance"
+            )
+            dense_rows = conn.execute(
+                dense_sql,
+                (sqlite_vec.serialize_float32(vector.tolist()), limit, *where_params),
+            ).fetchall()
 
         fts_query = _fts_query(query_text or "")
         fts_rows: list[Any] = []
-        if fts_query is not None:
+        if mode in ("hybrid", "lexical") and fts_query is not None:
             fts_sql = (
                 f"SELECT f.rowid, bm25(fts_{name}) AS score FROM fts_{name} f "
                 f"JOIN chunks_{name} c ON c.rowid = f.rowid "
@@ -740,7 +755,15 @@ class VectorStore:
                 fts_sql, (fts_query, *where_params, limit)
             ).fetchall()
 
-        if fts_query is None:
+        if mode == "lexical":
+            # BM25-ranked full text only. BM25 itself is an unbounded
+            # engine score, so the display score is the RRF term of the
+            # row's rank — best first, same scale family as hybrid.
+            results = [
+                (row[0], 1.0 / (_RRF_K + rank))
+                for rank, row in enumerate(fts_rows, start=1)
+            ]
+        elif fts_query is None or mode == "semantic":
             # Dense-only: map the (cosine-equivalent) distance into the
             # same [0, 1] range the hybrid score uses.
             results = []

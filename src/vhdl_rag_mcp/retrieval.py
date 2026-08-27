@@ -1,7 +1,9 @@
-"""Retrieval service: hybrid search, cross-domain fusion, source access.
+"""Retrieval service: search, cross-domain fusion, source access.
 
-Search is the vector store's native hybrid query (dense vectors +
-full-text over the chunk content, RRF fusion) with row filters.
+Each search leg is selectable per call (``mode``): ``hybrid`` (the
+default — the vector store's native RRF fusion of dense vectors and
+full-text over the chunk content), ``semantic`` (embedding similarity
+only), or ``lexical`` (full-text/BM25 only), always with row filters.
 
 Cross-domain search (``search_knowledge``) fuses the per-collection
 rank lists with RRF again (one list per collection, rank-based, so
@@ -43,6 +45,10 @@ _PRIORITY_BONUS_CAP = 0.25 / (RRF_K + 1)
 
 #: Languages indexed into the hdl collection (routing-derived).
 HDL_LANGUAGES = ("vhdl", "verilog", "systemverilog")
+
+#: Search strategies: hybrid (dense + full-text, RRF-fused; the
+#: default), semantic (dense leg only), lexical (full-text leg only).
+SEARCH_MODES = ("hybrid", "semantic", "lexical")
 
 
 class RetrievalError(Exception):
@@ -109,6 +115,17 @@ class RetrievalService:
             raise RetrievalError("language must not be empty")
         return language
 
+    @staticmethod
+    def _check_mode(mode: str) -> str:
+        """Validate a search mode (case-insensitive; see SEARCH_MODES)."""
+        mode = (mode or "").strip().lower()
+        if mode not in SEARCH_MODES:
+            raise RetrievalError(
+                f"unknown search mode {mode!r}; expected one of: "
+                + ", ".join(SEARCH_MODES)
+            )
+        return mode
+
     def _priority_bonus(self, repository: str) -> float:
         """Bounded post-RRF score bonus for a repository's priority.
 
@@ -138,9 +155,15 @@ class RetrievalService:
         repository: str | None,
         symbols: tuple[str, ...] | None,
         language: str | None,
+        mode: str,
     ) -> list[tuple[float, Chunk]]:
-        """Hybrid query of one collection: (fused score, chunk) pairs."""
-        dense = self._providers.embed_query(collection, query)
+        """One collection in the given search mode: (score, chunk) pairs."""
+        # The lexical leg never embeds the query: no model work at all.
+        dense = (
+            self._providers.embed_query(collection, query)
+            if mode != "lexical"
+            else []
+        )
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
@@ -154,6 +177,7 @@ class RetrievalService:
             limit=limit,
             must=must or None,
             should=should,
+            mode=mode,
         )
         return [(sc.score, sc.chunk) for sc in scored]
 
@@ -167,20 +191,24 @@ class RetrievalService:
         repository: str | None = None,
         symbols: tuple[str, ...] | None = None,
         language: str | None = None,
+        mode: str = "hybrid",
     ) -> list[SearchResult]:
-        """Hybrid search in one collection.
+        """Search one collection.
 
-        ``symbols`` restricts results to chunks referencing any of the
-        given identifiers (cross-referencing). ``language`` restricts
-        results to one payload language (e.g. ``verilog`` within the
-        hdl collection); for the hdl collection the value is validated
-        against :data:`HDL_LANGUAGES`. The fused RRF score carries a
-        bounded per-repository priority bonus (see
-        :meth:`_priority_bonus`).
+        ``mode`` selects the strategy: ``hybrid`` (default; dense +
+        full-text, RRF-fused), ``semantic`` (dense only), ``lexical``
+        (full-text only) — see :data:`SEARCH_MODES`. ``symbols``
+        restricts results to chunks referencing any of the given
+        identifiers (cross-referencing). ``language`` restricts results
+        to one payload language (e.g. ``verilog`` within the hdl
+        collection); for the hdl collection the value is validated
+        against :data:`HDL_LANGUAGES`. The score carries a bounded
+        per-repository priority bonus (see :meth:`_priority_bonus`).
         """
         query = self._check_query(query)
         self._repository(repository)
         language = self._check_language_value(language)
+        mode = self._check_mode(mode)
         if (
             language is not None
             and collection is CollectionName.HDL
@@ -191,7 +219,7 @@ class RetrievalService:
                 + ", ".join(HDL_LANGUAGES)
             )
         pairs = self._search_collection(
-            collection, query, limit, repository, symbols, language
+            collection, query, limit, repository, symbols, language, mode
         )
         boosted = [
             (score + self._priority_bonus(chunk.repository), chunk)
@@ -214,22 +242,25 @@ class RetrievalService:
         repository: str | None = None,
         symbols: tuple[str, ...] | None = None,
         language: str | None = None,
+        mode: str = "hybrid",
     ) -> list[SearchResult]:
-        """Hybrid search over all three collections, RRF-fused.
+        """Search all three collections in one strategy, RRF-fused.
 
-        Each collection contributes a rank list; the fused score is the
-        sum of ``1/(RRF_K + rank)`` over the lists, plus the bounded
-        per-repository priority bonus (see :meth:`_priority_bonus`).
-        ``language`` filters every collection (collections without that
-        language simply contribute nothing).
+        Each collection is queried in the given ``mode`` (see
+        :data:`SEARCH_MODES`) and contributes a rank list; the fused
+        score is the sum of ``1/(RRF_K + rank)`` over the lists, plus
+        the bounded per-repository priority bonus (see
+        :meth:`_priority_bonus`). ``language`` filters every collection
+        (collections without that language simply contribute nothing).
         """
         query = self._check_query(query)
         self._repository(repository)
         language = self._check_language_value(language)
+        mode = self._check_mode(mode)
         fused: dict[tuple[str, str, int], tuple[float, Chunk]] = {}
         for collection in ALL_COLLECTIONS:
             pairs = self._search_collection(
-                collection, query, limit, repository, symbols, language
+                collection, query, limit, repository, symbols, language, mode
             )
             # Rank, not the per-list score, is what fusion uses.
             for rank, (_score, chunk) in enumerate(pairs, start=1):
