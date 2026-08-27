@@ -56,18 +56,6 @@ INDEX_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
-class SparseVectorData:
-    """A sparse vector in storage-agnostic form (model vocab indices)."""
-
-    indices: tuple[int, ...]
-    values: tuple[float, ...]
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.indices
-
-
-@dataclass(frozen=True)
 class Chunk:
     """A semantically bounded, independently understandable text unit.
 
@@ -177,8 +165,8 @@ class SearchResult:
     commit: str
     file: str
     content: str
-    #: Fused hybrid relevance score from the vector store (dense + sparse
-    #: RRF).
+    #: Fused hybrid relevance score from the vector store (dense +
+    #: full-text RRF).
     score: float
     language: str | None = None
     symbol: str | None = None

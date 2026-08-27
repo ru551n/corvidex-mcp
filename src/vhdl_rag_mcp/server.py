@@ -3,7 +3,7 @@
 Exposes eight tools to coding agents:
 
 - ``search_vhdl`` / ``search_docs`` / ``search_code`` — hybrid
-  (dense + sparse) semantic search in one domain, with optional
+  (dense + full-text) semantic search in one domain, with optional
   repository/category filters and identifier cross-references;
 - ``search_knowledge`` — the same search fused across all three
   domains (RRF over the per-domain rank lists);

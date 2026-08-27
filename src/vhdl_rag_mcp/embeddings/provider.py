@@ -1,21 +1,12 @@
-"""Embedding layer: local dense + sparse (BM25) embeddings via FastEmbed.
+"""Embedding layer: local dense embeddings via FastEmbed.
 
 Hides the concrete implementation (FastEmbed ONNX models, no server)
 behind a small interface. The vector store and retrieval only deal in
-plain floats and :class:`~vhdl_rag_mcp.models.SparseVectorData`.
-
-Two model families are available per collection:
-
-- dense  ``jinaai/jina-embeddings-v2-*`` — semantic similarity
-- sparse ``Qdrant/bm25`` — exact token matching (identifier search);
-  the vector store may use it as the hybrid exact-match leg. The
-  LanceDB backend instead uses a full-text index and never calls the
-  sparse entry points, so the BM25 model is never loaded there.
+plain floats.
 
 Queries and indexed passages use different entry points: jina v2 models
 require task prefixes ("query:"/"passage:"), which FastEmbed applies
-through ``query_embed``/``passage_embed``; ``Qdrant/bm25`` likewise takes
-a ``mode`` argument.
+through ``query_embed``/``passage_embed``.
 """
 
 from __future__ import annotations
@@ -27,8 +18,6 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
-
-from ..models import SparseVectorData
 
 logger = logging.getLogger(__name__)
 
@@ -45,29 +34,8 @@ class DenseModelLike(Protocol):
     def query_embed(self, query: str, **kwargs: Any) -> Iterable[object]: ...
 
 
-@runtime_checkable
-class SparseVectorResult(Protocol):
-    """Structural type for FastEmbed's sparse output (index/value arrays)."""
-
-    indices: np.ndarray
-    values: np.ndarray
-
-
-@runtime_checkable
-class SparseModelLike(Protocol):
-    """The FastEmbed sparse-model subset this provider relies on."""
-
-    def passage_embed(
-        self, texts: list[str], **kwargs: Any
-    ) -> Iterable[SparseVectorResult]: ...
-
-    def query_embed(
-        self, query: str, **kwargs: Any
-    ) -> Iterable[SparseVectorResult]: ...
-
-
 class EmbeddingProvider(Protocol):
-    """Embeds batches of texts, dense and sparse."""
+    """Embeds batches of texts."""
 
     @property
     def model_name(self) -> str: ...
@@ -78,19 +46,6 @@ class EmbeddingProvider(Protocol):
     def embed_passages(self, texts: list[str]) -> list[list[float]]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
-
-    def embed_sparse_passages(self, texts: list[str]) -> list[SparseVectorData]: ...
-
-    def embed_sparse_query(self, text: str) -> SparseVectorData: ...
-
-
-def _sparse_from(result: SparseVectorResult) -> SparseVectorData:
-    indices = np.asarray(result.indices, dtype=np.int32).ravel()
-    values = np.asarray(result.values, dtype=np.float32).ravel()
-    return SparseVectorData(
-        indices=tuple(int(i) for i in indices),
-        values=tuple(float(v) for v in values),
-    )
 
 
 def _even_slices(count: int, workers: int) -> list[tuple[int, int]]:
@@ -141,7 +96,7 @@ def _embed_slice(
 
 
 class FastEmbedProvider:
-    """FastEmbed-based provider (dense + sparse); models download on first use.
+    """FastEmbed-based dense provider; models download on first use.
 
     Dense inference is memory-bounded: ONNX Runtime's per-thread memory
     arenas retain peak tensor sizes and never release them, and
@@ -159,10 +114,8 @@ class FastEmbedProvider:
     def __init__(
         self,
         dense_model: str,
-        sparse_model: str = "Qdrant/bm25",
         cache_dir: Path | None = None,
         dense: DenseModelLike | None = None,
-        sparse: SparseModelLike | None = None,
         batch_size: int = 8,
         max_tokens: int | None = None,
         threads: int | None = None,
@@ -172,7 +125,6 @@ class FastEmbedProvider:
         dense_cache_dir: Path | None = None,
     ) -> None:
         self._dense_model = dense_model
-        self._sparse_model = sparse_model
         self._batch_size = batch_size
         self._max_tokens = max_tokens
         self._threads = threads
@@ -181,7 +133,6 @@ class FastEmbedProvider:
         self._indexing_workers = indexing_workers
         self._dense_cache_dir = dense_cache_dir
         self._dense: DenseModelLike | None = dense
-        self._sparse: SparseModelLike | None = sparse
         self._cache_dir = cache_dir
 
     def _ensure_dense(self) -> None:
@@ -332,15 +283,6 @@ class FastEmbedProvider:
             flat.extend(o)
         return flat
 
-    def _ensure_sparse(self) -> None:
-        """Lazily load the sparse model (and only the sparse model)."""
-        if self._sparse is None:
-            from fastembed import SparseTextEmbedding
-
-            cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
-            logger.info("loading sparse model %s", self._sparse_model)
-            self._sparse = SparseTextEmbedding(self._sparse_model, cache_dir=cache_dir)
-
     @property
     def model_name(self) -> str:
         return self._dense_model
@@ -410,26 +352,3 @@ class FastEmbedProvider:
         if not vectors:
             raise RuntimeError("embedding model returned no query vector")
         return [float(x) for x in vectors[0]]
-
-    def embed_sparse_passages(self, texts: list[str]) -> list[SparseVectorData]:
-        if not texts:
-            return []
-        self._ensure_sparse()
-        assert self._sparse is not None
-        results = [
-            _sparse_from(r)
-            for r in self._sparse.passage_embed(list(texts), mode="passage")
-        ]
-        if len(results) != len(texts):
-            raise RuntimeError(
-                f"sparse model returned {len(results)} vectors for {len(texts)} texts"
-            )
-        return results
-
-    def embed_sparse_query(self, text: str) -> SparseVectorData:
-        self._ensure_sparse()
-        assert self._sparse is not None
-        results = list(self._sparse.query_embed(text, mode="query"))
-        if not results:
-            return SparseVectorData(indices=(), values=())
-        return _sparse_from(results[0])
