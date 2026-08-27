@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from capability import sqlite_extensions_supported
 
 from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.assets import bundled_model_dir
@@ -39,12 +40,13 @@ CACHE = os.environ.get("VHDL_RAG_EMBED_CACHE")
 BUNDLED = bundled_model_dir("jinaai/jina-embeddings-v2-small-en")
 
 pytestmark = pytest.mark.skipif(
-    not (CACHE or BUNDLED),
+    not (CACHE or BUNDLED) or not sqlite_extensions_supported(),
     reason=(
         "air-gap acceptance: requires the default model either bundled in "
         "the package (src/vhdl_rag_mcp/assets/, provisioned by "
         "tools/bundle_model.py) or a pre-provisioned fastembed cache "
-        "(VHDL_RAG_EMBED_CACHE)"
+        "(VHDL_RAG_EMBED_CACHE), and a Python whose stdlib SQLite "
+        "supports loadable extensions (sqlite-vec)"
     ),
 )
 

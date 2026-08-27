@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from capability import sqlite_extensions_supported
 from pydantic import ValidationError
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
@@ -35,6 +36,16 @@ from vhdl_rag_mcp.server import (
     create_mcp,
 )
 from vhdl_rag_mcp.state import StateStore
+
+pytestmark = pytest.mark.skipif(
+    not sqlite_extensions_supported(),
+    reason=(
+        "stdlib SQLite lacks loadable-extension support (the sqlite-vec "
+        "extension cannot load; use CPython 3.14 or a system/homebrew "
+        "Python)"
+    ),
+)
+
 
 ENV = {
     **os.environ,

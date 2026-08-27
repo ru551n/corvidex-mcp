@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from capability import sqlite_extensions_supported
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
@@ -23,6 +24,16 @@ from vhdl_rag_mcp.selfcheck import (
 from vhdl_rag_mcp.server import VhdlRagApp
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
+
+pytestmark = pytest.mark.skipif(
+    not sqlite_extensions_supported(),
+    reason=(
+        "stdlib SQLite lacks loadable-extension support (the sqlite-vec "
+        "extension cannot load; use CPython 3.14 or a system/homebrew "
+        "Python)"
+    ),
+)
+
 
 REQUIRED_NAMES = ("git", "sqlite", "fts5", "sqlite-vec", "schema")
 

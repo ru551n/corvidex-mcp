@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from capability import sqlite_extensions_supported
 
 from vhdl_rag_mcp.config import AppConfig
 from vhdl_rag_mcp.models import (
@@ -15,6 +16,15 @@ from vhdl_rag_mcp.models import (
     SearchResult,
 )
 from vhdl_rag_mcp.vector_store import VectorStore, VectorStoreError, point_id
+
+pytestmark = pytest.mark.skipif(
+    not sqlite_extensions_supported(),
+    reason=(
+        "stdlib SQLite lacks loadable-extension support (the sqlite-vec "
+        "extension cannot load; use CPython 3.14 or a system/homebrew "
+        "Python)"
+    ),
+)
 
 
 def make_chunk(

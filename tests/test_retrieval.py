@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from capability import sqlite_extensions_supported
 
 from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
 from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
@@ -22,6 +23,16 @@ from vhdl_rag_mcp.models import Chunk, CollectionName, ContentType
 from vhdl_rag_mcp.retrieval import RetrievalError, RetrievalService
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
+
+pytestmark = pytest.mark.skipif(
+    not sqlite_extensions_supported(),
+    reason=(
+        "stdlib SQLite lacks loadable-extension support (the sqlite-vec "
+        "extension cannot load; use CPython 3.14 or a system/homebrew "
+        "Python)"
+    ),
+)
+
 
 ENV = {
     **os.environ,

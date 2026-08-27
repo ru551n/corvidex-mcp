@@ -141,7 +141,14 @@ def check_sqlite_vec() -> ComponentStatus:
             conn.close()
         return ComponentStatus("sqlite-vec", True, False, str(version))
     except Exception as exc:
-        return ComponentStatus("sqlite-vec", False, False, f"load failed: {exc}")
+        from .vector_store import EXTENSION_SUPPORT_ERROR
+
+        detail = (
+            EXTENSION_SUPPORT_ERROR
+            if "enable_load_extension" in str(exc)
+            else f"load failed: {exc}"
+        )
+        return ComponentStatus("sqlite-vec", False, False, detail)
 
 
 def check_schema(store: VectorStore) -> ComponentStatus:

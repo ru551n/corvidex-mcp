@@ -68,6 +68,25 @@ from .models import INDEX_SCHEMA_VERSION, Chunk, CollectionName
 
 logger = logging.getLogger(__name__)
 
+EXTENSION_SUPPORT_ERROR = (
+    "the stdlib SQLite in this Python build lacks loadable-extension "
+    "support (no Connection.enable_load_extension), so the sqlite-vec "
+    "extension cannot be loaded. Use CPython 3.14 (uv: 'uv python "
+    "install 3.14') or a system/homebrew Python; the self-check "
+    "reports the same at startup."
+)
+
+
+def extensions_supported() -> bool:
+    """True when this Python's stdlib SQLite can load loadable
+    extensions (which sqlite-vec needs)."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        return hasattr(conn, "enable_load_extension")
+    finally:
+        conn.close()
+
+
 COLLECTION_HDL = "hdl"
 COLLECTION_DOCS = "docs"
 COLLECTION_CODE = "code"
@@ -398,7 +417,13 @@ class VectorStore:
         conn = sqlite3.connect(str(path))
         conn.row_factory = sqlite3.Row
         # sqlite-vec is a loadable extension; the stdlib connection
-        # refuses loadable extensions until explicitly enabled.
+        # refuses loadable extensions until explicitly enabled. Some
+        # CPython builds link a SQLite without loadable-extension
+        # support and lack the API entirely (e.g. some uv standalone
+        # 3.12/3.13 builds): fail with an actionable error instead of
+        # a bare AttributeError.
+        if not hasattr(conn, "enable_load_extension"):
+            raise VectorStoreError(EXTENSION_SUPPORT_ERROR)
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         # WAL: the periodic sync writer never blocks concurrent queries.

@@ -122,8 +122,13 @@ Requirements:
 - Supported platforms: Linux with glibc ≥ 2.34 (RHEL 9/10 and
   derivatives such as AlmaLinux 9.6+, Ubuntu 24.04, Debian 12;
   x86_64 and arm64), Windows, and macOS 14+ (Apple Silicon and
-  Intel). CI verifies all three OS families, including arm64 Linux,
-  on Python 3.12–3.14.
+  Intel). CI verifies Ubuntu and Windows on Python 3.12–3.14,
+  RHEL 9/10 on all three, and macOS on CPython 3.14; arm64 Linux
+  is not CI-verified (no hosted runners). The vector store also
+  requires an interpreter whose stdlib SQLite supports loadable
+  extensions (sqlite-vec): some uv standalone builds (e.g. macOS
+  3.12/3.13) lack it — the startup self-check reports this, and
+  the fix is `uv python install 3.14`.
 - `vhdl_ls` (only needed for repositories that contain VHDL): install
   a release from <https://vhdl-lang.org/> so `vhdl_ls` is on your
   `PATH`, or point `vhdl_ls_path` at the binary. The
@@ -493,14 +498,12 @@ providers (real-binary tests are gated on the `VHDL_LS_TEST_BIN` and
 
 CI (`.github/workflows/ci.yml`) runs on every push to `main` and on
 pull requests: `ruff format --check`, `ruff check`, `mypy` (strict),
-and the full test suite on a matrix of Python 3.12/3.13/3.14 across
-Ubuntu, Windows, and macOS, plus RHEL 9 and RHEL 10 container jobs
+and the full test suite on Ubuntu and Windows (Python 3.12/3.13/3.14)
+and macOS (CPython 3.14: uv's standalone 3.12/3.13 macOS interpreters
+lack SQLite loadable-extension support, so the store-dependent tests
+would skip wholesale there), plus RHEL 9 and RHEL 10 container jobs
 (official UBI images; UBI 9's glibc 2.34 is the strictest floor in
-the dependency wheel set), and linux/arm64 jobs that run the suite
-in manylinux aarch64 containers (glibc 2.34 and 2.39 floors,
-mirroring the RHEL jobs) under QEMU user-mode emulation (no hosted
-arm64 runners; this verifies the aarch64 wheels and execution on the
-architecture).
+the dependency wheel set).
 
 Layout:
 

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from capability import sqlite_extensions_supported
 from fake_lsp_util import executable_lsp_script
 from fake_veridian_util import fake_veridian as make_fake_veridian
 
@@ -23,6 +24,16 @@ from vhdl_rag_mcp.indexing.pipeline import IndexPipeline
 from vhdl_rag_mcp.models import Chunk, CollectionName, ContentType
 from vhdl_rag_mcp.state import StateStore
 from vhdl_rag_mcp.vector_store import VectorStore
+
+pytestmark = pytest.mark.skipif(
+    not sqlite_extensions_supported(),
+    reason=(
+        "stdlib SQLite lacks loadable-extension support (the sqlite-vec "
+        "extension cannot load; use CPython 3.14 or a system/homebrew "
+        "Python)"
+    ),
+)
+
 
 ENV = {
     **os.environ,
