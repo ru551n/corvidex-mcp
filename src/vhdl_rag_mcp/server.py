@@ -1,8 +1,9 @@
 """FastMCP server: VHDL RAG search over configured Git repositories.
 
-Exposes eight tools to coding agents:
+Exposes nine tools to coding agents:
 
-- ``search_vhdl`` / ``search_docs`` / ``search_code`` — hybrid
+- ``search_hdl`` / ``search_vhdl`` / ``search_docs`` / ``search_code`` —
+  hybrid
   (dense + full-text) semantic search in one domain, with optional
   repository/category filters and identifier cross-references;
 - ``search_knowledge`` — the same search fused across all three
