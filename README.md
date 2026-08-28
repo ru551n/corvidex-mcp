@@ -92,10 +92,10 @@ is, not a stale snapshot.
   Veridian are external binaries that are *not* bundled or installed by
   this server: each is located via its config path or on `PATH`, and
   when one is missing its files simply fall back to structural/generic
-  parsing. `repository_status` reports each analyzer's availability,
+  parsing. `vhdl_rag_repository_status` reports each analyzer's availability,
   version, and mode (`lsp` or `fallback`).
 - **Exact source attribution.** Every result names repository, file,
-  line range, and commit; `get_source` returns the exact current file
+  line range, and commit; `vhdl_rag_get_source` returns the exact current file
   (or a line range) from the synced working tree.
 - **Incremental, self-maintaining index.** Repositories are synced
   from Git (clone/fetch/diff): only changed files are re-chunked and
@@ -319,19 +319,19 @@ args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-
 
 | Tool | What it does |
 | --- | --- |
-| `search_hdl(query, limit, repository, symbols, language)` | Hybrid search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
-| `search_vhdl(query, limit, repository, symbols)` | `search_hdl` restricted to VHDL (back-compat name). |
-| `search_docs(...)` | Same over documentation sections. |
-| `search_code(...)` | Same over general code units (functions/classes). |
-| `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
-| `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
-| `repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode). |
-| `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
-| `reindex_repository(repository)` | Drop and rebuild one repository's index. |
+| `vhdl_rag_search_hdl(query, limit, repository, symbols, language)` | Hybrid search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
+| `vhdl_rag_search_vhdl(query, limit, repository, symbols)` | `vhdl_rag_search_hdl` restricted to VHDL (back-compat name). |
+| `vhdl_rag_search_docs(...)` | Same over documentation sections. |
+| `vhdl_rag_search_code(...)` | Same over general code units (functions/classes). |
+| `vhdl_rag_search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
+| `vhdl_rag_get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
+| `vhdl_rag_repository_status()` | Per repository: ref, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode). |
+| `vhdl_rag_sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
+| `vhdl_rag_reindex_repository(repository)` | Drop and rebuild one repository's index. |
 
 All search tools take an optional `repository` (name) filter plus
 `symbols: list[str]` — restrict results to chunks referencing any of
-the given identifiers. `search_hdl`/`search_knowledge` additionally
+the given identifiers. `vhdl_rag_search_hdl`/`vhdl_rag_search_knowledge` additionally
 accept `language` (e.g. `"verilog"`) to restrict results by language.
 Results are rendered as markdown with source attribution, score,
 language, and referenced identifiers; HDL content is fenced by
@@ -339,12 +339,12 @@ language.
 
 Example agent flow:
 
-1. `search_knowledge("asynchronous reset conventions")` → a docs
+1. `vhdl_rag_search_knowledge("asynchronous reset conventions")` → a docs
    section plus VHDL and Verilog constructs that implement resets.
-2. `search_hdl("reset", symbols=["rst_n"])` → every HDL chunk touching
+2. `vhdl_rag_search_hdl("reset", symbols=["rst_n"])` → every HDL chunk touching
    `rst_n`, in every HDL language.
-3. `search_hdl("fifo", language="systemverilog")` → only SystemVerilog.
-4. `get_source("company-standards", "rtl/reset_ctrl.vhd", 12, 40)` →
+3. `vhdl_rag_search_hdl("fifo", language="systemverilog")` → only SystemVerilog.
+4. `vhdl_rag_get_source("company-standards", "rtl/reset_ctrl.vhd", 12, 40)` →
    the exact lines to copy.
 
 ## Operations
@@ -357,7 +357,7 @@ Example agent flow:
 - **State & retries**: a repository's `indexed_commit` advances only
   after its index update fully succeeded; a failed sync keeps the
   previous commit and the next sync retries the same diff.
-  `last_sync_error` is visible via `repository_status`.
+  `last_sync_error` is visible via `vhdl_rag_repository_status`.
 - **Removing a repository** from the config: on the next start the
   server detects it in the state file and automatically drops all of
   its chunks and state.

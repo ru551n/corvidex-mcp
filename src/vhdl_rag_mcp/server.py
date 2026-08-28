@@ -1,17 +1,26 @@
 """FastMCP server: VHDL RAG search over configured Git repositories.
 
-Exposes eight tools to coding agents:
+Exposes nine tools to coding agents (tool names carry the
+``vhdl_rag_`` prefix so they stay unambiguous when several MCP
+servers are connected):
 
-- ``search_vhdl`` / ``search_docs`` / ``search_code`` — hybrid
-  (dense + full-text) semantic search in one domain, with optional
-  repository/category filters and identifier cross-references;
-- ``search_knowledge`` — the same search fused across all three
+- ``vhdl_rag_search_hdl`` — hybrid (dense + full-text) semantic
+  search over reference HDL, with an optional language filter;
+- ``vhdl_rag_search_vhdl`` — the VHDL-only form of
+  ``vhdl_rag_search_hdl``;
+- ``vhdl_rag_search_docs`` — the same hybrid search over standards
+  and design documentation;
+- ``vhdl_rag_search_code`` — the same hybrid search over general
+  C/C++/Python source;
+- ``vhdl_rag_search_knowledge`` — the search fused across all
   domains (RRF over the per-domain rank lists);
-- ``get_source`` — exact file content (or a line range) from the
-  synced working tree, with repository/commit attribution;
-- ``repository_status`` — what is indexed and any sync errors;
-- ``sync_repositories`` / ``reindex_repository`` — maintenance
-  (incremental sync of selected repos, full reindex of one).
+- ``vhdl_rag_get_source`` — exact file content (or a line range)
+  from the synced working tree, with repository/commit attribution;
+- ``vhdl_rag_repository_status`` — what is indexed and any sync
+  errors (plus the HDL analyzer status);
+- ``vhdl_rag_sync_repositories`` / ``vhdl_rag_reindex_repository``
+  — maintenance (incremental sync of selected repos, full
+  reindex of one).
 
 Lifecycle: load config, log to stderr/file (stdout is reserved for
 the MCP protocol), take a single-instance lock, create the LanceDB
@@ -70,22 +79,23 @@ MCP_NAME = "vhdl_rag_mcp"
 INSTRUCTIONS = (
     "Semantic search over an organization's HDL code (VHDL, Verilog, "
     "SystemVerilog), HDL-related documentation, and general source code "
-    "(C/C++, Python, ...). Use search_hdl for reference HDL "
+    "(C/C++, Python, ...). Use vhdl_rag_search_hdl for reference HDL "
     "implementations (entities/modules, architectures, processes/always "
     "blocks, packages, functions, tasks, reset/clock/FSM patterns) with "
     "an optional language filter ('vhdl' | 'verilog' | "
-    "'systemverilog'); search_vhdl is the VHDL-only form of search_hdl. "
-    "search_docs for standards and design documentation, search_code for "
-    "general C/C++/Python code, and search_knowledge when the answer may "
+    "'systemverilog'); vhdl_rag_search_vhdl is the VHDL-only form of "
+    "vhdl_rag_search_hdl. vhdl_rag_search_docs for standards and design "
+    "documentation, vhdl_rag_search_code for general C/C++/Python code, "
+    "and vhdl_rag_search_knowledge when the answer may "
     "span any of them. Pass `symbols` to find every chunk that references "
     "specific identifiers (cross-referencing; works across HDL "
-    "languages). Use get_source for the full text of a known file (exact "
+    "languages). Use vhdl_rag_get_source for the full text of a known file (exact "
     "lines, exact commit). Every result carries source attribution "
     "(repository, file, line range, commit, language). Use "
-    "repository_status to see what is indexed and whether a sync failed; "
+    "vhdl_rag_repository_status to see what is indexed and whether a sync failed; "
     "it also reports the HDL analyzer status (vhdl_ls / Veridian). "
-    "sync_repositories to force an update, reindex_repository to rebuild "
-    "one repository's index."
+    "vhdl_rag_sync_repositories to force an update, "
+    "vhdl_rag_reindex_repository to rebuild one repository's index."
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
@@ -349,7 +359,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
     mcp = FastMCP(MCP_NAME, instructions=INSTRUCTIONS)
     retrieval = app.retrieval
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_search_hdl", annotations=_READ_ONLY)
     @_handle_errors
     async def search_hdl(
         query: str,
@@ -377,10 +387,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 language,
             ),
             "No HDL results. Try a broader query or a different language, "
-            "or check repository_status.",
+            "or check vhdl_rag_repository_status.",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_search_vhdl", annotations=_READ_ONLY)
     @_handle_errors
     async def search_vhdl(
         query: str,
@@ -389,7 +399,8 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         symbols: list[str] | None = None,
     ) -> str:
         """Search VHDL source only (the language-restricted form of
-        search_hdl; use search_hdl for Verilog/SystemVerilog or a mix):
+        vhdl_rag_search_hdl — use vhdl_rag_search_hdl for
+        Verilog/SystemVerilog or a mix):
         entities, architectures, processes, packages, functions —
         semantic + exact-identifier hybrid search. `symbols` restricts
         to chunks referencing the given identifiers (e.g.
@@ -404,10 +415,11 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 tuple(symbols) if symbols else None,
                 "vhdl",
             ),
-            "No VHDL results. Try a broader query, or check repository_status.",
+            "No VHDL results. Try a broader query, or check "
+            "vhdl_rag_repository_status.",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_search_docs", annotations=_READ_ONLY)
     @_handle_errors
     async def search_docs(
         query: str,
@@ -427,10 +439,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 tuple(symbols) if symbols else None,
             ),
             "No documentation results. Try a broader query, or check "
-            "repository_status.",
+            "vhdl_rag_repository_status.",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_search_code", annotations=_READ_ONLY)
     @_handle_errors
     async def search_code(
         query: str,
@@ -449,10 +461,11 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 repository,
                 tuple(symbols) if symbols else None,
             ),
-            "No code results. Try a broader query, or check repository_status.",
+            "No code results. Try a broader query, or check "
+            "vhdl_rag_repository_status.",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_search_knowledge", annotations=_READ_ONLY)
     @_handle_errors
     async def search_knowledge(
         query: str,
@@ -472,10 +485,10 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 tuple(symbols) if symbols else None,
             ),
             "No results in any domain. Try a broader query, or check "
-            "repository_status.",
+            "vhdl_rag_repository_status.",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_get_source", annotations=_READ_ONLY)
     @_handle_errors
     async def get_source(
         repository: str,
@@ -489,7 +502,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         source line."""
         return retrieval.get_source(repository, file, start_line, end_line)
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @mcp.tool(name="vhdl_rag_repository_status", annotations=_READ_ONLY)
     async def repository_status() -> str:
         """Show every configured repository: ref, enabled domains, last
         indexed commit, chunk and file counts, last sync time, and any
@@ -533,7 +546,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
             lines.append(line)
         return "\n".join(lines)
 
-    @mcp.tool(annotations=_READ_WRITE)
+    @mcp.tool(name="vhdl_rag_sync_repositories", annotations=_READ_WRITE)
     @_handle_errors
     async def sync_repositories(repositories: list[str] | None = None) -> str:
         """Incrementally sync repositories (default: all): fetch the ref,
@@ -542,7 +555,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         reports = await app.sync_all(repositories)
         return _render_report(reports)
 
-    @mcp.tool(annotations=_READ_WRITE)
+    @mcp.tool(name="vhdl_rag_reindex_repository", annotations=_READ_WRITE)
     @_handle_errors
     async def reindex_repository(repository: str) -> str:
         """Fully reindex one repository (drops and rebuilds all of its

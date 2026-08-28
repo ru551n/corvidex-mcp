@@ -29,7 +29,7 @@ repositories, covering **indexing speed**, **resource usage**,
 - **Quality battery** — 16 user-style queries (8 per repo: semantic
   paraphrases plus raw identifiers like `build_step_tcl_hook` and
   `handshake_pipeline`), issued through the user-facing
-  `search_knowledge` (all collections, limit 5, top-3 counted), with
+  `vhdl_rag_search_knowledge` (all collections, limit 5, top-3 counted), with
   hand-verified expected files.
 - **Latency** — per query, 5 runs, median reported (includes query
   embedding; Qdrant's BM25 query embedding included in its time).

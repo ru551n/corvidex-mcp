@@ -144,36 +144,40 @@ async def test_tools_registered(env) -> None:
     _app, mcp, _up = env
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == {
-        "search_hdl",
-        "search_vhdl",
-        "search_docs",
-        "search_code",
-        "search_knowledge",
-        "get_source",
-        "repository_status",
-        "sync_repositories",
-        "reindex_repository",
+        "vhdl_rag_search_hdl",
+        "vhdl_rag_search_vhdl",
+        "vhdl_rag_search_docs",
+        "vhdl_rag_search_code",
+        "vhdl_rag_search_knowledge",
+        "vhdl_rag_get_source",
+        "vhdl_rag_repository_status",
+        "vhdl_rag_sync_repositories",
+        "vhdl_rag_reindex_repository",
     }
 
 
 async def test_search_tools_end_to_end(env) -> None:
     _app, mcp, _up = env
-    result = await mcp.call_tool("search_docs", {"query": "reset conventions"})
+    result = await mcp.call_tool("vhdl_rag_search_docs", {"query": "reset conventions"})
     text = tool_text(result)
     assert "## [docs]" in text
     assert "Reset conventions" in text
     assert "repo:docs/standard.md" in text
 
-    result = await mcp.call_tool("search_code", {"query": "fifo write function"})
+    result = await mcp.call_tool(
+        "vhdl_rag_search_code", {"query": "fifo write function"}
+    )
     assert "## [code]" in tool_text(result)
 
-    result = await mcp.call_tool("search_knowledge", {"query": "fifo", "limit": 10})
+    result = await mcp.call_tool(
+        "vhdl_rag_search_knowledge", {"query": "fifo", "limit": 10}
+    )
     knowledge = tool_text(result)
     assert "## [docs]" in knowledge
     assert "## [code]" in knowledge
 
     # Empty domain: friendly message, not an exception.
-    result = await mcp.call_tool("search_vhdl", {"query": "entity fifo"})
+    result = await mcp.call_tool("vhdl_rag_search_vhdl", {"query": "entity fifo"})
     assert "No VHDL results" in tool_text(result)
 
 
@@ -190,32 +194,38 @@ async def test_search_hdl_tool_language_filter(env) -> None:
     app.store.upsert_chunks(chunks, dense)
 
     # No language: all HDL languages are searchable together.
-    all_text = tool_text(await mcp.call_tool("search_hdl", {"query": "fifo"}))
+    all_text = tool_text(await mcp.call_tool("vhdl_rag_search_hdl", {"query": "fifo"}))
     assert "repo:rtl/fifo.vhd" in all_text
     assert "repo:tb/fifo_tb.v" in all_text
 
     # Language filter: only Verilog chunks match.
     verilog_text = tool_text(
-        await mcp.call_tool("search_hdl", {"query": "fifo", "language": "verilog"})
+        await mcp.call_tool(
+            "vhdl_rag_search_hdl", {"query": "fifo", "language": "verilog"}
+        )
     )
     assert "repo:tb/fifo_tb.v" in verilog_text
     assert "repo:rtl/fifo.vhd" not in verilog_text
 
     # search_vhdl is the VHDL-only form of search_hdl.
-    vhdl_text = tool_text(await mcp.call_tool("search_vhdl", {"query": "fifo"}))
+    vhdl_text = tool_text(
+        await mcp.call_tool("vhdl_rag_search_vhdl", {"query": "fifo"})
+    )
     assert "repo:rtl/fifo.vhd" in vhdl_text
     assert "repo:tb/fifo_tb.v" not in vhdl_text
 
     # Cross-referencing: both chunks reference FIFO_DEPTH.
     sym_text = tool_text(
-        await mcp.call_tool("search_hdl", {"query": "fifo", "symbols": ["FIFO_DEPTH"]})
+        await mcp.call_tool(
+            "vhdl_rag_search_hdl", {"query": "fifo", "symbols": ["FIFO_DEPTH"]}
+        )
     )
     assert "repo:rtl/fifo.vhd" in sym_text
     assert "repo:tb/fifo_tb.v" in sym_text
     # An identifier no chunk references yields the empty message.
     none_text = tool_text(
         await mcp.call_tool(
-            "search_hdl", {"query": "fifo", "symbols": ["no_such_ident"]}
+            "vhdl_rag_search_hdl", {"query": "fifo", "symbols": ["no_such_ident"]}
         )
     )
     assert "No HDL results" in none_text
@@ -224,10 +234,12 @@ async def test_search_hdl_tool_language_filter(env) -> None:
 async def test_search_hdl_language_validation(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
-        "search_hdl", {"query": "fifo", "language": "verilog-2005"}
+        "vhdl_rag_search_hdl", {"query": "fifo", "language": "verilog-2005"}
     )
     assert tool_text(result).startswith("Error: unknown HDL language")
-    result = await mcp.call_tool("search_hdl", {"query": "fifo", "language": "  "})
+    result = await mcp.call_tool(
+        "vhdl_rag_search_hdl", {"query": "fifo", "language": "  "}
+    )
     assert tool_text(result).startswith("Error: language must not be empty")
 
 
@@ -243,7 +255,7 @@ async def test_repository_status_analyzer_available(env, tmp_path: Path) -> None
     )
     mcp2 = create_mcp(app2)
     try:
-        result = await mcp2.call_tool("repository_status", {})
+        result = await mcp2.call_tool("vhdl_rag_repository_status", {})
     finally:
         app2.close()
     text = tool_text(result)
@@ -254,29 +266,31 @@ async def test_repository_status_analyzer_available(env, tmp_path: Path) -> None
 async def test_search_tool_errors(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
-        "search_docs", {"query": "x", "repository": "no-such-repo"}
+        "vhdl_rag_search_docs", {"query": "x", "repository": "no-such-repo"}
     )
     assert tool_text(result).startswith("Error: unknown repository")
-    result = await mcp.call_tool("search_docs", {"query": "   "})
+    result = await mcp.call_tool("vhdl_rag_search_docs", {"query": "   "})
     assert tool_text(result).startswith("Error: query must not be empty")
 
 
 async def test_get_source_tool(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
-        "get_source", {"repository": "repo", "file": "src/fifo.c"}
+        "vhdl_rag_get_source", {"repository": "repo", "file": "src/fifo.c"}
     )
     text = tool_text(result)
     assert text.startswith("repo:src/fifo.c @ ")
     assert FIFO_C.rstrip() in text
 
     result = await mcp.call_tool(
-        "get_source",
+        "vhdl_rag_get_source",
         {"repository": "repo", "file": "src/fifo.c", "start_line": 2, "end_line": 2},
     )
     assert "(lines 2-2" in tool_text(result)
 
-    result = await mcp.call_tool("get_source", {"repository": "repo", "file": "no.c"})
+    result = await mcp.call_tool(
+        "vhdl_rag_get_source", {"repository": "repo", "file": "no.c"}
+    )
     assert tool_text(result).startswith("Error:")
 
 
@@ -286,7 +300,7 @@ async def test_repository_status_tool(
     _app, mcp, _up = env
     # Deterministic analyzer discovery: nothing on PATH.
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
-    result = await mcp.call_tool("repository_status", {})
+    result = await mcp.call_tool("vhdl_rag_repository_status", {})
     text = tool_text(result)
     assert "- repo (ref main, domains: hdl, docs, code)" in text
     assert "indexed:" in text
@@ -312,7 +326,7 @@ async def test_repository_status_tool(
 async def test_sync_repositories_contains_errors(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
-        "sync_repositories", {"repositories": ["repo", "broken"]}
+        "vhdl_rag_sync_repositories", {"repositories": ["repo", "broken"]}
     )
     text = tool_text(result)
     assert "- repo: ok" in text
@@ -320,23 +334,27 @@ async def test_sync_repositories_contains_errors(env) -> None:
     assert "does not resolve" in text
 
     # Selecting only the healthy repo works and is idempotent.
-    result = await mcp.call_tool("sync_repositories", {"repositories": ["repo"]})
+    result = await mcp.call_tool(
+        "vhdl_rag_sync_repositories", {"repositories": ["repo"]}
+    )
     text = tool_text(result)
     assert "- repo: ok" in text
     assert "broken" not in text
 
     # Unknown names are rejected up front.
-    result = await mcp.call_tool("sync_repositories", {"repositories": ["ghost"]})
+    result = await mcp.call_tool(
+        "vhdl_rag_sync_repositories", {"repositories": ["ghost"]}
+    )
     assert tool_text(result).startswith("Error: unknown repository")
 
 
 async def test_reindex_repository_tool(env) -> None:
     app, mcp, _up = env
     before = app.store.count()
-    result = await mcp.call_tool("reindex_repository", {"repository": "repo"})
+    result = await mcp.call_tool("vhdl_rag_reindex_repository", {"repository": "repo"})
     assert "- repo: ok" in tool_text(result)
     assert app.store.count() == before
-    result = await mcp.call_tool("reindex_repository", {"repository": "nope"})
+    result = await mcp.call_tool("vhdl_rag_reindex_repository", {"repository": "nope"})
     assert tool_text(result).startswith("Error: unknown repository")
 
 
