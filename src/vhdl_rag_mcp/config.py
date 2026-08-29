@@ -614,7 +614,17 @@ def load_config(path: Path | None = None, write_default: bool = True) -> AppConf
     try:
         raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigError(f"cannot read configuration {config_path}: {exc}") from exc
+        message = f"cannot read configuration {config_path}: {exc}"
+        if isinstance(exc, tomllib.TOMLDecodeError):
+            # The most common hand-edit mistake is a bare path value
+            # (path = ~/git/foo): valid-looking but invalid TOML, and ~
+            # only means anything after parsing (the loader expands it).
+            message += (
+                ". Hint: TOML values must be quoted strings "
+                '(e.g. path = "~/git/foo"); a bare ~/... value is not '
+                "valid TOML"
+            )
+        raise ConfigError(message) from exc
     try:
         return AppConfig.model_validate(raw)
     except Exception as exc:  # pydantic ValidationError

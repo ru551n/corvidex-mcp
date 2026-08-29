@@ -267,6 +267,17 @@ def test_malformed_toml_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_unquoted_path_gets_quoting_hint(tmp_path: Path) -> None:
+    """A bare ~/path (the common hand-edit mistake) is invalid TOML; the
+    error must point at the quoting so the user can self-correct."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[[repositories]]\nname = "proj"\npath = ~/git/proj\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=r"cannot read configuration.*quoted strings"):
+        load_config(path)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
