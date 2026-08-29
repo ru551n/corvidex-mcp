@@ -308,6 +308,49 @@ def test_analyzer_path_defaults() -> None:
     assert cfg.veridian_path == "veridian"
 
 
+def test_filesystem_repository_config() -> None:
+    repo = RepositoryConfig(
+        name="fsrepo", path=Path("~/work/local-ip"), filesystem=True
+    )
+    assert repo.is_filesystem
+    assert repo.is_local
+    assert repo.path == Path("~/work/local-ip").expanduser()
+    # 'ref' is accepted (default kept) but does not apply.
+    assert repo.ref == "main"
+
+
+def test_filesystem_validation() -> None:
+    with pytest.raises(ValidationError, match="'filesystem'"):
+        RepositoryConfig(name="r", url="git@x:y.git", filesystem=True)
+    with pytest.raises(ValidationError, match="'filesystem'"):
+        RepositoryConfig(name="r", filesystem=True)
+
+
+def test_index_untracked_flag() -> None:
+    assert RepositoryConfig(name="r", url="u").index_untracked is True
+    assert (
+        RepositoryConfig(name="r", url="u", index_untracked=False).index_untracked
+        is False
+    )
+
+
+def test_filesystem_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[[repositories]]\n"
+        'name = "fsrepo"\n'
+        'path = "~/work/local-ip"\n'
+        "filesystem = true\n"
+        "index_untracked = false\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    repo = cfg.repositories[0]
+    assert repo.is_filesystem
+    assert repo.index_untracked is False
+    assert repo.path == Path("~/work/local-ip").expanduser()
+
+
 def test_veridian_hook_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(

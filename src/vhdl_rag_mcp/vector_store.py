@@ -688,6 +688,53 @@ class VectorStore:
             total += self._delete(collection, must={"repository": repository})
         return total
 
+    def delete_file_prefix(self, repository: str, prefix: str) -> int:
+        """Remove every chunk whose file path lies under ``prefix/``
+        (submodule prefix purge)."""
+        total = 0
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"{escaped}/%"
+        for collection in ALL_COLLECTIONS:
+            name = collection.value
+            if not self._table_exists(f"chunks_{name}"):
+                continue
+            predicate = (
+                f"{_col('repository')} = ? AND {_col('file')} LIKE ? ESCAPE '\\'"
+            )
+            params = [repository, pattern]
+            conn = self._conn
+            try:
+                rowids = [
+                    row[0]
+                    for row in conn.execute(
+                        f"SELECT rowid FROM chunks_{name} WHERE {predicate}",
+                        params,
+                    )
+                ]
+                if not rowids:
+                    continue
+                conn.executemany(
+                    f"DELETE FROM vec_{name} WHERE rowid = ?", [(r,) for r in rowids]
+                )
+                conn.executemany(
+                    f"DELETE FROM fts_{name} WHERE rowid = ?", [(r,) for r in rowids]
+                )
+                conn.execute(f"DELETE FROM chunks_{name} WHERE {predicate}", params)
+                conn.commit()
+            except sqlite3.Error as exc:
+                conn.rollback()
+                raise VectorStoreError(
+                    f"delete from collection {name!r} failed: {exc}"
+                ) from exc
+            logger.info(
+                "deleted %d stale chunks from %r under %s/",
+                len(rowids),
+                name,
+                prefix,
+            )
+            total += len(rowids)
+        return total
+
     def _delete(self, collection: CollectionName, must: Mapping[str, str]) -> int:
         name = collection.value
         if not self._table_exists(f"chunks_{name}"):

@@ -41,6 +41,9 @@ ENV = {
     "GIT_AUTHOR_EMAIL": "t@example.com",
     "GIT_COMMITTER_NAME": "t",
     "GIT_COMMITTER_EMAIL": "t@example.com",
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "protocol.file.allow",
+    "GIT_CONFIG_VALUE_0": "always",
 }
 
 FAKE_LSP = r"""#!/usr/bin/env python3
@@ -978,4 +981,220 @@ def test_upsert_streams_embeds_and_commits(tmp_path: Path, config: AppConfig) ->
     assert spy.sizes == [256, 44]
     # Every chunk is durably upserted.
     assert store.count(CollectionName.HDL) == 300
+    store.close()
+
+
+# -- filesystem repositories ---------------------------------------------------
+
+
+@pytest.fixture
+def fs_root(tmp_path: Path) -> Path:
+    root = tmp_path / "fsrepo"
+    (root / "rtl").mkdir(parents=True)
+    (root / "rtl" / "fifo.vhd").write_text(FIFO_VHDL)
+    (root / "docs").mkdir()
+    (root / "docs" / "standard.md").write_text(STD_MD)
+    (root / "src").mkdir()
+    (root / "src" / "fifo.c").write_text(FIFO_C)
+    # The walk must skip these: hidden file/directory and symlink.
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".hidden.vhd").write_text(NEW_VHDL)
+    (root / "link.vhd").symlink_to(root / "rtl" / "fifo.vhd")
+    return root
+
+
+@pytest.fixture
+def fs_env(tmp_path: Path, fs_root: Path, fake_lsp: Path):
+    config = AppConfig(
+        data_dir=tmp_path / "fsdata",
+        vhdl_ls_path=str(fake_lsp),
+        repositories=[RepositoryConfig(name="fsrepo", path=fs_root, filesystem=True)],
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    pipeline = IndexPipeline(
+        config,
+        GitManager(config.repos_dir),
+        store,
+        fake_providers(config),
+        StateStore(config.state_dir / "repositories.json"),
+    )
+    yield store, pipeline, config
+    store.close()
+
+
+async def test_filesystem_full_sync(fs_env) -> None:
+    store, pipeline, config = fs_env
+    await pipeline.sync_repository(config.repository("fsrepo"))
+    # The fake LSP yields 3 chunks per VHDL file (entity, architecture,
+    # child process); docs and code contribute 2 each.
+    assert store.count() == 7
+    assert store.count(CollectionName.HDL) == 3
+    assert store.count(CollectionName.DOCS) == 2
+    assert store.count(CollectionName.CODE) == 2
+    # Hidden files/dirs and the symlink are never indexed.
+    assert store.chunks_for_file("fsrepo", ".hidden.vhd") == []
+    assert store.chunks_for_file("fsrepo", "link.vhd") == []
+    assert store.chunks_for_file("fsrepo", ".git/config") == []
+    # Chunks are attributed to the walk fingerprint, branch "-".
+    chunks = store.chunks_for_file("fsrepo", "rtl/fifo.vhd")
+    assert len(chunks) == 3
+    assert len(chunks[0].commit) == 64
+    assert chunks[0].branch == "-"
+
+
+async def test_filesystem_unchanged_is_noop(fs_env) -> None:
+    store, pipeline, config = fs_env
+    cfg = config.repository("fsrepo")
+    await pipeline.sync_repository(cfg)
+    before = store.count()
+    await pipeline.sync_repository(cfg)
+    assert store.count() == before
+
+
+async def test_filesystem_incremental_add_modify_delete(fs_env, fs_root: Path) -> None:
+    store, pipeline, config = fs_env
+    cfg = config.repository("fsrepo")
+    await pipeline.sync_repository(cfg)
+    assert store.count() == 7
+
+    (fs_root / "rtl" / "fifo.vhd").write_text(FIFO_VHDL + "-- v2\n")
+    (fs_root / "rtl" / "new_top.vhd").write_text(NEW_VHDL)
+    (fs_root / "docs" / "standard.md").unlink()
+
+    await pipeline.sync_repository(cfg)
+    # fifo.vhd re-chunked (3 in, 3 out), new_top.vhd added (3), docs gone
+    # (-2): 7 - 2 + 3 = 8.
+    assert store.count() == 8
+    assert store.count(CollectionName.HDL) == 6
+    assert store.count(CollectionName.DOCS) == 0
+    assert store.chunks_for_file("fsrepo", "docs/standard.md") == []
+    assert len(store.chunks_for_file("fsrepo", "rtl/new_top.vhd")) == 3
+
+
+# -- local repositories: index_untracked flag -----------------------------------
+
+
+async def test_local_index_untracked_flag_lifecycle(
+    tmp_path: Path, fake_lsp: Path
+) -> None:
+    local = tmp_path / "localrepo"
+    (local / "rtl").mkdir(parents=True)
+    (local / "rtl" / "fifo.vhd").write_text(FIFO_VHDL)
+    git(local, "init", "-q", "-b", "main")
+    git(local, "add", "-A")
+    git(local, "commit", "-qm", "first")
+    (local / "rtl" / "extra.vhd").write_text(NEW_VHDL)  # untracked
+
+    def make_pipeline(index_untracked: bool):
+        config = AppConfig(
+            data_dir=tmp_path / "data-untracked",
+            vhdl_ls_path=str(fake_lsp),
+            repositories=[
+                RepositoryConfig(
+                    name="lrepo", path=local, index_untracked=index_untracked
+                )
+            ],
+        )
+        store = VectorStore(config)
+        store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+        pipeline = IndexPipeline(
+            config,
+            GitManager(config.repos_dir),
+            store,
+            fake_providers(config),
+            StateStore(config.state_dir / "repositories.json"),
+        )
+        return store, pipeline, config
+
+    store, pipeline, config = make_pipeline(False)
+    await pipeline.sync_repository(config.repository("lrepo"))
+    # Only tracked files are indexed; the untracked extra.vhd is skipped.
+    assert store.chunks_for_file("lrepo", "rtl/extra.vhd") == []
+    assert len(store.chunks_for_file("lrepo", "rtl/fifo.vhd")) == 3
+    store.close()
+
+    store, pipeline, config = make_pipeline(True)
+    await pipeline.sync_repository(config.repository("lrepo"))
+    # Turning the flag on indexes the previously skipped untracked file.
+    assert len(store.chunks_for_file("lrepo", "rtl/extra.vhd")) == 3
+    store.close()
+
+    store, pipeline, config = make_pipeline(False)
+    await pipeline.sync_repository(config.repository("lrepo"))
+    # Turning it off again deletes the previously indexed untracked chunks.
+    assert store.chunks_for_file("lrepo", "rtl/extra.vhd") == []
+    assert len(store.chunks_for_file("lrepo", "rtl/fifo.vhd")) == 3
+    store.close()
+
+
+async def test_local_submodule_indexing_lifecycle(
+    tmp_path: Path, fake_lsp: Path
+) -> None:
+    ip_up = tmp_path / "ip-upstream"
+    (ip_up / "rtl").mkdir(parents=True)
+    (ip_up / "rtl" / "a.vhd").write_text(FIFO_VHDL)
+    git(ip_up, "init", "-q", "-b", "main")
+    git(ip_up, "add", "-A")
+    git(ip_up, "commit", "-qm", "ip first")
+
+    sup = tmp_path / "super"
+    (sup / "rtl").mkdir(parents=True)
+    (sup / "rtl" / "top.vhd").write_text(FIFO_VHDL)
+    git(sup, "init", "-q", "-b", "main")
+    git(sup, "submodule", "add", "-q", str(ip_up), "ip")
+    git(sup, "add", "-A")
+    git(sup, "commit", "-qm", "super first")
+
+    def make_pipeline():
+        config = AppConfig(
+            data_dir=tmp_path / "data-sub",
+            vhdl_ls_path=str(fake_lsp),
+            repositories=[RepositoryConfig(name="srepo", path=sup)],
+        )
+        store = VectorStore(config)
+        store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+        pipeline = IndexPipeline(
+            config,
+            GitManager(config.repos_dir),
+            store,
+            fake_providers(config),
+            StateStore(config.state_dir / "repositories.json"),
+        )
+        return store, pipeline, config
+
+    store, pipeline, config = make_pipeline()
+    await pipeline.sync_repository(config.repository("srepo"))
+    assert len(store.chunks_for_file("srepo", "rtl/top.vhd")) == 3
+    assert len(store.chunks_for_file("srepo", "ip/rtl/a.vhd")) == 3
+    assert store.count() == 6
+    store.close()
+
+    # Re-open the state: a no-op resync through a fresh pipeline proves the
+    # submodule pointers persisted and the diff is clean.
+    store, pipeline, config = make_pipeline()
+    await pipeline.sync_repository(config.repository("srepo"))
+    assert store.count() == 6
+
+    # Bump the pointer: new file inside the submodule, committed upstream.
+    ip = sup / "ip"
+    (ip / "rtl" / "b.vhd").write_text(NEW_VHDL)
+    git(ip, "add", "-A")
+    git(ip, "commit", "-qm", "ip second")
+    git(sup, "add", "ip")
+    git(sup, "commit", "-qm", "super second")
+    await pipeline.sync_repository(config.repository("srepo"))
+    assert len(store.chunks_for_file("srepo", "ip/rtl/b.vhd")) == 3
+    # a.vhd re-chunked in place, not duplicated.
+    assert len(store.chunks_for_file("srepo", "ip/rtl/a.vhd")) == 3
+    assert store.count() == 9
+
+    # Remove the submodule: its prefix is purged from the store.
+    git(sup, "rm", "-q", "ip")
+    git(sup, "commit", "-qm", "super third")
+    await pipeline.sync_repository(config.repository("srepo"))
+    assert store.chunks_for_file("srepo", "ip/rtl/a.vhd") == []
+    assert store.chunks_for_file("srepo", "ip/rtl/b.vhd") == []
+    assert store.count() == 3
     store.close()

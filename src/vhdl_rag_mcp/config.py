@@ -172,9 +172,11 @@ class RepositoryConfig(BaseModel):
     """One configured source repository.
 
     A repository is either a **remote** (``url`` — cloned and kept in
-    sync by this server) or a **local working repository** (``path`` —
-    the user's own checkout; indexed in place, never mutated). Exactly
-    one of the two must be set.
+    sync by this server), a **local working repository** (``path`` —
+    the user's own checkout; indexed in place, never mutated), or a
+    **filesystem repository** (``path`` + ``filesystem = true`` — a plain
+    directory of files with no Git at all). Exactly one of ``url`` / ``path``
+    must be set.
 
     For remote repositories, ``ref`` is any resolvable Git ref — a
     branch name, a tag, or a commit SHA (full or abbreviated). A branch
@@ -187,7 +189,16 @@ class RepositoryConfig(BaseModel):
 
     For local working repositories ``ref`` is ignored: HEAD plus the
     working tree (uncommitted changes and git-respected untracked
-    files) are indexed, attributed to the current HEAD commit.
+    files) are indexed, attributed to the current HEAD commit. Whether
+    untracked files are indexed at all is controlled by
+    ``index_untracked`` (default: true).
+
+    For filesystem repositories Git is not involved in any way: every
+    file below ``path`` is walked and indexed in place (hidden files and
+    directories and symlinks are skipped, so an embedded ``.git`` stays
+    out of the index). Incremental sync tracks the walked file set plus
+    content fingerprints, so edits, additions, and deletions are picked
+    up on the next sync. ``ref`` and the Git hooks do not apply.
 
     ``domains`` selects which of the three indexed domains (HDL,
     documentation, general code) are loaded from this repository; the
@@ -237,9 +248,27 @@ class RepositoryConfig(BaseModel):
         default=None,
         description=(
             "Shell command, run at the repository root, that produces "
-            "veridian.yaml when it is missing (invoked before the "
-            "Veridian session starts). Same precedence and ownership "
-            "semantics as vhdl_ls_hook."
+            "veridian.yaml when it is missing (invoked before the Veridian "
+            "session starts). Same precedence and ownership semantics as "
+            "vhdl_ls_hook."
+        ),
+    )
+    filesystem: bool = Field(
+        default=False,
+        description=(
+            "Treat 'path' as a plain directory of files (no Git): every "
+            "file is walked and indexed in place, with incremental sync "
+            "tracking the file set and content fingerprints. Mutually "
+            "exclusive with 'url'; 'ref' and the Git hooks are ignored."
+        ),
+    )
+    index_untracked: bool = Field(
+        default=True,
+        description=(
+            "Local working repositories only: also index untracked files "
+            "(honoring .gitignore). No effect on remote repositories and "
+            "on filesystem repositories (which always index every file "
+            "they find)."
         ),
     )
     priority: int = Field(
@@ -332,12 +361,25 @@ class RepositoryConfig(BaseModel):
                 f"repository {self.name!r} must set exactly one of 'url' "
                 "or 'path', not both"
             )
+        if self.filesystem and self.url is not None:
+            raise ValueError(
+                f"repository {self.name!r}: 'filesystem' requires 'path' "
+                "and cannot be combined with 'url'"
+            )
+        if self.filesystem and self.path is None:
+            raise ValueError(f"repository {self.name!r}: 'filesystem' requires 'path'")
         return self
 
     @property
     def is_local(self) -> bool:
-        """True for a local working repository (``path``; no cloning)."""
+        """True for a local repository (``path``; no cloning): a working
+        Git repository or a plain filesystem directory."""
         return self.path is not None
+
+    @property
+    def is_filesystem(self) -> bool:
+        """True for a plain-directory repository (no Git involved)."""
+        return self.filesystem
 
     @property
     def is_pinned_sha(self) -> bool:
@@ -495,16 +537,20 @@ _DEFAULT_TEMPLATE = """\
 #
 # Indexed domains: VHDL (via vhdl_ls), VHDL-related documentation, and
 # general source code (C/C++, Python, ...). Each repository is either a
-# remote Git URL (cloned and synced by the server) or a local working
+# remote Git URL (cloned and synced by the server), a local working
 # repository directory (path): the user's own checkout, indexed in place
-# without ever being modified. Private remotes work with your normal
-# Git/SSH setup (SSH agent, ~/.ssh/config, deploy keys).
+# without ever being modified, or a plain filesystem directory
+# (path + filesystem = true): raw files indexed in place with no Git at
+# all. Private remotes work with your normal Git/SSH setup (SSH agent,
+# ~/.ssh/config, deploy keys).
 #
 # "ref" is any resolvable Git ref: a branch name (tracked on every sync),
 # a tag, or a commit SHA (full or abbreviated). Tags and SHAs pin the
 # repository to a fixed version — sync only verifies the pin. "ref" is
 # ignored for local working repositories (path): HEAD plus uncommitted
-# changes and untracked files are indexed.
+# changes and untracked files are indexed (untracked indexing can be
+# switched off per repository with "index_untracked = false"), and it is
+# ignored for filesystem repositories.
 #
 # "vhdl_ls_hook" / "veridian_hook" are shell commands run at the
 # repository root that generate vhdl_ls.toml / veridian.yaml when they
@@ -591,6 +637,19 @@ log_level = "INFO"
 #                             # ignored for path repositories
 # domains = ["hdl", "docs", "code"]   # which domains to index (default: all)
 # exclude = ["sim", "build/*", "*.log"]  # glob-style path excludes
+# index_untracked = false    # skip untracked files (default: index them;
+#                             # local working repositories only)
+
+# A plain directory of files, no Git involved: every file below 'path' is
+# indexed in place (hidden files/directories and symlinks are skipped, so
+# an embedded .git stays out of the index). 'ref' and the Git hooks do not
+# apply.
+#
+# [[repositories]]
+# name = "local-ip"
+# path = "~/work/local-ip"
+# filesystem = true
+# domains = ["hdl", "docs"]
 """
 
 

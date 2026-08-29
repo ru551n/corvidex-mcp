@@ -83,16 +83,21 @@ class RepositoryState(BaseModel):
     last_sync_error: str | None = None
     #: Last full index run (clone or reindex).
     last_indexed_file_count: int = 0
-    #: Local working repositories only: cheap fingerprint (HEAD + porcelain
-    #: status) of the working tree at the last successful sync. The fast
-    #: local poller compares its freshly computed fingerprint to this value
-    #: to decide whether a sync is needed without running the full plan.
+    #: Local working and filesystem repositories only: cheap fingerprint
+    #: (HEAD + porcelain status, or the filesystem walk) of the working
+    #: tree at the last successful sync. The fast local poller compares
+    #: its freshly computed fingerprint to this value to decide whether
+    #: a sync is needed without running the full plan.
     local_fingerprint: str | None = None
-    #: Local working repositories only: content fingerprints (sha256) of
-    #: untracked files at the last successful sync, keyed by
-    #: repository-relative path. Lets the sync plan skip re-chunking
-    #: unchanged untracked files and detect deleted untracked files.
+    #: Local working and filesystem repositories only: content
+    #: fingerprints (sha256) of untracked / walked files at the last
+    #: successful sync, keyed by repository-relative path. Lets the sync
+    #: plan skip re-chunking unchanged files and detect deleted ones.
     untracked_indexed: dict[str, str] = {}
+    #: Gitlink (submodule) path -> submodule SHA last fully indexed.
+    #: Lets an incremental sync diff each submodule against its
+    #: previously indexed content.
+    submodules: dict[str, str] = {}
 
 
 class StateStore:
@@ -327,14 +332,23 @@ class StateStore:
     # -- mutators --------------------------------------------------------------
 
     def set_indexed(
-        self, name: str, commit: str, file_count: int = 0, save: bool = True
+        self,
+        name: str,
+        commit: str,
+        file_count: int = 0,
+        save: bool = True,
+        submodules: dict[str, str] | None = None,
     ) -> None:
         """Mark a commit as fully indexed. Call only after the index update
-        (embeddings, upserts, deletions) has succeeded."""
+        (embeddings, upserts, deletions) has succeeded. ``submodules``
+        replaces the persisted per-gitlink SHA map when given; ``None``
+        leaves the stored map untouched."""
         state = self.get(name)
         state.indexed_commit = commit
         state.indexed_at = _utcnow()
         state.last_indexed_file_count = file_count
+        if submodules is not None:
+            state.submodules = dict(submodules)
         if save:
             self._upsert(state)
 
