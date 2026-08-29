@@ -323,6 +323,35 @@ async def test_repository_status_tool(
     assert "was not found" in text
 
 
+async def test_repository_status_filesystem_repo(env, tmp_path: Path) -> None:
+    app, _mcp, _up = env
+    root = tmp_path / "fs"
+    (root / "rtl").mkdir(parents=True)
+    (root / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n")
+    config = app.config.model_copy(
+        update={
+            "repositories": [
+                RepositoryConfig(name="fsrepo", path=root, filesystem=True)
+            ]
+        }
+    )
+    app2 = VhdlRagApp(
+        config, providers=app.providers, store=app.store, states=app.states
+    )
+    await app2.sync_all()
+    mcp2 = create_mcp(app2)
+    try:
+        result = await mcp2.call_tool("vhdl_rag_repository_status", {})
+    finally:
+        app2.close()
+    text = tool_text(result)
+    # Filesystem repositories are labeled as such (no ref) and their
+    # indexed attribution is the walk fingerprint, not a commit.
+    assert "- fsrepo (filesystem, domains: hdl, docs, code)" in text
+    assert "(fingerprint)" in text
+    assert "files: 1" in text
+
+
 async def test_sync_repositories_contains_errors(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(

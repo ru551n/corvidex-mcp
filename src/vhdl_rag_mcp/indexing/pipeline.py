@@ -88,13 +88,17 @@ class IndexPipeline:
             await self._sync(cfg, None)
 
     async def _sync(self, cfg: RepositoryConfig, last_commit: str | None) -> None:
+        last_state = self._states.get(cfg.name)
         try:
-            plan = await self._git.sync(cfg, last_commit)
+            plan = await self._git.sync(cfg, last_commit, last_state.submodules or None)
         except Exception as exc:
             logger.exception("%s: git sync failed: %s", cfg.name, exc)
             self._states.record_sync(cfg.name, str(exc))
             raise
         plan, untracked_fps = self._refine_local_plan(cfg, plan)
+        # None for filesystem repositories (no gitlinks); otherwise the
+        # plan carries the current per-gitlink SHA map (possibly empty).
+        submodules = None if cfg.is_filesystem else plan.submodules
         if plan.empty:
             if last_commit is not None and plan.commit != last_commit:
                 # HEAD/ref moved without a content change (an amend or
@@ -113,6 +117,7 @@ class IndexPipeline:
                     cfg.name,
                     plan.commit,
                     file_count=self._states.get(cfg.name).last_indexed_file_count,
+                    submodules=submodules,
                 )
             else:
                 logger.info(
@@ -145,7 +150,10 @@ class IndexPipeline:
             self._states.record_sync(cfg.name, str(exc))
             raise
         self._states.set_indexed(
-            cfg.name, plan.commit, file_count=len(plan.added_or_modified)
+            cfg.name,
+            plan.commit,
+            file_count=len(plan.added_or_modified),
+            submodules=submodules,
         )
         self._apply_local_state(cfg, plan, untracked_fps)
         self._states.record_sync(cfg.name, None)
@@ -224,6 +232,8 @@ class IndexPipeline:
             self._store.delete_repository(cfg.name)
         for f in plan.deleted:
             self._store.delete_file(cfg.name, f)
+        for prefix in plan.deleted_submodule_prefixes:
+            self._store.delete_file_prefix(cfg.name, prefix)
 
         files_by_kind: dict[FileKind, list[str]] = {}
         for f in plan.added_or_modified:

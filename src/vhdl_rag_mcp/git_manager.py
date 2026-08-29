@@ -10,6 +10,22 @@ is indexed in place — HEAD plus uncommitted changes and untracked files
 touches the vector store or embeddings; the indexing pipeline consumes the
 :class:`SyncPlan`.
 
+Submodules
+----------
+Gitlinks (submodule pointers) are descended into, so a repository's
+submodule contents are indexed under their prefixed paths (e.g.
+``hdl-modules/modules/fifo/src/fifo.vhd``). Remote repositories have
+their submodules initialized at the recorded SHAs (``git submodule
+update --init --force --recursive``); a gitlink whose submodule SHA
+changed re-chunks every file in the submodule (files added at the new
+SHA are indexed, files gone at the new SHA are dropped via the old
+SHA's file list — or a prefix deletion when the old SHA is not
+available). Local working repositories re-chunk a submodule when its
+pointer or working tree moved, and otherwise diff inside it (tracked
+changes plus untracked files, honoring the repository's
+``index_untracked`` flag). The last indexed SHA per gitlink is persisted
+in the repository state (``submodules``).
+
 Refs
 ----
 ``ref`` is any resolvable Git ref. A branch is tracked: every sync fetches
@@ -28,7 +44,7 @@ import hashlib
 import logging
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import RepositoryConfig
@@ -49,7 +65,8 @@ class SyncPlan:
     """What the indexing pipeline must do for one repository.
 
     For a full plan, ``added_or_modified`` lists every file at the target
-    commit and the pipeline deletes the repository from the store first.
+    commit (including submodule files, prefixed with the gitlink path)
+    and the pipeline deletes the repository from the store first.
     For an incremental plan it lists only the changed files (renames
     appear under their new path, with the old path in ``deleted``).
     """
@@ -61,17 +78,31 @@ class SyncPlan:
     added_or_modified: tuple[str, ...] = ()
     deleted: tuple[str, ...] = ()
     #: Local working repositories only: the current untracked files
-    #: (honoring ``.gitignore``). The pipeline fingerprints their content
+    #: (honoring ``.gitignore``; includes submodule-prefixed paths for
+    #: initialized submodules). The pipeline fingerprints their content
     #: before merging them into ``added_or_modified``/``deleted``.
     untracked: tuple[str, ...] = ()
     #: Local working repositories only: working-tree fingerprint at plan
     #: time (see :meth:`GitManager.local_fingerprint`).
     fingerprint: str | None = None
+    #: Gitlink (submodule) path -> submodule SHA indexed by this plan.
+    #: Persisted in the repository state so the next sync can diff each
+    #: submodule against its previously indexed SHA.
+    submodules: dict[str, str] = field(default_factory=dict)
+    #: Submodule prefixes to purge wholesale (gitlink removed, or a
+    #: submodule SHA change whose old SHA is unavailable locally). The
+    #: pipeline deletes every chunk whose file starts with ``prefix/``.
+    deleted_submodule_prefixes: tuple[str, ...] = ()
 
     @property
     def empty(self) -> bool:
         """True when a sync found nothing to do (ref did not move)."""
-        return not self.full and not self.added_or_modified and not self.deleted
+        return (
+            not self.full
+            and not self.added_or_modified
+            and not self.deleted
+            and not self.deleted_submodule_prefixes
+        )
 
 
 def parse_name_status_z(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -128,8 +159,13 @@ class GitManager:
     # -- low-level git ----------------------------------------------------
 
     async def local_fingerprint(self, cfg: RepositoryConfig) -> str:
-        """Cheap, read-only fingerprint of a local working repository.
+        """Cheap, read-only fingerprint of a local repository.
 
+        For filesystem repositories it is the walk fingerprint (see
+        :meth:`_filesystem_fingerprint`): paths plus mtimes and sizes, so
+        the fast poller notices file-set changes and content edits.
+
+        For working Git repositories it is
         ``sha256(HEAD + porcelain status)`` with untracked files expanded
         (``--untracked-files=all``), so it changes when a commit lands, a
         tracked file is staged/unstaged-edited, or an untracked file is
@@ -140,6 +176,9 @@ class GitManager:
         non-mutating, so it tolerates the user's in-progress work.
         """
         assert cfg.path is not None
+        if cfg.is_filesystem:
+            fingerprint, _ = self._filesystem_fingerprint(cfg.path)
+            return fingerprint
         repo_dir = cfg.path
         head = (await self._run(repo_dir, "rev-parse", "HEAD")).strip()
         status = await self._try(
@@ -251,28 +290,179 @@ class GitManager:
     async def _list_files_at(
         self, cfg: RepositoryConfig, commit: str
     ) -> tuple[str, ...]:
-        repo_dir = self.repo_dir(cfg)
-        out = await self._run(repo_dir, "ls-tree", "-r", "-z", "--name-only", commit)
-        return tuple(path for path in out.split("\0") if path)
+        """Every file at ``commit``, descending into gitlinks (submodules).
 
-    async def sync(self, cfg: RepositoryConfig, last_commit: str | None) -> SyncPlan:
+        Submodule files carry their gitlink path as prefix (``ip/rtl/a.vhd``).
+        Submodules whose working tree is absent (not initialized) are
+        skipped with a warning — the rest of the repository still syncs.
+        """
+        repo_dir = self.repo_dir(cfg)
+        files = set(await self._top_level_files_at(repo_dir, commit))
+        for path, sha in (await self._gitlinks_at_commit(repo_dir, commit)).items():
+            try:
+                files.update(
+                    await self._submodule_tree_files(
+                        repo_dir / path, sha, path, depth=1
+                    )
+                )
+            except GitError as exc:
+                logger.warning(
+                    "%s: submodule %s not expanded: %s",
+                    cfg.name,
+                    path,
+                    exc,
+                )
+        return tuple(sorted(files))
+
+    async def _top_level_files_at(self, repo_dir: Path, commit: str) -> list[str]:
+        out = await self._run(repo_dir, "ls-tree", "-r", "-z", "--name-only", commit)
+        return [path for path in out.split("\0") if path]
+
+    # -- submodule helpers ----------------------------------------------------
+
+    _SUBMODULE_DEPTH = 3
+
+    async def _gitlinks_at_commit(self, repo_dir: Path, commit: str) -> dict[str, str]:
+        """Top-level gitlinks at ``commit``: submodule path -> SHA."""
+        out = await self._run(repo_dir, "ls-tree", "-z", commit)
+        links: dict[str, str] = {}
+        for entry in out.split("\0"):
+            if not entry or "\t" not in entry:
+                continue
+            meta, path = entry.split("\t", 1)
+            parts = meta.split(" ")
+            if len(parts) == 3 and parts[0] == "160000":
+                links[path] = parts[2]
+        return links
+
+    async def _gitlinks_in_index(self, repo_dir: Path) -> dict[str, str]:
+        """Top-level gitlinks in the index/working tree of a local
+        repository: submodule path -> recorded SHA."""
+        out = await self._run(repo_dir, "ls-files", "--stage", "-z")
+        links: dict[str, str] = {}
+        for entry in out.split("\0"):
+            if not entry or "\t" not in entry:
+                continue
+            meta, path = entry.split("\t", 1)
+            parts = meta.split(" ")
+            # ls-files --stage format: "<mode> <sha> <stage>\t<path>".
+            if len(parts) == 3 and parts[0] == "160000":
+                links[path] = parts[1]
+        return links
+
+    async def _submodule_tree_files(
+        self, sub_dir: Path, sha: str, prefix: str, depth: int
+    ) -> set[str]:
+        """All files of a submodule at ``sha``, prefixed with ``prefix``.
+
+        Recursive: nested gitlinks are descended into (bounded by
+        ``_SUBMODULE_DEPTH``). Raises :class:`GitError` when the submodule
+        is not present on disk or ``sha`` is not a commit in it.
+        """
+        if not (sub_dir / ".git").exists():
+            raise GitError(f"submodule {prefix!r} is not initialized")
+        files: set[str] = set()
+        out = await self._run(sub_dir, "ls-tree", "-r", "-z", "--name-only", sha)
+        for path in (p for p in out.split("\0") if p):
+            files.add(f"{prefix}/{path}")
+        if depth < self._SUBMODULE_DEPTH:
+            for nested, nested_sha in (
+                await self._gitlinks_at_commit(sub_dir, sha)
+            ).items():
+                files.update(
+                    await self._submodule_tree_files(
+                        sub_dir / nested, nested_sha, f"{prefix}/{nested}", depth + 1
+                    )
+                )
+        return files
+
+    async def _submodule_worktree_files(
+        self,
+        sub_dir: Path,
+        prefix: str,
+        index_untracked: bool,
+        depth: int,
+    ) -> set[str]:
+        """All files of an initialized submodule working tree (tracked,
+        plus untracked honoring ``.gitignore`` when enabled), prefixed.
+        Nested submodules are descended into when initialized."""
+        if not (sub_dir / ".git").exists():
+            raise GitError(f"submodule {prefix!r} is not initialized")
+        tracked = await self._run(sub_dir, "ls-files", "-z")
+        files = {p for p in tracked.split("\0") if p}
+        if index_untracked:
+            others = await self._run(
+                sub_dir, "ls-files", "-z", "--others", "--exclude-standard"
+            )
+            files.update(p for p in others.split("\0") if p)
+        for path in sorted(files):
+            if depth < self._SUBMODULE_DEPTH and (sub_dir / path / ".git").exists():
+                # A nested submodule: the parent lists it as a gitlink
+                # (a bare path entry), so enumerate its tree instead.
+                files.discard(path)
+                files.update(
+                    await self._submodule_worktree_files(
+                        sub_dir / path,
+                        f"{prefix}/{path}",
+                        index_untracked,
+                        depth + 1,
+                    )
+                )
+        return {f"{prefix}/{p}" for p in files if p}
+
+    async def _update_submodules(self, repo_dir: Path) -> None:
+        """Initialize submodules at the recorded SHAs (best effort).
+
+        Failures (e.g. a private submodule whose credentials are not in
+        the ambient Git/SSH setup) are logged, not raised: the rest of
+        the repository still syncs, and the failed submodule is skipped
+        by the file expansion.
+        """
+        out = await self._try(
+            repo_dir,
+            "submodule",
+            "update",
+            "--init",
+            "--force",
+            "--recursive",
+            timeout=CLONE_TIMEOUT,
+        )
+        if out is None:
+            logger.warning(
+                "%s: git submodule update failed; submodule files are "
+                "skipped until it succeeds",
+                repo_dir.name,
+            )
+
+    async def sync(
+        self,
+        cfg: RepositoryConfig,
+        last_commit: str | None,
+        last_submodules: dict[str, str] | None = None,
+    ) -> SyncPlan:
         """Synchronize the repository and report the changes vs
-        ``last_commit``.
+        ``last_commit`` (and, per submodule, vs ``last_submodules``).
 
         ``last_commit`` is the last fully indexed commit (``None`` before
         the first index run). Remote repositories have their working
-        tree left at the target commit; local working repositories
-        (``path``) are indexed in place — HEAD plus uncommitted changes
-        and untracked files — and are never modified.
+        tree left at the target commit (submodules initialized at the
+        recorded SHAs); local working repositories (``path``) are indexed
+        in place — HEAD plus uncommitted changes and untracked files —
+        and are never modified. Filesystem repositories (``path`` +
+        ``filesystem``) are indexed in place as plain files with no Git
+        at all.
         """
+        if cfg.is_filesystem:
+            return await self._sync_filesystem(cfg, last_commit)
         if cfg.is_local:
-            return await self._sync_local(cfg, last_commit)
+            return await self._sync_local(cfg, last_commit, last_submodules)
         await self.ensure_clone(cfg)
         repo_dir = self.repo_dir(cfg)
         commit = await self._resolve(cfg, repo_dir)
         head = await self._try(repo_dir, "rev-parse", "--verify", "HEAD")
         if head is None or head.strip() != commit:
             await self._run(repo_dir, "checkout", "--detach", commit)
+        await self._update_submodules(repo_dir)
         if last_commit is None:
             files = await self._list_files_at(cfg, commit)
             logger.info(
@@ -282,10 +472,21 @@ class GitManager:
                 commit[:12],
             )
             return SyncPlan(
-                cfg.name, cfg.ref, commit, full=True, added_or_modified=files
+                cfg.name,
+                cfg.ref,
+                commit,
+                full=True,
+                added_or_modified=files,
+                submodules=await self._gitlinks_at_commit(repo_dir, commit),
             )
         if last_commit == commit:
-            return SyncPlan(cfg.name, cfg.ref, commit, full=False)
+            return SyncPlan(
+                cfg.name,
+                cfg.ref,
+                commit,
+                full=False,
+                submodules=await self._gitlinks_at_commit(repo_dir, commit),
+            )
         diff = await self._try(
             repo_dir, "diff", "-z", "--name-status", last_commit, commit
         )
@@ -300,40 +501,103 @@ class GitManager:
             )
             files = await self._list_files_at(cfg, commit)
             return SyncPlan(
-                cfg.name, cfg.ref, commit, full=True, added_or_modified=files
+                cfg.name,
+                cfg.ref,
+                commit,
+                full=True,
+                added_or_modified=files,
+                submodules=await self._gitlinks_at_commit(repo_dir, commit),
             )
         added, deleted = parse_name_status_z(diff)
+        new_links = await self._gitlinks_at_commit(repo_dir, commit)
+        old_links = last_submodules or {}
+        # Gitlink entries in the diff are pointer changes; they are
+        # resolved to file-level changes below (or a prefix purge).
+        link_paths = set(new_links) | set(old_links)
+        plan_added: set[str] = {p for p in added if p not in link_paths}
+        plan_deleted: set[str] = {p for p in deleted if p not in link_paths}
+        plan_deleted_prefixes: list[str] = []
+        for path, new_sha in sorted(new_links.items()):
+            old_sha = old_links.get(path)
+            try:
+                new_files = await self._submodule_tree_files(
+                    repo_dir / path, new_sha, path, 1
+                )
+            except GitError as exc:
+                # Submodule not initialized (update failed, e.g. missing
+                # credentials): skip it; the rest of the repo still syncs.
+                logger.warning("%s: submodule %s skipped: %s", cfg.name, path, exc)
+                continue
+            if old_sha is None:
+                # New submodule: index everything it contains.
+                plan_added.update(new_files)
+                continue
+            if old_sha == new_sha:
+                continue
+            # SHA changed: re-chunk the whole submodule; drop files gone
+            # at the new SHA via the old SHA's file list.
+            plan_added.update(new_files)
+            try:
+                old_files = await self._submodule_tree_files(
+                    repo_dir / path, old_sha, path, 1
+                )
+                plan_deleted.update(old_files - new_files)
+            except GitError:
+                logger.warning(
+                    "%s: submodule %s: old SHA %s unavailable; purging "
+                    "its prefix instead",
+                    cfg.name,
+                    path,
+                    old_sha[:12],
+                )
+                plan_deleted_prefixes.append(path)
+        for path in sorted(set(old_links) - set(new_links)):
+            # Submodule removed from the repository: purge its prefix.
+            plan_deleted_prefixes.append(path)
         logger.info(
-            "%s: %s..%s: %d added/modified, %d deleted",
+            "%s: %s..%s: %d added/modified, %d deleted, %d submodule prefix(es) purged",
             cfg.name,
             last_commit[:12],
             commit[:12],
-            len(added),
-            len(deleted),
+            len(plan_added),
+            len(plan_deleted),
+            len(plan_deleted_prefixes),
         )
         return SyncPlan(
             cfg.name,
             cfg.ref,
             commit,
             full=False,
-            added_or_modified=added,
-            deleted=deleted,
+            added_or_modified=tuple(sorted(plan_added)),
+            deleted=tuple(sorted(plan_deleted)),
+            submodules=new_links,
+            deleted_submodule_prefixes=tuple(sorted(plan_deleted_prefixes)),
         )
 
     # -- local working repositories -----------------------------------------
 
     async def _sync_local(
-        self, cfg: RepositoryConfig, last_commit: str | None
+        self,
+        cfg: RepositoryConfig,
+        last_commit: str | None,
+        last_submodules: dict[str, str] | None = None,
     ) -> SyncPlan:
         """Index the user's working repository in place (no clone/fetch).
 
         The index covers HEAD plus uncommitted changes (staged and
-        unstaged) and untracked files (honoring ``.gitignore``);
+        unstaged) and untracked files (honoring ``.gitignore``; skipped
+        when ``index_untracked`` is false);
         attribution is the current HEAD commit. Untracked files are
         reported via ``plan.untracked`` together with the working-tree
         ``plan.fingerprint`` so the pipeline can fingerprint their
         content, skip re-chunking unchanged ones, and detect deleted
         untracked files.
+
+        Submodules are descended into: a submodule whose pointer or
+        working tree moved is re-chunked wholesale (files gone at the
+        new content are dropped via the old pointer's file list);
+        otherwise its tracked changes and untracked files are diffed
+        inside it and reported with the gitlink path as prefix.
         """
         assert cfg.path is not None
         repo_dir = cfg.path
@@ -351,8 +615,10 @@ class GitManager:
             await self._run(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
         ).strip()
         fingerprint = await self.local_fingerprint(cfg)
+        new_links = await self._gitlinks_in_index(repo_dir)
+        old_links = last_submodules or {}
         if last_commit is None:
-            files = await self._list_working_files(repo_dir)
+            files = await self._list_local_files(cfg, repo_dir, new_links)
             logger.info(
                 "%s: first sync, full index of %d files at %s (%s)",
                 cfg.name,
@@ -366,11 +632,14 @@ class GitManager:
                 commit,
                 full=True,
                 added_or_modified=files,
-                untracked=await self._local_untracked(repo_dir),
+                untracked=await self._local_untracked_all(cfg, repo_dir, new_links),
                 fingerprint=fingerprint,
+                submodules=new_links,
             )
         added: set[str] = set()
         deleted: set[str] = set()
+        deleted_prefixes: list[str] = []
+        handled_links: set[str] = set()
         if last_commit != commit:
             diff = await self._try(
                 repo_dir, "diff", "-z", "--name-status", last_commit, commit
@@ -384,36 +653,115 @@ class GitManager:
                     last_commit[:12],
                     commit[:12],
                 )
-                files = await self._list_working_files(repo_dir)
+                files = await self._list_local_files(cfg, repo_dir, new_links)
                 return SyncPlan(
                     cfg.name,
                     branch,
                     commit,
                     full=True,
                     added_or_modified=files,
-                    untracked=await self._local_untracked(repo_dir),
+                    untracked=await self._local_untracked_all(cfg, repo_dir, new_links),
                     fingerprint=fingerprint,
+                    submodules=new_links,
                 )
             a, d = parse_name_status_z(diff)
-            added.update(a)
-            deleted.update(d)
+            for p in a:
+                if p in new_links:
+                    # Committed pointer move (or new submodule): re-chunk
+                    # the submodule's working tree; old content via the
+                    # previously recorded SHA.
+                    await self._rechunk_local_submodule(
+                        cfg,
+                        repo_dir,
+                        p,
+                        old_links.get(p),
+                        added,
+                        deleted,
+                        deleted_prefixes,
+                    )
+                    handled_links.add(p)
+                else:
+                    added.add(p)
+            for p in d:
+                if p in old_links:
+                    # Submodule removed: purge its prefix.
+                    deleted_prefixes.append(p)
+                else:
+                    deleted.add(p)
         # Uncommitted work: index/worktree-vs-HEAD (staged + unstaged).
         worktree = await self._try(repo_dir, "diff", "-z", "--name-status", "HEAD")
         if worktree is not None:
             a, d = parse_name_status_z(worktree)
-            added.update(a)
-            deleted.update(d)
-        # Untracked files (honoring .gitignore) are reported separately;
-        # the pipeline fingerprints their content so unchanged files are
-        # not re-chunked and deleted untracked files are detected.
-        untracked = await self._local_untracked(repo_dir)
+            for p in a:
+                if p in new_links and p not in handled_links:
+                    sub_dir = repo_dir / p
+                    current = await self._try(sub_dir, "rev-parse", "HEAD")
+                    recorded = old_links.get(p)
+                    if current and current.strip() != recorded:
+                        # Commit drift (submodule HEAD moved away from the
+                        # recorded pointer, or the pointer was just
+                        # staged): re-chunk the submodule against the
+                        # previously indexed content.
+                        await self._rechunk_local_submodule(
+                            cfg,
+                            repo_dir,
+                            p,
+                            old_links.get(p) or new_links[p],
+                            added,
+                            deleted,
+                            deleted_prefixes,
+                        )
+                        handled_links.add(p)
+                    # Content-level changes (tracked or untracked files)
+                    # are resolved per file by the submodule loop below.
+                else:
+                    added.add(p)
+            for p in d:
+                if p in new_links:
+                    deleted_prefixes.append(p)
+                else:
+                    deleted.add(p)
+        # Submodules: stable pointers get an inside diff (tracked changes
+        # + untracked files); a missing working tree (deinit/rm) purges.
+        untracked: list[str] = []
+        if cfg.index_untracked:
+            untracked.extend(await self._local_untracked(repo_dir))
+        for path in sorted(new_links):
+            sub_dir = repo_dir / path
+            if not (sub_dir / ".git").exists():
+                if path in old_links:
+                    deleted_prefixes.append(path)
+                continue
+            if path in handled_links:
+                continue
+            sub_diff = await self._try(sub_dir, "diff", "-z", "--name-status", "HEAD")
+            if sub_diff:
+                a, d = parse_name_status_z(sub_diff)
+                added.update(f"{path}/{p}" for p in a)
+                deleted.update(f"{path}/{p}" for p in d)
+            if cfg.index_untracked:
+                others = await self._run(
+                    sub_dir, "ls-files", "-z", "--others", "--exclude-standard"
+                )
+                untracked.extend(f"{path}/{p}" for p in sorted(others.split("\0")) if p)
         added.difference_update(deleted)
         plan_added = tuple(sorted(added))
         plan_deleted = tuple(sorted(deleted))
-        if not plan_added and not plan_deleted and not untracked:
+        plan_untracked = tuple(sorted(set(untracked)))
+        if (
+            not plan_added
+            and not plan_deleted
+            and not plan_untracked
+            and not deleted_prefixes
+        ):
             logger.info("%s: working tree unchanged at %s", cfg.name, commit[:12])
             return SyncPlan(
-                cfg.name, branch, commit, full=False, fingerprint=fingerprint
+                cfg.name,
+                branch,
+                commit,
+                full=False,
+                fingerprint=fingerprint,
+                submodules=new_links,
             )
         logger.info(
             "%s: %d added/modified, %d deleted (working tree at %s)",
@@ -429,8 +777,10 @@ class GitManager:
             full=False,
             added_or_modified=plan_added,
             deleted=plan_deleted,
-            untracked=untracked,
+            untracked=plan_untracked,
             fingerprint=fingerprint,
+            submodules=new_links,
+            deleted_submodule_prefixes=tuple(sorted(set(deleted_prefixes))),
         )
 
     async def _local_untracked(self, repo_dir: Path) -> tuple[str, ...]:
@@ -441,16 +791,182 @@ class GitManager:
         )
         return tuple(sorted(p for p in raw.split("\0") if p))
 
-    async def _list_working_files(self, repo_dir: Path) -> tuple[str, ...]:
-        """Everything to index in a working repository: tracked (index)
-        plus git-respected untracked files."""
+    async def _list_local_files(
+        self,
+        cfg: RepositoryConfig,
+        repo_dir: Path,
+        new_links: dict[str, str],
+    ) -> tuple[str, ...]:
+        """Everything to index in a working repository: top-level tracked
+        plus git-respected untracked files (unless the repository
+        disabled untracked indexing), descending into initialized
+        submodules (their files carry the gitlink path as prefix)."""
         tracked = await self._run(repo_dir, "ls-files", "-z")
-        untracked = await self._run(
-            repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
-        )
         files = {p for p in tracked.split("\0") if p}
-        files.update(p for p in untracked.split("\0") if p)
+        files.difference_update(new_links)  # gitlinks expand below
+        if cfg.index_untracked:
+            untracked = await self._run(
+                repo_dir, "ls-files", "-z", "--others", "--exclude-standard"
+            )
+            files.update(p for p in untracked.split("\0") if p)
+            files.difference_update(new_links)
+        for path in sorted(new_links):
+            sub_dir = repo_dir / path
+            try:
+                files.update(
+                    await self._submodule_worktree_files(
+                        sub_dir, path, cfg.index_untracked, depth=1
+                    )
+                )
+            except GitError as exc:
+                logger.warning("%s: submodule %s not expanded: %s", cfg.name, path, exc)
         return tuple(sorted(files))
+
+    async def _local_untracked_all(
+        self,
+        cfg: RepositoryConfig,
+        repo_dir: Path,
+        new_links: dict[str, str],
+    ) -> tuple[str, ...]:
+        """Untracked files of a working repository and its initialized
+        submodules (honoring ``.gitignore``), submodule paths prefixed,
+        sorted. Empty when untracked indexing is disabled."""
+        if not cfg.index_untracked:
+            return ()
+        files = set(await self._local_untracked(repo_dir))
+        for path in sorted(new_links):
+            sub_dir = repo_dir / path
+            try:
+                tracked = set((await self._run(sub_dir, "ls-files", "-z")).split("\0"))
+                others = await self._run(
+                    sub_dir, "ls-files", "-z", "--others", "--exclude-standard"
+                )
+                for p in others.split("\0"):
+                    if p and p not in tracked:
+                        files.add(f"{path}/{p}")
+            except GitError:
+                continue  # uninitialized submodule: nothing to report
+        return tuple(sorted(files))
+
+    async def _rechunk_local_submodule(
+        self,
+        cfg: RepositoryConfig,
+        repo_dir: Path,
+        path: str,
+        old_sha: str | None,
+        added: set[str],
+        deleted: set[str],
+        deleted_prefixes: list[str],
+    ) -> None:
+        """Re-chunk a local submodule whose pointer or working tree moved.
+
+        Every file in the working tree goes to ``added`` (the pipeline
+        drops the file's previous chunks before re-upserting); files
+        gone versus ``old_sha``'s content go to ``deleted``. A missing
+        working tree (deinit/rm) or an unavailable old SHA degrades to a
+        prefix purge."""
+        sub_dir = repo_dir / path
+        try:
+            new_files = await self._submodule_worktree_files(
+                sub_dir, path, cfg.index_untracked, depth=1
+            )
+        except GitError as exc:
+            logger.warning("%s: submodule %s: %s", cfg.name, path, exc)
+            if old_sha is not None:
+                deleted_prefixes.append(path)
+            return
+        added.update(new_files)
+        if old_sha is None:
+            return
+        try:
+            old_files = await self._submodule_tree_files(sub_dir, old_sha, path, 1)
+            deleted.update(old_files - new_files)
+        except GitError:
+            logger.warning(
+                "%s: submodule %s: old SHA %s unavailable; purging its prefix instead",
+                cfg.name,
+                path,
+                old_sha[:12],
+            )
+            deleted_prefixes.append(path)
+
+    # -- filesystem repositories ----------------------------------------------
+
+    async def _sync_filesystem(
+        self, cfg: RepositoryConfig, last_commit: str | None
+    ) -> SyncPlan:
+        """Index a plain directory with no Git involved.
+
+        The walked file set is carried in ``untracked`` together with the
+        walk ``fingerprint`` (paths + mtimes + sizes), so the pipeline's
+        untracked-fingerprint refinement performs the new/changed/deleted
+        detection and the fast local poller notices file-set and content
+        changes between syncs. ``commit`` is the fingerprint itself, so
+        chunk attribution is stable for an unchanged tree. A first sync
+        (no last commit) is a full plan listing every file.
+        """
+        assert cfg.path is not None
+        fingerprint, files = self._filesystem_fingerprint(cfg.path)
+        first = last_commit is None
+        if first:
+            logger.info(
+                "%s: first filesystem sync, full index of %d files",
+                cfg.name,
+                len(files),
+            )
+        else:
+            logger.debug(
+                "%s: filesystem walk, %d files at %s",
+                cfg.name,
+                len(files),
+                fingerprint[:12],
+            )
+        return SyncPlan(
+            cfg.name,
+            "-",
+            fingerprint,
+            full=first,
+            added_or_modified=files if first else (),
+            untracked=files,
+            fingerprint=fingerprint,
+        )
+
+    @staticmethod
+    def _filesystem_fingerprint(root: Path) -> tuple[str, tuple[str, ...]]:
+        """Walk a plain directory: return (sha256 of the walk, sorted
+        repository-relative file paths).
+
+        Hidden entries (dot files and dot directories) are skipped, which
+        keeps an embedded ``.git`` directory out of the index; so are
+        symlinks (no cycles, no dangling targets) and other non-regular
+        files. Each entry contributes ``path + mtime + size``, so the
+        fingerprint changes when the file set changes or a file is
+        touched/edited (the poller uses it); content-level change
+        detection remains the pipeline's sha256 content fingerprints.
+        """
+        if not root.is_dir():
+            raise GitError(
+                f"filesystem path {root} does not exist or is not a directory"
+            )
+        entries: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for filename in sorted(filenames):
+                if filename.startswith("."):
+                    continue
+                full = Path(dirpath) / filename
+                if full.is_symlink() or not full.is_file():
+                    continue
+                rel = full.relative_to(root).as_posix()
+                st = full.stat()
+                entries.append(f"{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+        entries.sort()
+        digest = hashlib.sha256()
+        for line in entries:
+            digest.update(line.encode("utf-8"))
+            digest.update(b"\n")
+        paths = tuple(entry.split("\t", 1)[0] for entry in entries)
+        return digest.hexdigest(), paths
 
     # -- file access --------------------------------------------------------
 

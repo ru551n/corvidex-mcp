@@ -205,11 +205,18 @@ ref = "main"                           # branch (tracked on every sync),
                                         # generate vhdl_ls.toml when missing
 # veridian_hook = "make veridian-config"  # command to generate veridian.yaml
 
-# ... or index your own active checkout instead of a remote:
+  # ... or index your own active checkout instead of a remote:
 [[repositories]]
 name = "current-project"
 path = "~/work/current-project"        # local working repository
-```
+# index_untracked = false             # skip untracked files (default: index them)
+
+  # ... or index a plain directory of files with no Git at all:
+[[repositories]]
+name = "local-ip"
+path = "~/work/local-ip"               # plain directory, no Git
+filesystem = true
+  ```
 
 Notes:
 
@@ -220,11 +227,19 @@ Notes:
   options also have command-line overrides (`--data-dir`,
   `--sync-interval`, `--local-sync-interval`, `--vhdl-ls-path`,
   `--veridian-path`, `--log-level`); the command line wins.
-- **`url` or `path`** (exactly one): `url` is a remote Git repository,
-  cloned and kept in sync by the server under `data_dir/repos`.
-  `path` is a **local working repository** — your own checkout, indexed
-  in place and never modified (no clone, fetch, or checkout by the
-  server). Local repositories are additionally watched by a fast
+ - **`url` or `path`** (exactly one): `url` is a remote Git repository,
+    cloned and kept in sync by the server under `data_dir/repos`.
+    `path` is a **local working repository** — your own checkout, indexed
+    in place and never modified (no clone, fetch, or checkout by the
+    server). `path` with `filesystem = true` is a **filesystem
+    repository** — a plain directory of files with no Git involved at
+    all: every file below `path` is walked and indexed in place (hidden
+    files/directories and symlinks are skipped, so an embedded `.git`
+    directory never enters the index). Incremental sync re-walks the
+    directory (paths + mtimes + sizes) and fingerprints file content, so
+    edits, additions, and deletions are picked up on the next sync; the
+    fast local poller watches these repositories as well. `ref` and the
+    Git hooks do not apply. Local repositories are additionally watched by a fast
   poller: every `local_sync_interval` seconds (default 10, 0 disables
   it) the server computes a read-only fingerprint of the working tree
   (HEAD + `git status` porcelain) and syncs the repository when it
@@ -271,9 +286,26 @@ Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
   removed by the server. For local working repositories the hook runs
   inside your own checkout.
 - **Local working repositories** index the working tree: HEAD plus
-  uncommitted changes (staged and unstaged) and untracked files
-  (honoring `.gitignore`); chunks are attributed to the current HEAD
-  commit.
+   uncommitted changes (staged and unstaged) and untracked files
+   (honoring `.gitignore`); chunks are attributed to the current HEAD
+   commit. Untracked indexing can be switched off per repository with
+   `index_untracked = false`; untracked files that were indexed before
+   the flag was turned off are dropped from the index on the next sync.
+ - **Submodules are indexed recursively** (nested up to three levels
+   deep). A submodule's files enter the index under their gitlink path
+   as prefix, e.g. `ip/rtl/a.vhd`, so they search alongside the top
+   repository's own files. For remote repositories the server keeps the
+   submodules checked out under `data_dir/repos` (best-effort
+   `git submodule update --init --recursive`; a submodule that cannot be
+   fetched is skipped with a warning, the rest still syncs): a new
+   submodule is indexed wholesale, a pointer move re-chunks the whole
+   submodule and drops the files gone at the new SHA, and a removed
+   submodule purges its entire prefix. For local working repositories
+   the submodule's working tree is indexed in place: a moved pointer or
+   a moved submodule HEAD re-chunks the submodule wholesale, otherwise
+   only its own tracked changes and untracked files are diffed inside
+   it (same `index_untracked` flag applies); a deinitialized or removed
+   submodule purges its prefix.
 - **Per-repository domains/excludes**: index only what a repository
   should contribute — e.g. `domains = ["hdl"]` for a pure IP
   repository (`"vhdl"` is accepted as a legacy alias for `"hdl"`),

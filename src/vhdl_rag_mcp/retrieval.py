@@ -51,6 +51,7 @@ class RepositoryStatus:
     last_sync_at: str | None
     last_sync_error: str | None
     file_count: int
+    filesystem: bool = False
 
 
 class RetrievalService:
@@ -269,6 +270,7 @@ class RetrievalService:
                     ),
                     last_sync_error=state.last_sync_error,
                     file_count=state.last_indexed_file_count,
+                    filesystem=cfg.is_filesystem,
                 )
             )
         return statuses

@@ -398,6 +398,38 @@ class VectorStore:
             total += self._delete(collection, must={"repository": repository})
         return total
 
+    def delete_file_prefix(self, repository: str, prefix: str) -> int:
+        """Remove every chunk whose file path lies under ``prefix/``
+        (submodule prefix purge)."""
+        total = 0
+        for collection in ALL_COLLECTIONS:
+            name = collection.value
+            tbl = self._table(name)
+            if tbl is None:
+                continue
+            before = tbl.count_rows()
+            escaped = (
+                prefix.replace("\\", "\\\\")
+                .replace("'", "''")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            predicate = (
+                f"repository = {_sql_quote(repository)} "
+                f"AND file LIKE {_sql_quote(escaped + '/%')} ESCAPE '\\'"
+            )
+            tbl.delete(predicate)
+            deleted = before - tbl.count_rows()
+            if deleted:
+                logger.info(
+                    "deleted %d stale chunks from %r under %s/",
+                    deleted,
+                    name,
+                    prefix,
+                )
+            total += deleted
+        return total
+
     def _delete(self, collection: CollectionName, must: Mapping[str, str]) -> int:
         name = collection.value
         tbl = self._table(name)

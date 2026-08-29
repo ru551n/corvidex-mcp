@@ -513,6 +513,11 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
             commit = status.indexed_commit[:12] if status.indexed_commit else "never"
+            if status.filesystem:
+                # Filesystem repositories attribute chunks to the walk
+                # fingerprint, not a commit.
+                commit = f"{commit} (fingerprint)" if status.indexed_commit else "never"
+            source = "filesystem" if status.filesystem else f"ref {status.ref}"
             synced = status.last_sync_at or "never"
             error = (
                 f"\n  last error: {status.last_sync_error}"
@@ -525,7 +530,7 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
                 per_domain.append(f"{count} {domain}")
             total = app.store.count_repository(status.name)
             lines.append(
-                f"- {status.name} (ref {status.ref}, domains: {domains})\n"
+                f"- {status.name} ({source}, domains: {domains})\n"
                 f"  indexed: {commit}, synced: {synced}\n"
                 f"  chunks: {' + '.join(per_domain)} ({total} total), "
                 f"files: {status.file_count}{error}"

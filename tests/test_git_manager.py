@@ -36,6 +36,63 @@ def git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def git_live(cwd: Path, *args: str) -> str:
+    """Like :func:`git`, but builds the environment from the current
+    ``os.environ`` (so ``protocol.file.allow`` set by the ``sub_env``
+    fixture reaches the git subprocess)."""
+    env = dict(os.environ)
+    for key in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ):
+        env.setdefault(key, ENV[key])
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def sub_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow the file:// protocol (test submodules use local paths)."""
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+
+
+def make_upstream_with_submodule(tmp_path: Path) -> tuple[Path, Path]:
+    """A superproject with one submodule ``ip``; returns (up, sub_up)."""
+    sub_up = tmp_path / "sub-upstream"
+    sub_up.mkdir()
+    git_live(sub_up, "init", "-q", "-b", "main")
+    (sub_up / "rtl").mkdir()
+    (sub_up / "rtl" / "a.vhd").write_text("entity a is end;\n")
+    git_live(sub_up, "add", "-A")
+    git_live(sub_up, "commit", "-qm", "sub first")
+
+    up = tmp_path / "upstream"
+    up.mkdir()
+    git_live(up, "init", "-q", "-b", "main")
+    (up / "top.vhd").write_text("entity top is end;\n")
+    git_live(up, "add", "-A")
+    git_live(up, "commit", "-qm", "super first")
+    git_live(up, "submodule", "add", "-q", str(sub_up), "ip")
+    git_live(up, "commit", "-qm", "add submodule")
+    return up, sub_up
+
+
+@pytest.fixture
+def remote_with_submodule(tmp_path: Path, sub_env: None) -> tuple[Path, Path]:
+    return make_upstream_with_submodule(tmp_path)
+
+
 @pytest.fixture
 def remote(tmp_path: Path) -> Path:
     """A local 'upstream' repository with one commit."""
@@ -467,3 +524,253 @@ def test_routing_excludes():
     # exclude wins over domains
     assert classify_file("rtl/fifo.vhd", domains=None, exclude=["*"]) is None
     assert classify_file("rtl/fifo.vhd", exclude=["rtl"]) is None
+
+
+# -- filesystem repositories ---------------------------------------------------
+
+
+@pytest.fixture
+def fs_root(tmp_path: Path) -> Path:
+    root = tmp_path / "fswalk"
+    (root / "rtl").mkdir(parents=True)
+    (root / "rtl" / "a.vhd").write_text("entity a is end;\n")
+    (root / "rtl" / "b.vhd").write_text("entity b is end;\n")
+    (root / "doc").mkdir()
+    (root / "doc" / "guide.md").write_text("# Guide\n")
+    (root / "deep" / "nested").mkdir(parents=True)
+    (root / "deep" / "nested" / "c.vhd").write_text("entity c is end;\n")
+    # Must be skipped by the walk: hidden dir, hidden file, symlink.
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".hidden.vhd").write_text("entity hidden is end;\n")
+    (root / "link.vhd").symlink_to(root / "rtl" / "a.vhd")
+    return root
+
+
+def fs_config(root: Path) -> RepositoryConfig:
+    return RepositoryConfig(name="fsrepo", path=root, filesystem=True)
+
+
+def test_filesystem_first_sync(manager: GitManager, fs_root: Path):
+    plan = run(manager.sync(fs_config(fs_root), None))
+    assert plan.full
+    assert not plan.empty
+    assert plan.deleted == ()
+    assert plan.ref == "-"
+    # Attribution is the walk fingerprint itself.
+    assert plan.commit == plan.fingerprint
+    assert sorted(plan.added_or_modified) == [
+        "deep/nested/c.vhd",
+        "doc/guide.md",
+        "rtl/a.vhd",
+        "rtl/b.vhd",
+    ]
+    # The first sync also carries the file set so the pipeline can
+    # fingerprint its content.
+    assert sorted(plan.untracked) == sorted(plan.added_or_modified)
+    # Hidden entries and symlinks never leak into the plan.
+    assert all(not p.startswith(".git") for p in plan.untracked)
+    assert ".hidden.vhd" not in plan.untracked
+    assert "link.vhd" not in plan.untracked
+
+
+def test_filesystem_unchanged_is_empty(manager: GitManager, fs_root: Path):
+    cfg = fs_config(fs_root)
+    first = run(manager.sync(cfg, None))
+    second = run(manager.sync(cfg, first.commit))
+    assert not second.full
+    assert second.empty
+    assert second.commit == first.commit
+    assert sorted(second.untracked) == sorted(first.untracked)
+
+
+def test_filesystem_walk_tracks_add_and_remove(manager: GitManager, fs_root: Path):
+    cfg = fs_config(fs_root)
+    first = run(manager.sync(cfg, None))
+
+    (fs_root / "rtl" / "new.vhd").write_text("entity new is end;\n")
+    (fs_root / "doc" / "guide.md").unlink()
+    second = run(manager.sync(cfg, first.commit))
+    # No tracked-level change, so the plan is 'empty' in the SyncPlan
+    # sense; the pipeline's untracked refinement picks up the file-set
+    # change from ``untracked`` + the moved fingerprint.
+    assert second.empty
+    assert "rtl/new.vhd" in second.untracked
+    assert "doc/guide.md" not in second.untracked
+    assert second.commit != first.commit
+
+    third = run(manager.sync(cfg, second.commit))
+    assert third.empty
+    assert third.commit == second.commit
+
+
+def test_filesystem_content_edit_moves_fingerprint(manager: GitManager, fs_root: Path):
+    cfg = fs_config(fs_root)
+    first = run(manager.sync(cfg, None))
+    (fs_root / "rtl" / "a.vhd").write_text("entity a is end;\n-- v2\n")
+    second = run(manager.sync(cfg, first.commit))
+    # Same file set (the pipeline refines this to a re-chunk of a.vhd via
+    # content hashes), but the walk fingerprint moves so the fast local
+    # poller re-runs the sync.
+    assert second.commit != first.commit
+    assert sorted(second.untracked) == sorted(first.untracked)
+    assert second.empty
+
+
+def test_filesystem_local_fingerprint(manager: GitManager, fs_root: Path):
+    cfg = fs_config(fs_root)
+    fingerprint = run(manager.local_fingerprint(cfg))
+    plan = run(manager.sync(cfg, None))
+    assert fingerprint == plan.fingerprint
+    (fs_root / "rtl" / "x.vhd").write_text("entity x is end;\n")
+    assert run(manager.local_fingerprint(cfg)) != fingerprint
+
+
+def test_filesystem_missing_path(manager: GitManager, tmp_path: Path):
+    cfg = RepositoryConfig(name="missing", path=tmp_path / "nope", filesystem=True)
+    with pytest.raises(GitError, match="does not exist"):
+        run(manager.sync(cfg, None))
+    with pytest.raises(GitError, match="does not exist"):
+        run(manager.local_fingerprint(cfg))
+
+
+# -- local repositories: index_untracked flag -----------------------------------
+
+
+def test_index_untracked_flag_skips_untracked(manager: GitManager, tmp_path: Path):
+    # A local working repository with one committed file and one
+    # untracked file. (Remote/url repositories are cloned clean, so the
+    # flag only has an effect for path repositories.)
+    local = tmp_path / "workrepo"
+    (local / "rtl").mkdir(parents=True)
+    (local / "rtl" / "fifo.vhd").write_text("entity fifo is end;\n")
+    git(local, "init", "-q", "-b", "main")
+    git(local, "add", "-A")
+    git(local, "commit", "-qm", "first")
+    (local / "rtl" / "extra.vhd").write_text("entity extra is end;\n")
+
+    cfg_off = RepositoryConfig(name="lrepo", path=local, index_untracked=False)
+    first = run(manager.sync(cfg_off, None))
+    assert "rtl/extra.vhd" not in first.added_or_modified
+    assert first.untracked == ()
+
+    # Flag off again: the untracked file stays out of the plan.
+    second = run(manager.sync(cfg_off, first.commit))
+    assert second.untracked == ()
+
+    # Flag on: the same tree now reports the untracked file.
+    cfg_on = RepositoryConfig(name="lrepo", path=local, index_untracked=True)
+    third = run(manager.sync(cfg_on, first.commit))
+    assert third.untracked == ("rtl/extra.vhd",)
+
+
+# -- submodules ------------------------------------------------------------------
+
+
+def test_submodule_full_sync(manager: GitManager, remote_with_submodule):
+    up, _sub = remote_with_submodule
+    cfg = make_config(up)
+    plan = run(manager.sync(cfg, None))
+    assert plan.full
+    assert "top.vhd" in plan.added_or_modified
+    # Submodule files are indexed under the gitlink path as prefix.
+    assert "ip/rtl/a.vhd" in plan.added_or_modified
+    assert plan.submodules and set(plan.submodules) == {"ip"}
+    assert len(plan.submodules["ip"]) == 40
+
+
+def bump_submodule(up: Path, sub_up: Path) -> None:
+    """Point the superproject's gitlink at sub_up's current HEAD."""
+    new_sha = git_live(sub_up, "rev-parse", "HEAD")
+    git_live(up / "ip", "fetch", "origin")
+    git_live(up / "ip", "checkout", "-q", new_sha)
+    git_live(up, "add", "ip")
+    git_live(up, "commit", "-qm", "bump submodule")
+
+
+def test_submodule_pointer_change_indexes_new_files(
+    manager: GitManager, remote_with_submodule
+):
+    up, sub_up = remote_with_submodule
+    cfg = make_config(up)
+    first = run(manager.sync(cfg, None))
+
+    (sub_up / "rtl" / "b.vhd").write_text("entity b is end;\n")
+    git_live(sub_up, "add", "-A")
+    git_live(sub_up, "commit", "-qm", "sub second")
+    bump_submodule(up, sub_up)
+
+    second = run(manager.sync(cfg, first.commit, first.submodules))
+    assert "ip/rtl/b.vhd" in second.added_or_modified
+    # The unchanged submodule file is re-chunked too (whole-submodule
+    # re-chunk on pointer change).
+    assert "ip/rtl/a.vhd" in second.added_or_modified
+    # Top-level files are untouched.
+    assert "top.vhd" not in second.added_or_modified
+    assert second.deleted == ()
+    assert second.submodules["ip"] != first.submodules["ip"]
+
+
+def test_submodule_file_deleted(manager: GitManager, remote_with_submodule):
+    up, sub_up = remote_with_submodule
+    cfg = make_config(up)
+    first = run(manager.sync(cfg, None))
+
+    (sub_up / "doc.txt").write_text("x\n")
+    git_live(sub_up, "add", "-A")
+    git_live(sub_up, "commit", "-qm", "add doc")
+    bump_submodule(up, sub_up)
+    second = run(manager.sync(cfg, first.commit, first.submodules))
+    assert "ip/doc.txt" in second.added_or_modified
+
+    git_live(sub_up, "rm", "-q", "doc.txt")
+    git_live(sub_up, "commit", "-qm", "remove doc")
+    bump_submodule(up, sub_up)
+    third = run(manager.sync(cfg, second.commit, second.submodules))
+    assert "ip/doc.txt" in third.deleted
+
+
+def test_submodule_removed_purges_prefix(manager: GitManager, remote_with_submodule):
+    up, _sub = remote_with_submodule
+    cfg = make_config(up)
+    first = run(manager.sync(cfg, None))
+
+    git_live(up, "rm", "-q", "ip")
+    git_live(up, "commit", "-qm", "remove submodule")
+    second = run(manager.sync(cfg, first.commit, first.submodules))
+    assert second.deleted_submodule_prefixes == ("ip",)
+    assert second.submodules == {}
+    assert not second.empty
+
+
+def test_local_submodule_changes(
+    manager: GitManager, tmp_path: Path, remote_with_submodule, sub_env: None
+):
+    up, _sub = remote_with_submodule
+    local = tmp_path / "checkout"
+    git_live(up, "clone", "-q", str(up), str(local))
+    git_live(local, "submodule", "update", "--init")
+    cfg = RepositoryConfig(name="repo", path=local)
+
+    first = run(manager.sync(cfg, None))
+    assert "ip/rtl/a.vhd" in first.added_or_modified
+    assert first.submodules and set(first.submodules) == {"ip"}
+
+    # Tracked file edited inside the submodule (uncommitted).
+    (local / "ip" / "rtl" / "a.vhd").write_text("entity a is end;\n-- v2\n")
+    second = run(manager.sync(cfg, first.commit, first.submodules))
+    assert "ip/rtl/a.vhd" in second.added_or_modified
+    assert "top.vhd" not in second.added_or_modified
+
+    # Untracked file inside the submodule.
+    (local / "ip" / "rtl" / "new.vhd").write_text("entity new is end;\n")
+    third = run(manager.sync(cfg, first.commit, first.submodules))
+    assert "ip/rtl/new.vhd" in third.untracked
+    assert "ip/rtl/a.vhd" in third.added_or_modified
+
+    # Submodule HEAD moves away from the recorded pointer: the whole
+    # submodule is re-chunked (tracked + untracked files).
+    git_live(local / "ip", "commit", "-qam", "sub local")
+    fourth = run(manager.sync(cfg, first.commit, first.submodules))
+    assert "ip/rtl/a.vhd" in fourth.added_or_modified
+    assert "ip/rtl/new.vhd" in fourth.added_or_modified
