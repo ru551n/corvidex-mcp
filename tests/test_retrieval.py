@@ -354,6 +354,32 @@ async def test_get_source_bad_range(env) -> None:
         retrieval.get_source("repo", "rtl/fifo.vhd", start_line=50, end_line=60)
 
 
+async def test_list_files(env) -> None:
+    """The indexed files are listable (the candidate paths for get_source),
+    glob-filtered and capped."""
+    _store, retrieval = env
+    files, truncated = retrieval.list_files("repo")
+    assert files == [
+        "docs/standard.md",
+        "rtl/fifo.vhd",
+        "rtl/fifo_pkg.sv",
+        "src/fifo.c",
+        "tb/fifo_tb.v",
+    ]
+    assert truncated is False
+    files, _ = retrieval.list_files("repo", pattern="*.vhd")
+    assert files == ["rtl/fifo.vhd"]
+    files, _ = retrieval.list_files("repo", pattern="rtl/*")
+    assert files == ["rtl/fifo.vhd", "rtl/fifo_pkg.sv"]
+    files, _ = retrieval.list_files("repo", pattern="nope/*")
+    assert files == []
+    files, truncated = retrieval.list_files("repo", limit=2)
+    assert files == ["docs/standard.md", "rtl/fifo.vhd"]
+    assert truncated is True
+    with pytest.raises(RetrievalError, match="unknown repository"):
+        retrieval.list_files("nope")
+
+
 async def test_repository_status(env) -> None:
     _store, retrieval = env
     statuses = retrieval.repository_status()

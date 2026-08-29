@@ -161,6 +161,7 @@ async def test_tools_registered(env) -> None:
         "search_code",
         "search_knowledge",
         "get_source",
+        "repository_files",
         "repository_status",
         "sync_repositories",
         "reindex_repository",
@@ -288,6 +289,24 @@ async def test_get_source_tool(env) -> None:
     assert "(lines 2-2" in tool_text(result)
 
     result = await mcp.call_tool("get_source", {"repository": "repo", "file": "no.c"})
+    assert tool_text(result).startswith("Error:")
+
+
+async def test_repository_files_tool(env) -> None:
+    _app, mcp, _up = env
+    result = await mcp.call_tool("repository_files", {"repository": "repo"})
+    text = tool_text(result)
+    assert "docs/standard.md" in text
+    assert "src/fifo.c" in text
+
+    result = await mcp.call_tool(
+        "repository_files", {"repository": "repo", "pattern": "*.c"}
+    )
+    text = tool_text(result)
+    assert "src/fifo.c" in text
+    assert "standard.md" not in text
+
+    result = await mcp.call_tool("repository_files", {"repository": "nope"})
     assert tool_text(result).startswith("Error:")
 
 

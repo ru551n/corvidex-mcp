@@ -1,6 +1,6 @@
 """FastMCP server: VHDL RAG search over configured Git repositories.
 
-Exposes nine tools to coding agents:
+Exposes ten tools to coding agents:
 
 - ``search_hdl`` / ``search_vhdl`` / ``search_docs`` / ``search_code`` —
   hybrid
@@ -10,6 +10,8 @@ Exposes nine tools to coding agents:
   domains (RRF over the per-domain rank lists);
 - ``get_source`` — exact file content (or a line range) from the
   synced working tree, with repository/commit attribution;
+- ``repository_files`` — list the indexed files of a repository
+  (glob-filterable), i.e. the candidate paths for ``get_source``;
 - ``repository_status`` — what is indexed and any sync errors;
 - ``sync_repositories`` / ``reindex_repository`` — maintenance
   (incremental sync of selected repos, full reindex of one).
@@ -601,6 +603,30 @@ def create_mcp(app: VhdlRagApp) -> FastMCP:
         `file` is the repository-relative path from any search result's
         source line."""
         return retrieval.get_source(repository, file, start_line, end_line)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def repository_files(
+        repository: str,
+        pattern: str | None = None,
+        limit: int = 200,
+    ) -> str:
+        """List the files known to the index for a repository — the
+        candidate paths to pass to get_source (no guessing). `pattern` is
+        a glob matched against the repository-relative path ('*' crosses
+        '/'), e.g. 'modules/counter/*' or '*.vhd'. Results are capped at
+        `limit`; a truncation note is appended when more exist."""
+        files, truncated = retrieval.list_files(repository, pattern, limit)
+        if not files:
+            return (
+                f"No indexed files in {repository!r} match "
+                f"({pattern or 'any pattern'}). Check repository_status — "
+                "the repository may not be synced yet."
+            )
+        out = "\n".join(files)
+        if truncated:
+            out += f"\n… (capped at {limit}; refine the pattern for more)"
+        return out
 
     @mcp.tool(annotations=_READ_ONLY)
     async def repository_status() -> str:

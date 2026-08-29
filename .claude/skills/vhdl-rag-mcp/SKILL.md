@@ -1,6 +1,6 @@
 ---
 name: vhdl-rag-mcp
-description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the vhdl-rag-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), or when a question spans docs, RTL, and test/simulation code.
+description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the vhdl-rag-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), or when a question spans docs, RTL, and test/simulation code.
 ---
 
 # vhdl-rag-mcp — VHDL knowledge base
@@ -74,10 +74,14 @@ cross-referencing key between domains.
    sections export their identifiers too).
 5. **Read the exact source before copying.** A search result is a
    chunk (a construct/section/function), not the whole file. Use
-   `get_source(repository, file, start_line, end_line)` with the
-   result's source line to fetch the full construct or file, exactly as
-   indexed at the result's commit. For the standards file,
-   `repository="coding-standards"` works here too.
+`get_source(repository, file, start_line, end_line)` with the
+    result's source line to fetch the full construct or file, exactly as
+    indexed at the result's commit. For the standards file,
+    `repository="coding-standards"` works here too. When a file path is
+    unknown, don't guess it — list the indexed files with
+    `repository_files(repository, pattern)` (a glob on the
+    repository-relative path, e.g. `*.vhd` or `modules/<ip>/*`) and pass
+    the result to `get_source`.
 6. **Check `repository_status` on any anomaly** (empty results, stale
    content, `last error` with a git hint): a repo whose ref moved or
    whose sync errored shows it there; `sync_repositories` (or

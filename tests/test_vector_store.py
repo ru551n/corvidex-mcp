@@ -223,6 +223,28 @@ def test_count_repository(store: VectorStore) -> None:
     assert store.count_repository("unknown") == 0
 
 
+def test_list_files(store: VectorStore) -> None:
+    chunks = [
+        make_chunk(symbol="p_write"),
+        make_chunk(symbol="p_read", kind="process", start=21, end=30),
+        make_chunk(repo="repoB", file="rtl/other.vhd", symbol="top", kind="entity"),
+        make_chunk(
+            repo="repoB",
+            collection=CollectionName.CODE,
+            content_type=ContentType.CODE,
+            language="c",
+            file="src/fifo.c",
+            symbol="fifo_write",
+            kind="function",
+        ),
+    ]
+    store.upsert_chunks(chunks, dense=[dense(0), dense(1), dense(2), dense(3)])
+    assert store.list_files("repoA") == ["rtl/fifo.vhd"]
+    assert store.list_files("repoB") == ["rtl/other.vhd", "src/fifo.c"]
+    assert store.list_files("repoB", CollectionName.HDL) == ["rtl/other.vhd"]
+    assert store.list_files("unknown") == []
+
+
 def test_upsert_mismatched_lengths_raise(store: VectorStore) -> None:
     with pytest.raises(VectorStoreError, match="1 chunks, 2 dense"):
         store.upsert_chunks([make_chunk()], dense=[dense(0), dense(1)])

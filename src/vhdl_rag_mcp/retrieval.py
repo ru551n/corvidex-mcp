@@ -17,6 +17,7 @@ filters.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 from dataclasses import dataclass
 
@@ -402,6 +403,26 @@ class RetrievalService:
             start_line,
             end_line,
         )
+
+    def list_files(
+        self,
+        repository: str,
+        pattern: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[list[str], bool]:
+        """Indexed file paths of one repository (glob-filtered, capped).
+
+        ``pattern`` is an fnmatch glob matched against the
+        repository-relative path (``*`` crosses ``/``). Returns
+        ``(paths, truncated)``; ``truncated`` is True when the cap hid
+        more results than returned.
+        """
+        self._repository(repository)
+        files = self._store.list_files(repository)
+        if pattern:
+            files = [f for f in files if fnmatch.fnmatch(f, pattern)]
+        truncated = limit is not None and len(files) > limit
+        return (files[:limit] if limit is not None else files), truncated
 
     # -- status ----------------------------------------------------------------------
 

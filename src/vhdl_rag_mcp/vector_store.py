@@ -899,6 +899,25 @@ class VectorStore:
             return int(row[0])
         return sum(self.count_repository(repository, c) for c in ALL_COLLECTIONS)
 
+    def list_files(
+        self, repository: str, collection: CollectionName | None = None
+    ) -> list[str]:
+        """Distinct indexed file paths of one repository (one collection or
+        all of them), sorted. A file is listed when at least one of its
+        chunks is indexed — exactly the set ``get_source`` can read."""
+        files: set[str] = set()
+        for c in ([collection] if collection is not None else list(ALL_COLLECTIONS)):
+            name = f"chunks_{c.value}"
+            if not self._table_exists(name):
+                continue
+            rows = self._conn.execute(
+                f"SELECT DISTINCT {_col('file')} FROM {name} "
+                f"WHERE repository = ?",
+                (repository,),
+            ).fetchall()
+            files.update(row[0] for row in rows)
+        return sorted(files)
+
     def chunks_for_file(self, repository: str, file: str) -> list[Chunk]:
         """All currently indexed chunks for one file (every collection)."""
         chunks: list[Chunk] = []
