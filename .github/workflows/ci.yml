@@ -191,11 +191,12 @@ jobs:
         # or moves their install paths): the whole point of this job is
         # a real vhdl_ls + Veridian LSP handshake, not the fakes used
         # elsewhere in the suite.
-        run: >
-          uv run python -c
-          "import os
+        run: |
+          uv run python -c "
+          import os
           from pathlib import Path
           vhdl_ls = os.environ['VHDL_LS_TEST_BIN']
           veridian = os.environ['VERIDIAN_TEST_BIN']
           assert Path(vhdl_ls).exists(), f'vhdl_ls not found at {vhdl_ls!r}'
-          assert Path(veridian).exists(), f'veridian not found at {veridian!r}'"
+          assert Path(veridian).exists(), f'veridian not found at {veridian!r}'
+          "
