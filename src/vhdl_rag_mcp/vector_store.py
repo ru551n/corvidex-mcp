@@ -906,13 +906,12 @@ class VectorStore:
         all of them), sorted. A file is listed when at least one of its
         chunks is indexed — exactly the set ``get_source`` can read."""
         files: set[str] = set()
-        for c in ([collection] if collection is not None else list(ALL_COLLECTIONS)):
+        for c in [collection] if collection is not None else list(ALL_COLLECTIONS):
             name = f"chunks_{c.value}"
             if not self._table_exists(name):
                 continue
             rows = self._conn.execute(
-                f"SELECT DISTINCT {_col('file')} FROM {name} "
-                f"WHERE repository = ?",
+                f"SELECT DISTINCT {_col('file')} FROM {name} WHERE repository = ?",
                 (repository,),
             ).fetchall()
             files.update(row[0] for row in rows)
