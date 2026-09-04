@@ -69,6 +69,17 @@ class IndexPipeline:
         # pipeline degrades to structural/generic parsing per analyzer.
         self._vhdl_ls_bin, _ = resolve_binary(self._config.vhdl_ls_path, "vhdl_ls")
         self._veridian_bin, _ = resolve_binary(self._config.veridian_path, "veridian")
+        # Explicit config wins over the sibling-directory auto-detect,
+        # which only finds anything for the official release layout
+        # (<root>/bin/vhdl_ls plus <root>/vhdl_libraries) and misses e.g. a
+        # 'cargo install --path' build, where vhdl_ls has no bundled
+        # libraries next to the installed binary at all and panics on
+        # every invocation without an explicit -l.
+        self._vhdl_ls_libraries_dir = self._config.vhdl_ls_libraries_dir or (
+            default_libraries_dir(self._vhdl_ls_bin)
+            if self._vhdl_ls_bin is not None
+            else None
+        )
 
     def _lock_for(self, name: str) -> asyncio.Lock:
         lock = self._locks.get(name)
@@ -312,8 +323,9 @@ class IndexPipeline:
         lsp = VhdlLsp(
             self._vhdl_ls_bin,
             repo_dir,
-            libraries_dir=default_libraries_dir(self._vhdl_ls_bin),
+            libraries_dir=self._vhdl_ls_libraries_dir,
             vhdl_ls_hook=cfg.vhdl_ls_hook,
+            files=tuple(files),
         )
         chunks = []
         try:

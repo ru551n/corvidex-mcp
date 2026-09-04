@@ -414,6 +414,19 @@ class AppConfig(BaseModel):
     vhdl_ls_path: str = Field(
         default="vhdl_ls", description="Path to the vhdl_ls binary (or a PATH name)"
     )
+    vhdl_ls_libraries_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Path to vhdl_ls's 'vhdl_libraries' directory (bundled IEEE/std/"
+            "synopsys/vital2000 sources). Auto-detected next to the binary "
+            "for the official release layout (<root>/bin/vhdl_ls plus "
+            "<root>/vhdl_libraries) when unset; that heuristic does not "
+            "find anything for a 'cargo install --path' build, in which "
+            "case vhdl_ls panics on every invocation ('language server "
+            "connection closed' from every sync/reindex) unless this is "
+            "set explicitly, e.g. to '<rust_hdl checkout>/vhdl_libraries'."
+        ),
+    )
     veridian_path: str = Field(
         default="veridian",
         description="Path to the Veridian binary (or a PATH name); Verilog/"
@@ -453,6 +466,13 @@ class AppConfig(BaseModel):
     @field_validator("data_dir")
     @classmethod
     def _expand_data_dir(cls, value: Path) -> Path:
+        return Path(value).expanduser()
+
+    @field_validator("vhdl_ls_libraries_dir")
+    @classmethod
+    def _expand_vhdl_ls_libraries_dir(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         return Path(value).expanduser()
 
     @field_validator("coding_standards")

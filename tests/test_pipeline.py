@@ -1198,3 +1198,64 @@ async def test_local_submodule_indexing_lifecycle(
     assert store.chunks_for_file("srepo", "ip/rtl/b.vhd") == []
     assert store.count() == 3
     store.close()
+
+
+# -- vhdl_ls_libraries_dir resolution -----------------------------------------
+
+
+def _fake_binary(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    binary = bin_dir / "vhdl_ls"
+    binary.write_text("#!/bin/sh\necho fake 0.0.0\n")
+    binary.chmod(0o755)
+    return binary
+
+
+def test_vhdl_ls_libraries_dir_prefers_explicit_config(tmp_path: Path) -> None:
+    """Explicit vhdl_ls_libraries_dir config wins even when a sibling
+    'vhdl_libraries' directory also exists next to the binary (the
+    official-release layout the auto-detect heuristic assumes)."""
+    binary = _fake_binary(tmp_path)
+    (tmp_path / "vhdl_libraries").mkdir()  # would be auto-detected otherwise
+    explicit_dir = tmp_path / "explicit_libs"
+    explicit_dir.mkdir()
+
+    config = AppConfig(vhdl_ls_path=str(binary), vhdl_ls_libraries_dir=explicit_dir)
+    pipeline = IndexPipeline(config, GitManager(config.repos_dir), None, None, None)
+    assert pipeline._vhdl_ls_libraries_dir == explicit_dir
+
+
+def test_vhdl_ls_libraries_dir_falls_back_to_autodetect(tmp_path: Path) -> None:
+    """Unset config falls back to the sibling-directory auto-detect (the
+    only layout it can find anything for), preserving old behavior."""
+    binary = _fake_binary(tmp_path)
+    (tmp_path / "vhdl_libraries").mkdir()
+
+    config = AppConfig(vhdl_ls_path=str(binary))
+    pipeline = IndexPipeline(config, GitManager(config.repos_dir), None, None, None)
+    assert pipeline._vhdl_ls_libraries_dir == tmp_path / "vhdl_libraries"
+
+
+def test_vhdl_ls_libraries_dir_none_when_autodetect_finds_nothing(
+    tmp_path: Path,
+) -> None:
+    """A 'cargo install --path' build has no vhdl_libraries bundled next
+    to the installed binary at all: this is exactly the layout that made
+    vhdl_ls panic on every invocation ('language server connection
+    closed' from every sync/reindex) before vhdl_ls_libraries_dir
+    existed as an escape hatch."""
+    binary = _fake_binary(tmp_path)
+    # no sibling vhdl_libraries directory created
+
+    config = AppConfig(vhdl_ls_path=str(binary))
+    pipeline = IndexPipeline(config, GitManager(config.repos_dir), None, None, None)
+    assert pipeline._vhdl_ls_libraries_dir is None
+
+
+def test_vhdl_ls_libraries_dir_none_when_binary_unavailable(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(vhdl_ls_path=str(tmp_path / "no-such-vhdl-ls"))
+    pipeline = IndexPipeline(config, GitManager(config.repos_dir), None, None, None)
+    assert pipeline._vhdl_ls_libraries_dir is None

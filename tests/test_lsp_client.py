@@ -218,6 +218,40 @@ def test_parse_content_length():
     assert _parse_content_length(b"Content-Length: abc\r\n") is None
 
 
+def test_default_config_text_uses_glob_when_no_files_given():
+    lsp = VhdlLsp("vhdl_ls", Path("/tmp"))
+    text = lsp.default_config_text()
+    assert text is not None
+    assert "'**/*.vhd'" in text
+    assert "'**/*.vhdl'" in text
+
+
+def test_default_config_text_uses_explicit_files_list_when_given():
+    """The pipeline passes the exact set of files it already resolved
+    (post exclude-filtering) instead of letting vhdl_ls glob the whole
+    workspace. A blanket '**/*.vhd' glob matches gitignored build-output
+    directories whose names happen to end in '.vhd' (e.g. GHDL's
+    per-run library cache under vunit_out/, which are directories, not
+    files) and dumps unrelated vendored/submodule trees into a single
+    defaultlib, causing duplicate-declaration errors."""
+    lsp = VhdlLsp(
+        "vhdl_ls", Path("/tmp"), files=("modules/foo/src/foo.vhd", "src/bar.vhd")
+    )
+    text = lsp.default_config_text()
+    assert text is not None
+    assert "'modules/foo/src/foo.vhd'" in text
+    assert "'src/bar.vhd'" in text
+    assert "**/*.vhd" not in text
+
+
+def test_default_config_text_explicit_empty_files_list():
+    lsp = VhdlLsp("vhdl_ls", Path("/tmp"), files=())
+    text = lsp.default_config_text()
+    assert text is not None
+    assert "[libraries.defaultlib]" in text
+    assert "files = []" in text
+
+
 def test_default_libraries_dir(tmp_path: Path):
     root = tmp_path / "dist"
     (root / "bin").mkdir(parents=True)
@@ -446,6 +480,7 @@ def test_dispatch_diagnostics_notification(tmp_path: Path):
 
 
 REAL_BIN = os.environ.get("VHDL_LS_TEST_BIN")
+REAL_LIBS = os.environ.get("VHDL_LS_TEST_LIBRARIES_DIR")
 
 
 def _find_real_binary() -> str | None:
@@ -454,6 +489,23 @@ def _find_real_binary() -> str | None:
     import shutil
 
     return shutil.which("vhdl_ls")
+
+
+def _find_real_libraries_dir(binary: str) -> Path | None:
+    """The 'vhdl_libraries' dir for the real-binary tests.
+
+    ``default_libraries_dir`` only finds anything for the official
+    release layout (``<root>/bin/vhdl_ls`` plus ``<root>/vhdl_libraries``).
+    A binary installed with ``cargo install --path <rust_hdl checkout>``
+    has no libraries bundled next to it at all, so vhdl_ls panics on
+    every invocation without an explicit ``-l`` (this is exactly the
+    production bug: 'language server connection closed' from every
+    sync/reindex). ``VHDL_LS_TEST_LIBRARIES_DIR`` lets a dev environment
+    point at the checkout's own ``vhdl_libraries`` directory instead.
+    """
+    if REAL_LIBS and Path(REAL_LIBS).is_dir():
+        return Path(REAL_LIBS)
+    return default_libraries_dir(binary)
 
 
 real_binary = pytest.mark.skipif(
@@ -475,7 +527,7 @@ async def test_real_vhdl_ls_roundtrip(tmp_path: Path):
         "begin\n  p : process is\n  begin\n    wait;\n  end process;\n"
         "end architecture;\n"
     )
-    lsp = VhdlLsp(binary, ws, libraries_dir=default_libraries_dir(binary))
+    lsp = VhdlLsp(binary, ws, libraries_dir=_find_real_libraries_dir(binary))
     try:
         await lsp.start()
         await lsp.open_document(ws / "rtl" / "fifo.vhd")
@@ -488,5 +540,32 @@ async def test_real_vhdl_ls_roundtrip(tmp_path: Path):
         assert any("fifo" in n for n in names)
         arch = next(s for s in syms if "rtl" in s.name)
         assert any("p" in c.name for c in arch.children)
+    finally:
+        await lsp.shutdown()
+
+
+@pytest.mark.skipif(
+    _find_real_binary() is None
+    or default_libraries_dir(_find_real_binary() or "") is not None,
+    reason=(
+        "no vhdl_ls binary available, or this environment's binary already "
+        "has a sibling vhdl_libraries dir (the bug this test documents does "
+        "not reproduce there)"
+    ),
+)
+async def test_real_vhdl_ls_panics_without_libraries_dir(tmp_path: Path) -> None:
+    """Documents the actual production bug: a vhdl_ls built with 'cargo
+    install --path' (no bundled vhdl_libraries next to the installed
+    binary) panics on *every* invocation unless an explicit libraries_dir
+    is supplied, surfacing to callers as 'language server connection
+    closed' regardless of workspace content."""
+    binary = _find_real_binary()
+    assert binary is not None
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    lsp = VhdlLsp(binary, ws, libraries_dir=None, files=())
+    try:
+        with pytest.raises(LspError, match="connection closed"):
+            await lsp.start()
     finally:
         await lsp.shutdown()

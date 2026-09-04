@@ -367,7 +367,15 @@ async def test_repository_status_filesystem_repo(env, tmp_path: Path) -> None:
         update={
             "repositories": [
                 RepositoryConfig(name="fsrepo", path=root, filesystem=True)
-            ]
+            ],
+            # Deterministic across environments: this test only cares
+            # about the file being indexed at all (structural fallback
+            # is fine), not vhdl_ls specifically, so don't depend on
+            # whatever vhdl_ls happens to be on the ambient PATH (it may
+            # be present but non-functional, e.g. a 'cargo install
+            # --path' build with no bundled vhdl_libraries next to it,
+            # which panics on every invocation).
+            "vhdl_ls_path": str(tmp_path / "no-such-vhdl-ls"),
         }
     )
     app2 = VhdlRagApp(

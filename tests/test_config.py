@@ -21,6 +21,7 @@ FULL_CONFIG = """\
 data_dir = "~/vhdl-rag-data"
 sync_interval = 60
 vhdl_ls_path = "/opt/vhdl_ls/bin/vhdl_ls"
+vhdl_ls_libraries_dir = "~/git/rust_hdl/vhdl_libraries"
 log_level = "DEBUG"
 
 [embeddings]
@@ -68,6 +69,7 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.sync_interval == 300
     assert cfg.local_sync_interval == 10
     assert cfg.vhdl_ls_path == "vhdl_ls"
+    assert cfg.vhdl_ls_libraries_dir is None
     assert cfg.log_level == "INFO"
     assert cfg.repositories == []
     assert cfg.embeddings.dense_max_tokens == 1024
@@ -94,6 +96,9 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     assert cfg.data_dir == Path("~/vhdl-rag-data").expanduser()
     assert cfg.sync_interval == 60
     assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
+    assert (
+        cfg.vhdl_ls_libraries_dir == Path("~/git/rust_hdl/vhdl_libraries").expanduser()
+    )
     assert cfg.log_level == "DEBUG"
     assert cfg.embeddings.dense_max_tokens == 2048
     assert cfg.embeddings.dense_threads == 8

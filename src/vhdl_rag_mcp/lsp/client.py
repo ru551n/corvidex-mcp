@@ -609,9 +609,26 @@ class VhdlLsp(LspClient):
         workspace: Path,
         libraries_dir: Path | None = None,
         vhdl_ls_hook: str | None = None,
+        files: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(binary, workspace, config_hook=vhdl_ls_hook)
         self._libraries = libraries_dir
+        #: Relative paths (as returned by the indexing pipeline, already
+        #: filtered through the repository's ``exclude`` patterns) used to
+        #: build the generated ``defaultlib`` when no ``vhdl_ls.toml``
+        #: exists. ``None`` falls back to the old ``**/*.vhd`` workspace
+        #: glob (used by callers that just want a generic single-file or
+        #: ad-hoc workspace, e.g. tests).
+        #:
+        #: A blanket glob is unsafe against a real repository checkout: it
+        #: also matches gitignored build-output directories whose names
+        #: happen to end in ``.vhd`` (e.g. GHDL's per-run library cache
+        #: under ``vunit_out/``, which are actually directories, not
+        #: files), and it dumps unrelated vendored/submodule trees into a
+        #: single ``defaultlib`` library, causing duplicate-declaration
+        #: errors. Restricting the default config to exactly the files
+        #: the pipeline already resolved for this repository avoids both.
+        self._files = files
 
     def build_args(self) -> list[str]:
         args: list[str] = []
@@ -624,7 +641,8 @@ class VhdlLsp(LspClient):
         return diagnostic.code == "syntax_error"
 
     def default_config_text(self) -> str | None:
-        files_list = ", ".join(f"'{glob}'" for glob in self._DEFAULTLIB_GLOBS)
+        entries = self._files if self._files is not None else self._DEFAULTLIB_GLOBS
+        files_list = ", ".join(f"'{entry}'" for entry in entries)
         lines = ["[libraries.defaultlib]", f"files = [{files_list}]", ""]
         if self._libraries is not None and self._libraries.is_dir():
             lib = str(self._libraries)
