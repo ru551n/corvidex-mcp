@@ -159,3 +159,43 @@ jobs:
         run: $HOME/.local/bin/uv sync --frozen
       - name: Run tests
         run: $HOME/.local/bin/uv run pytest -q
+
+  e2e-lsp:
+    name: End-to-end tests (real vhdl_ls + Veridian, ru551n/hdl-docker)
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ru551n/hdl-docker:1.2.0
+      # The image's default user (hdl) can't apt-get install; run as root.
+      options: --user root
+    env:
+      VHDL_LS_TEST_BIN: /opt/vhdl_ls/bin/vhdl_ls
+      VERIDIAN_TEST_BIN: /opt/veridian/bin/veridian
+    steps:
+      - name: Install prerequisites (git, curl)
+        run: |
+          set -e
+          apt-get update
+          (command -v git  || apt-get install -y --no-install-recommends git)
+          (command -v curl || apt-get install -y --no-install-recommends curl)
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run tests
+        run: uv run pytest -q
+      - name: Assert the real LSP end-to-end tests really ran
+        # Guards against the real vhdl_ls/Veridian tests being silently
+        # skipped (e.g. if the image ever stops shipping these binaries
+        # or moves their install paths): the whole point of this job is
+        # a real vhdl_ls + Veridian LSP handshake, not the fakes used
+        # elsewhere in the suite.
+        run: >
+          uv run python -c
+          "import os
+          from pathlib import Path
+          vhdl_ls = os.environ['VHDL_LS_TEST_BIN']
+          veridian = os.environ['VERIDIAN_TEST_BIN']
+          assert Path(vhdl_ls).exists(), f'vhdl_ls not found at {vhdl_ls!r}'
+          assert Path(veridian).exists(), f'veridian not found at {veridian!r}'"
