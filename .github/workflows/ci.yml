@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Install dependencies
         run: uv sync --frozen
       - name: Check formatting
@@ -45,10 +45,10 @@ jobs:
       # ephemeral on hosted runners, which is what we want.
       VHDL_RAG_QUALITY_DATA: /tmp/vhdl-rag-quality
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Cache embedding models
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/vhdl-rag-quality/embed-cache
           # Bump -v2 when the default models (config defaults) or the
@@ -90,8 +90,8 @@ jobs:
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Install dependencies
         run: uv sync --frozen
       - name: Run tests
@@ -152,7 +152,7 @@ jobs:
           command -v curl || $PKG install -y curl
           command -v git
           command -v curl
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
       - name: Install dependencies (uv provisions CPython ${{ matrix.python-version }})
@@ -179,8 +179,8 @@ jobs:
           apt-get update
           (command -v git  || apt-get install -y --no-install-recommends git)
           (command -v curl || apt-get install -y --no-install-recommends curl)
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Install dependencies
         run: uv sync --frozen
       - name: Run tests
