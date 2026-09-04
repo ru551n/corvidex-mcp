@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
     # FastMCP (mcp.server.fastmcp) was removed in mcp 2.x — pin to 1.x.
-    "mcp>=1.29,<2",
+    "mcp>=1.29,<3",
     "sqlite-vec>=0.1.9",
     "fastembed>=0.8",
     "pypdf>=4.0",
