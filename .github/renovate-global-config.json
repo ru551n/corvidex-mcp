@@ -1,0 +1,8 @@
+{
+  "$schema": "https://docs.renovatebot.com/self-hosted-schema.json",
+  "platform": "github",
+  "repositories": ["ru551n/vhdl-rag-mcp"],
+  "onboarding": false,
+  "requireConfig": "optional",
+  "gitAuthor": "Renovate Bot <renovate@ru551n.users.noreply.github.com>"
+}
