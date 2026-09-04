@@ -825,3 +825,56 @@ def test_local_submodule_changes(
     fourth = run(manager.sync(cfg, first.commit, first.submodules))
     assert "ip/rtl/a.vhd" in fourth.added_or_modified
     assert "ip/rtl/new.vhd" in fourth.added_or_modified
+
+
+def make_upstream_with_nested_submodule(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A superproject -> submodule ``ip`` -> nested submodule
+    ``ip/vendor``; returns (up, sub_up, vendor_up)."""
+    vendor_up = tmp_path / "vendor-upstream"
+    vendor_up.mkdir()
+    git_live(vendor_up, "init", "-q", "-b", "main")
+    (vendor_up / "vendor.vhd").write_text("entity vendor is end;\n")
+    git_live(vendor_up, "add", "-A")
+    git_live(vendor_up, "commit", "-qm", "vendor first")
+
+    sub_up = tmp_path / "sub-upstream"
+    sub_up.mkdir()
+    git_live(sub_up, "init", "-q", "-b", "main")
+    (sub_up / "rtl").mkdir()
+    (sub_up / "rtl" / "a.vhd").write_text("entity a is end;\n")
+    git_live(sub_up, "add", "-A")
+    git_live(sub_up, "commit", "-qm", "sub first")
+    git_live(sub_up, "submodule", "add", "-q", str(vendor_up), "vendor")
+    git_live(sub_up, "commit", "-qm", "add vendor submodule")
+
+    up = tmp_path / "upstream"
+    up.mkdir()
+    git_live(up, "init", "-q", "-b", "main")
+    (up / "top.vhd").write_text("entity top is end;\n")
+    git_live(up, "add", "-A")
+    git_live(up, "commit", "-qm", "super first")
+    git_live(up, "submodule", "add", "-q", str(sub_up), "ip")
+    git_live(up, "commit", "-qm", "add submodule")
+    return up, sub_up, vendor_up
+
+
+def test_local_nested_submodule_files_prefixed_once(
+    manager: GitManager, tmp_path: Path, sub_env: None
+):
+    """Regression test for a submodule that itself has a submodule (e.g.
+    a vendored VUnit checkout that pulls in OSVVM as its own submodule):
+    the nested submodule's files must be prefixed with the full path
+    from the repository root exactly once, not once per recursion level.
+    """
+    up, _sub, _vendor = make_upstream_with_nested_submodule(tmp_path)
+    local = tmp_path / "checkout"
+    git_live(up, "clone", "-q", str(up), str(local))
+    git_live(local, "submodule", "update", "--init", "--recursive")
+    cfg = RepositoryConfig(name="repo", path=local)
+
+    plan = run(manager.sync(cfg, None))
+    assert "top.vhd" in plan.added_or_modified
+    assert "ip/rtl/a.vhd" in plan.added_or_modified
+    assert "ip/vendor/vendor.vhd" in plan.added_or_modified
+    # The double-prefix bug produced "ip/ip/vendor/vendor.vhd" instead.
+    assert not any(p.startswith("ip/ip/") for p in plan.added_or_modified)

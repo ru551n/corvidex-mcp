@@ -468,12 +468,15 @@ class GitManager:
                 sub_dir, "ls-files", "-z", "--others", "--exclude-standard"
             )
             files.update(p for p in others.split("\0") if p)
+        result: set[str] = set()
         for path in sorted(files):
             if depth < self._SUBMODULE_DEPTH and (sub_dir / path / ".git").exists():
                 # A nested submodule: the parent lists it as a gitlink
-                # (a bare path entry), so enumerate its tree instead.
-                files.discard(path)
-                files.update(
+                # (a bare path entry), so enumerate its tree instead. The
+                # recursive call already returns paths fully prefixed
+                # (from its own `prefix`, which is `{prefix}/{path}` here)
+                # — add them as-is, don't prefix them again below.
+                result.update(
                     await self._submodule_worktree_files(
                         sub_dir / path,
                         f"{prefix}/{path}",
@@ -481,7 +484,9 @@ class GitManager:
                         depth + 1,
                     )
                 )
-        return {f"{prefix}/{p}" for p in files if p}
+            else:
+                result.add(f"{prefix}/{path}")
+        return result
 
     async def _update_submodules(self, repo_dir: Path) -> None:
         """Initialize submodules at the recorded SHAs (best effort).
