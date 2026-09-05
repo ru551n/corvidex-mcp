@@ -11,6 +11,7 @@ actionable message.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tomllib
@@ -536,6 +537,24 @@ class AppConfig(BaseModel):
             "server runs with an empty index instead."
         ),
     )
+    project_data_root: Path = Field(
+        default=Path("~/.local/share/corvidex/projects"),
+        description=(
+            "Root directory for per-project index storage. Only used for "
+            "zero-config indexing (index_cwd, no explicit [[repositories]] "
+            "configured): each auto-indexed project gets its own "
+            "subdirectory here (index.sqlite, embed-cache, dense-cache, "
+            "git mirrors, ...), named after its auto-derived repository "
+            "name (see default_repository_for_cwd/project_identity_hash), "
+            "so two differently-located directories sharing a basename "
+            "never share storage or sync state. Ignored once any "
+            "[[repositories]] is configured explicitly — those "
+            "deliberately share the top-level data_dir so they stay "
+            "cross-referenceable in one search_knowledge() call. Also "
+            "ignored if data_dir is itself set explicitly (that always "
+            "wins over the per-project split)."
+        ),
+    )
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     repositories: list[RepositoryConfig] = Field(
         default_factory=list,
@@ -549,6 +568,11 @@ class AppConfig(BaseModel):
     @field_validator("data_dir")
     @classmethod
     def _expand_data_dir(cls, value: Path) -> Path:
+        return Path(value).expanduser()
+
+    @field_validator("project_data_root")
+    @classmethod
+    def _expand_project_data_root(cls, value: Path) -> Path:
         return Path(value).expanduser()
 
     @field_validator("vhdl_ls_libraries_dir")
@@ -643,6 +667,21 @@ def _sanitize_repo_name(raw: str) -> str:
     return cleaned if NAME_RE.fullmatch(cleaned or "") else "workspace"
 
 
+def project_identity_hash(resolved_path: Path) -> str:
+    """Short, stable hash of a resolved absolute path.
+
+    Used to disambiguate anything derived from a directory's bare name
+    (auto-indexed repository names, per-project storage directories —
+    see :func:`default_repository_for_cwd` and
+    :data:`AppConfig.project_data_root`) so that two differently-located
+    directories that happen to share a basename (e.g. two checkouts both
+    named ``backend``) never collide. Deterministic: the same path
+    always hashes to the same value, so identity survives across
+    restarts (incremental sync keeps working).
+    """
+    return hashlib.sha256(str(resolved_path).encode("utf-8")).hexdigest()[:8]
+
+
 def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     """The repository indexed automatically when none are configured: the
     directory the server is started in (a coding agent's workspace).
@@ -655,10 +694,20 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     coding-standards file or other repositories are needed, add
     ``[[repositories]]`` entries and they take over (this default no
     longer applies once any repository is configured).
+
+    The name is the sanitized directory basename plus a short hash of
+    the resolved path (see :func:`project_identity_hash`): two different
+    directories sharing a basename (e.g. ``~/work/backend`` and
+    ``~/other-client/backend``) get distinct names, so their chunks and
+    sync state never collide — explicit ``[[repositories]]`` entries
+    already require unique names (validated at load time); this is the
+    zero-config equivalent, since that name is never seen or chosen by
+    the user. Use ``repository_status`` to see the exact name assigned.
     """
     root = (cwd or Path.cwd()).resolve()
+    name = f"{_sanitize_repo_name(root.name)}-{project_identity_hash(root)}"
     return RepositoryConfig(
-        name=_sanitize_repo_name(root.name),
+        name=name,
         path=root,
         filesystem=not (root / ".git").exists(),
         auto_indexed=True,
@@ -710,8 +759,22 @@ _DEFAULT_TEMPLATE = """\
 # variable or the --config command-line flag. The top-level scalar
 # options also have command-line overrides: --data-dir, --sync-interval,
 # --vhdl-ls-path, --log-level (command line wins).
+#
+# With no [[repositories]] below (zero-config), each auto-indexed
+# project gets its own storage subdirectory under project_data_root,
+# named after the directory being indexed — so unrelated projects never
+# share an index.sqlite or sync state. Set data_dir explicitly (below)
+# to opt back into one shared store across every project instead (also
+# what always applies once [[repositories]] entries are configured).
 
-data_dir = "~/.local/share/corvidex"
+# data_dir = "~/.local/share/corvidex"      # one shared store for every
+#                                           # project (see note above);
+#                                           # always used once
+#                                           # [[repositories]] is set
+# project_data_root = "~/.local/share/corvidex/projects"  # per-project
+#                                                          # storage root
+#                                                          # (zero-config
+#                                                          # only)
 sync_interval = 300
 # # Local working repositories (path, not url) are change-checked this
 # # often by a fast poller (commits, tracked edits, untracked add/remove);
@@ -879,7 +942,19 @@ def apply_default_repository(config: AppConfig, cwd: Path | None = None) -> AppC
     :func:`default_repository_for_cwd`. Applied automatically by
     :func:`load_config` unless ``inject_default_repository=False`` was
     passed.
+
+    Also redirects ``data_dir`` to a subdirectory of
+    ``project_data_root``, named after the auto-indexed repository (see
+    :data:`AppConfig.project_data_root`) — unless the caller set
+    ``data_dir`` explicitly, which always wins. This is what gives every
+    zero-config project its own index.sqlite/embed-cache/dense-cache
+    instead of sharing one global store keyed by a (possibly ambiguous)
+    directory basename.
     """
     if config.repositories or not config.index_cwd:
         return config
-    return config.model_copy(update={"repositories": [default_repository_for_cwd(cwd)]})
+    repo = default_repository_for_cwd(cwd)
+    updates: dict[str, object] = {"repositories": [repo]}
+    if "data_dir" not in config.model_fields_set:
+        updates["data_dir"] = config.project_data_root.expanduser() / repo.name
+    return config.model_copy(update=updates)
