@@ -12,8 +12,8 @@
       "groupName": "github-actions"
     },
     {
-      "matchUpdateTypes": ["patch"],
-      "groupName": "patch updates (automerged)",
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "patch/minor updates (automerged)",
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true

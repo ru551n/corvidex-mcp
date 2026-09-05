@@ -1206,7 +1206,11 @@ async def test_local_submodule_indexing_lifecycle(
 def _fake_binary(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    binary = bin_dir / "vhdl_ls"
+    # shutil.which() (used by resolve_binary) requires a PATHEXT-recognized
+    # extension for a full path to be found on Windows, mirroring real
+    # release binaries (vhdl_ls.exe), which an extensionless file is not.
+    name = "vhdl_ls.exe" if os.name == "nt" else "vhdl_ls"
+    binary = bin_dir / name
     binary.write_text("#!/bin/sh\necho fake 0.0.0\n")
     binary.chmod(0o755)
     return binary
