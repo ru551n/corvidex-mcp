@@ -265,6 +265,32 @@ async def test_repository_status_analyzer_available(env, tmp_path: Path) -> None
     assert str(veridian) in text
 
 
+async def test_analyzer_statuses_cached_across_calls(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probing the HDL analyzers spawns a subprocess per analyzer, so it
+    must happen once per process, not on every repository_status() call
+    (or selfcheck)."""
+    import corvidex_mcp.server as server_mod
+
+    app, mcp, _up = env
+    calls = 0
+    real_build = server_mod.build_analyzer_statuses
+
+    def counting_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(server_mod, "build_analyzer_statuses", counting_build)
+    await mcp.call_tool("repository_status", {})
+    await mcp.call_tool("repository_status", {})
+    assert calls == 1
+    # selfcheck() reuses the same cached probe, not a fresh one.
+    app.selfcheck()
+    assert calls == 1
+
+
 async def test_indexing_note_never_synced_repo(env) -> None:
     # "broken" (ref = no-such-branch) never completes a sync in the fixture.
     app, _mcp, _up = env

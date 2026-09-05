@@ -53,6 +53,12 @@ STANDARDS_EXTENSIONS: frozenset[str] = frozenset(
 )
 
 
+def _expanduser(value: Path) -> Path:
+    """Expand ``~`` in a path field (shared by the path field validators
+    below; ``None`` is handled by the caller, not here)."""
+    return Path(value).expanduser()
+
+
 class ConfigError(RuntimeError):
     """Raised when the configuration cannot be loaded or validated."""
 
@@ -384,7 +390,7 @@ class RepositoryConfig(BaseModel):
             return None
         if not str(value).strip():
             raise ValueError("repository path must not be empty")
-        return Path(value).expanduser()
+        return _expanduser(value)
 
     @field_validator("ref")
     @classmethod
@@ -442,11 +448,6 @@ class RepositoryConfig(BaseModel):
         """True for a local repository (``path``; no cloning): a working
         Git repository or a plain filesystem directory."""
         return self.path is not None
-
-    @property
-    def is_filesystem(self) -> bool:
-        """True for a plain-directory repository (no Git involved)."""
-        return self.filesystem
 
     @property
     def is_pinned_sha(self) -> bool:
@@ -568,19 +569,19 @@ class AppConfig(BaseModel):
     @field_validator("data_dir")
     @classmethod
     def _expand_data_dir(cls, value: Path) -> Path:
-        return Path(value).expanduser()
+        return _expanduser(value)
 
     @field_validator("project_data_root")
     @classmethod
     def _expand_project_data_root(cls, value: Path) -> Path:
-        return Path(value).expanduser()
+        return _expanduser(value)
 
     @field_validator("vhdl_ls_libraries_dir")
     @classmethod
     def _expand_vhdl_ls_libraries_dir(cls, value: Path | None) -> Path | None:
         if value is None:
             return None
-        return Path(value).expanduser()
+        return _expanduser(value)
 
     @field_validator("coding_standards")
     @classmethod
@@ -589,7 +590,7 @@ class AppConfig(BaseModel):
             return None
         if not str(value).strip():
             raise ValueError("coding_standards must not be empty")
-        path = Path(value).expanduser()
+        path = _expanduser(value)
         if path.suffix.lower() not in STANDARDS_EXTENSIONS:
             raise ValueError(
                 "coding_standards must be a txt, md, rst, pdf, or docx "
@@ -653,6 +654,16 @@ class AppConfig(BaseModel):
             f"unknown repository {name!r}; configured: "
             f"{', '.join(r.name for r in self.repositories) or '(none)'}"
         )
+
+    def configured_repository_names(self) -> tuple[str, ...]:
+        """Every valid repository name: the configured ``[[repositories]]``
+        plus the coding-standards pseudo-repository when a
+        ``coding_standards`` file is configured (order: repositories in
+        configured order, coding-standards last)."""
+        names = [repo.name for repo in self.repositories]
+        if self.coding_standards is not None:
+            names.append(CODING_STANDARDS_REPO)
+        return tuple(names)
 
 
 def default_config_path() -> Path:

@@ -31,11 +31,11 @@ import logging
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .config import AppConfig
-from .lsp.analyzers import build_analyzer_statuses
+from .lsp.analyzers import AnalyzerStatus
 from .models import INDEX_SCHEMA_VERSION
 from .vector_store import ALL_COLLECTIONS, VectorStore
 
@@ -200,11 +200,12 @@ def check_coding_standards(app: VhdlRagApp) -> ComponentStatus | None:
     return ComponentStatus("coding-standards", False, True, f"file not found: {path}")
 
 
-def check_analyzers(config: AppConfig) -> list[ComponentStatus]:
+def check_analyzers(analyzers: Iterable[AnalyzerStatus]) -> list[ComponentStatus]:
+    """One component per already-probed analyzer status — probing
+    spawns a subprocess, so ``run_self_check`` reuses the app's cached
+    ``analyzer_statuses()`` rather than probing again here."""
     statuses: list[ComponentStatus] = []
-    for analyzer in build_analyzer_statuses(
-        config.vhdl_ls_path, config.veridian_path
-    ).values():
+    for analyzer in analyzers:
         if analyzer.available:
             detail = f"{analyzer.mode}, {analyzer.version}"
             if analyzer.path:
@@ -232,7 +233,7 @@ def run_self_check(app: VhdlRagApp) -> SelfCheckResult:
             check_sqlite_vec(),
             check_schema(app.store),
             *check_models(app),
-            *check_analyzers(app.config),
+            *check_analyzers(app.analyzer_statuses().values()),
             *((standards,) if standards is not None else ()),
         )
     )

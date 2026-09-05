@@ -109,7 +109,7 @@ class IndexPipeline:
         plan, untracked_fps = self._refine_local_plan(cfg, plan)
         # None for filesystem repositories (no gitlinks); otherwise the
         # plan carries the current per-gitlink SHA map (possibly empty).
-        submodules = None if cfg.is_filesystem else plan.submodules
+        submodules = None if cfg.filesystem else plan.submodules
         if plan.empty:
             if last_commit is not None and plan.commit != last_commit:
                 # HEAD/ref moved without a content change (an amend or
@@ -205,7 +205,7 @@ class IndexPipeline:
         state = self._states.get(cfg.name)
         stored = dict(state.untracked_indexed)
         if (
-            cfg.is_filesystem
+            cfg.filesystem
             and state.indexed_commit is not None
             and plan.fingerprint == state.local_fingerprint
         ):

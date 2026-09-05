@@ -233,7 +233,7 @@ class GitManager:
         non-mutating, so it tolerates the user's in-progress work.
         """
         assert cfg.path is not None
-        if cfg.is_filesystem:
+        if cfg.filesystem:
             fingerprint, _ = self._filesystem_fingerprint(cfg.path)
             return fingerprint
         repo_dir = cfg.path
@@ -530,7 +530,7 @@ class GitManager:
         ``filesystem``) are indexed in place as plain files with no Git
         at all.
         """
-        if cfg.is_filesystem:
+        if cfg.filesystem:
             return await self._sync_filesystem(cfg, last_commit)
         if cfg.is_local:
             return await self._sync_local(cfg, last_commit, last_submodules)

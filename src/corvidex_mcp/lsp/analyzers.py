@@ -1,4 +1,4 @@
-"""HDL analyzer discovery, status, and client factory.
+"""HDL analyzer discovery and status.
 
 The two HDL language servers are **optional external dependencies**:
 vhdl_ls (VHDL) and Veridian (Verilog/SystemVerilog). Neither is
@@ -16,11 +16,8 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
 
-from ..config import RepositoryConfig
-from .client import LspClient, VhdlLsp, default_libraries_dir, server_version
-from .veridian import VeridianLsp
+from .client import server_version
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +45,17 @@ class AnalyzerStatus:
     @classmethod
     def unavailable(cls, name: str, error: str) -> AnalyzerStatus:
         return cls(name, False, None, None, MODE_FALLBACK, error)
+
+    def describe(self) -> str:
+        """One-line human-readable summary (mode/version/path when
+        available, or the reason otherwise) — shared by the startup
+        self-check and the repository_status tool."""
+        if self.available:
+            text = f"{self.mode}, {self.version}"
+            if self.path:
+                text += f" ({self.path})"
+            return text
+        return f"{self.mode} — {self.error}"
 
 
 def resolve_binary(
@@ -98,28 +106,3 @@ def build_analyzer_statuses(
         "vhdl_ls": analyzer_status("vhdl_ls", vhdl_ls_path),
         "veridian": analyzer_status("veridian", veridian_path),
     }
-
-
-def build_client(
-    status: AnalyzerStatus,
-    repo_cfg: RepositoryConfig,
-    workspace: Path,
-) -> LspClient | None:
-    """The LSP client for one analyzer, or None when it is unavailable.
-
-    Wires the repository's per-analyzer config hooks (``vhdl_ls_hook``
-    / ``veridian_hook``) and, for vhdl_ls, the ``vhdl_libraries``
-    directory shipped next to the binary.
-    """
-    if not status.available or not status.path:
-        return None
-    if status.name == "vhdl_ls":
-        return VhdlLsp(
-            status.path,
-            workspace,
-            libraries_dir=default_libraries_dir(status.path),
-            vhdl_ls_hook=repo_cfg.vhdl_ls_hook,
-        )
-    if status.name == "veridian":
-        return VeridianLsp(status.path, workspace, config_hook=repo_cfg.veridian_hook)
-    raise ValueError(f"unknown analyzer: {status.name!r}")
