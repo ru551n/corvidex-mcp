@@ -291,7 +291,7 @@ def test_read_file_and_traversal(manager: GitManager, remote: Path):
     assert manager.read_file(cfg, "rtl/fifo.vhd") == "entity fifo is end;\n"
     with pytest.raises(GitError, match="invalid repository file path"):
         manager.read_file(cfg, "../etc/passwd")
-    with pytest.raises(GitError, match="not found"):
+    with pytest.raises(GitError, match=r"not found.*repository_files"):
         manager.read_file(cfg, "nope.vhd")
 
 

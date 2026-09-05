@@ -7,10 +7,11 @@ code (C/C++, Python, ...) — all cross-referenced, all with exact
 source attribution.
 
 Runs as an MCP server over stdio (installed from this Git
-repository with `uvx`, see [Installation](#installation)). No
-external services required: the vector store (SQLite + the
-sqlite-vec extension) runs embedded and the embedding models run
-locally (ONNX via FastEmbed).
+repository with `uvx`, see [Quick start](#quick-start)). No external
+services required: the vector store (SQLite + the sqlite-vec
+extension) runs embedded and the embedding models run locally (ONNX
+via FastEmbed). **Zero configuration required**: point your MCP client
+at it and it indexes the directory you started your agent in.
 
 ## Intended use
 
@@ -100,12 +101,8 @@ is, not a stale snapshot.
   (or a line range) from the synced working tree.
 - **Incremental, self-maintaining index.** Repositories are synced
   from Git (clone/fetch/diff): only changed files are re-chunked and
-  re-embedded. A background task syncs every `sync_interval` seconds;
-  the tools can force a sync or a full reindex at any time. Local
-  working repositories get a fast change poller (`local_sync_interval`,
-  default 10 s) so in-progress work — commits, tracked edits, untracked
-  file add/remove — lands in the index within about one poll, read-only
-  and never interfering with the user's checkout.
+  re-embedded. A background task keeps everything up to date; the
+  tools can force a sync or a full reindex at any time.
 - **Graceful degradation.** Failures are contained per repository and
   recorded in state; a broken repository never blocks the others or
   the server. A missing language-server binary degrades that analyzer
@@ -113,335 +110,15 @@ is, not a stale snapshot.
 - **Stdout is protocol-clean.** All logging goes to stderr and a
   rotating log file, so the server is safe to run from any MCP host.
 
-## Installation
+## Quick start
 
-Requirements:
+Requirements: [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥
+3.12, and Git. `vhdl_ls`/Veridian are optional (VHDL/Verilog files
+fall back to structural parsing without them). See
+[docs/configuration.md](docs/configuration.md#requirements) for the
+full platform matrix and air-gapped installs.
 
-- [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥ 3.12
-- Git (with your normal credentials/SSH setup for private repos)
-- Supported platforms: Linux with glibc ≥ 2.34 (RHEL 9/10 and
-  derivatives such as AlmaLinux 9.6+, Ubuntu 24.04, Debian 12;
-  x86_64 and arm64), Windows, and macOS 14+ (Apple Silicon and
-  Intel). CI verifies Ubuntu and Windows on Python 3.12–3.14,
-  RHEL 9/10 on all three, and macOS on CPython 3.14; arm64 Linux
-  is not CI-verified (no hosted runners). The vector store also
-  requires an interpreter whose stdlib SQLite supports loadable
-  extensions (sqlite-vec): some uv standalone builds (e.g. macOS
-  3.12/3.13) lack it — the startup self-check reports this, and
-  the fix is `uv python install 3.14`.
-- `vhdl_ls` (only needed for repositories that contain VHDL): install
-  a release from <https://vhdl-lang.org/> so `vhdl_ls` is on your
-  `PATH`, or point `vhdl_ls_path` at the binary. The
-  `vhdl_libraries` directory shipped next to the binary is
-  auto-detected. Per repository, `vhdl_ls_hook` may generate the
-  `vhdl_ls.toml` workspace config (below); otherwise the server writes
-  a built-in default.
-- Veridian (only needed for repositories that contain Verilog or
-  SystemVerilog): install it so `veridian` is on your `PATH`, or point
-  `veridian_path` at the binary. Per repository, `veridian_hook` may
-  generate the `veridian.yaml` workspace config (below); otherwise the
-  server writes a built-in default that declares the repository root as
-  the workdir and include/source roots, so `` `include ``/`` `define ``
-  resolve in-tree.
-- Both binaries are **optional**: without one, its files are indexed
-  with a structural/generic fallback instead.
-
-The package is installed from this Git repository (it is not on
-PyPI):
-
-```console
-$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
-```
-
-`uvx` supports branch/tag pins in the same syntax:
-`git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git@v1.0`. The server
-accepts `--help`:
-
-```console
-$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp --help
-```
-
-On first start the server creates its data directory, loads the
-embedding model (jina v2 `small-en`, ~0.1 GB), and performs an initial
-sync of all configured repositories. By default the model is downloaded
-once and cached; it can alternatively ship inside the installed package
-so no runtime download is needed (air-gapped installs — see
-`tools/bundle_model.py`).
-
-### Air-gapped installation
-
-For hosts without network access, install from a wheel plus a
-dependency wheelhouse; after installation the server never touches
-the network. Everything is built on an internet-connected machine:
-
-1. **Bundle the model into the package** (the ONNX weights are
-   gitignored, so a plain git checkout does not contain them):
-
-   ```console
-   $ uv run --no-sync python tools/bundle_model.py
-   # offline alternative, from an existing snapshot directory:
-   $ uv run --no-sync python tools/bundle_model.py --from /path/to/snapshot
-   ```
-
-2. **Build the package wheel** (the model ships inside it, ~75 MB):
-
-   ```console
-   $ uv build --wheel --out-dir dist
-   ```
-
-3. **Build the dependency wheelhouse** (the third-party dependencies
-   stay external; the wheel only carries the model data). Portable
-   form, targeting the air-gapped host's platform:
-
-   ```console
-   $ uv export --no-hashes --no-emit-project --no-dev > requirements.txt
-   $ pip download -r requirements.txt --dest wheelhouse \
-       --only-binary=:all: --python-version 312 \
-       --platform manylinux2014_x86_64 --platform any
-   ```
-
-   (Omit the `--platform`/`--python-version` flags when building on a
-   machine with the same OS, architecture, and Python version as the
-   target.)
-
-4. **Transfer** `dist/vhdl_rag_mcp-*.whl` and the `wheelhouse/`
-   directory to the air-gapped host.
-
-5. **Install offline** (Python ≥ 3.12 with `pip`, or uv):
-
-   ```console
-   $ python3.12 -m venv .venv
-   $ .venv/bin/pip install --no-index --find-links wheelhouse \
-       dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
-   # with uv: uv venv .venv && uv pip install --python .venv/bin/python \
-   #     --no-index --find-links wheelhouse dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
-   ```
-
-6. **Register the MCP client** with the absolute path to the installed
-   console script (no `uvx`, no network):
-
-   ```console
-   $ claude mcp add vhdl-rag-mcp -- /path/to/.venv/bin/vhdl-rag-mcp
-   ```
-
-On startup the self-check logs that the embedding model is loaded from
-the bundled assets; `repository_status` reports per-collection model
-state. If a wheel was built without the model assets (plain git
-checkout), the fallback is to pre-provision the fastembed cache: copy
-an existing `embed-cache` directory (from an online machine) into
-`<data_dir>/embed-cache` before the first start.
-
-## Configuration
-
-Config file: `~/.config/vhdl-rag/config.toml` (created with a
-commented template on first run if absent).
-
-```toml
-data_dir = "~/.local/share/vhdl-rag"   # all state lives here
-sync_interval = 300                    # seconds between periodic syncs
-local_sync_interval = 10               # fast poller for local working
-                                       # repositories (0 disables; remote
-                                       # repositories ignore it)
-vhdl_ls_path = "vhdl_ls"               # binary on PATH or full path (VHDL)
-veridian_path = "veridian"             # binary on PATH or full path (Verilog/SV)
-log_level = "INFO"
-# coding_standards = "~/standards/standards.md"  # the coding-standards file
-#                                                # (txt, md, rst, pdf, docx);
-#                                                # indexed as the
-#                                                # 'coding-standards'
-#                                                # pseudo-repository
-# coding_standards_priority = 10           # retrieval priority of that file
-                                           # (bounded post-RRF bonus; 10 ranks
-                                           # it ahead of equally relevant repo
-                                           # chunks, relevance still dominates)
-
-# [embeddings]
-# dense_max_tokens = 1024              # passages are truncated to this many
-#                                      # tokens before dense embedding (model
-#                                      # context is 8192; attention memory is
-#                                      # quadratic in length)
-# dense_threads = 4                    # CPU threads for dense ONNX inference
-# dense_enable_cpu_mem_arena = false   # ONNX CPU memory arena (fast but
-#                                      # retains peak buffers, ~+2.5 GB;
-#                                      # false = lower RAM, ~35% slower)
-# dense_batch_size = 1                 # passages per ONNX inference call
-#                                      # (1 = strict per-passage memory
-#                                      # bound; higher trades memory for speed)
-# index_max_tokens = 512               # indexed passages are truncated to
-#                                      # this many tokens (queries are
-#                                      # unaffected; must be <= dense_max_tokens)
-# indexing_workers = 1                 # worker processes for data-parallel
-#                                      # dense embedding (1 = single process;
-#                                      # each worker loads its own model copy)
-# hdl_model = "jinaai/jina-embeddings-v2-small-en"  # any fastembed
-# docs_model = "jinaai/jina-embeddings-v2-small-en"  # TextEmbedding name;
-# code_model = "jinaai/jina-embeddings-v2-small-en"  # default: small-en (512 dims)
-
-[[repositories]]
-name = "company-standards"             # unique, [A-Za-z0-9._-]
-url = "git@github.com:company/vhdl-standards.git"
-ref = "main"                           # branch (tracked on every sync),
-                                       # tag, or commit SHA (pinned)
-# domains = ["hdl", "docs", "code"]     # which domains to index (default: all)
-# exclude = ["sim", "build/*", "*.log"]  # glob path excludes ('*' crosses '/');
-                                        # wildcard-free patterns exclude the subtree
-# vhdl_ls_hook = "make vhdl-ls-config"  # command run at the repo root to
-                                        # generate vhdl_ls.toml when missing
-# veridian_hook = "make veridian-config"  # command to generate veridian.yaml
-
-  # ... or index your own active checkout instead of a remote:
-[[repositories]]
-name = "current-project"
-path = "~/work/current-project"        # local working repository
-# index_untracked = false             # skip untracked files (default: index them)
-
-  # ... or index a plain directory of files with no Git at all:
-[[repositories]]
-name = "local-ip"
-path = "~/work/local-ip"               # plain directory, no Git
-filesystem = true
-  ```
-
-Notes:
-
-- **Config file selection**: the default location is
-  `~/.config/vhdl-rag/config.toml` (a commented template is written
-  there on first run). Select another file with the `VHDL_RAG_MCP_CONFIG`
-  environment variable or the `--config PATH` flag. The top-level scalar
-  options also have command-line overrides (`--data-dir`,
-  `--sync-interval`, `--local-sync-interval`, `--vhdl-ls-path`,
-  `--veridian-path`, `--log-level`); the command line wins.
- - **`url` or `path`** (exactly one): `url` is a remote Git repository,
-    cloned and kept in sync by the server under `data_dir/repos`.
-    `path` is a **local working repository** — your own checkout, indexed
-    in place and never modified (no clone, fetch, or checkout by the
-    server). `path` with `filesystem = true` is a **filesystem
-    repository** — a plain directory of files with no Git involved at
-    all: every file below `path` is walked and indexed in place (hidden
-    files/directories and symlinks are skipped, so an embedded `.git`
-    directory never enters the index). Incremental sync re-walks the
-    directory (paths + mtimes + sizes) and fingerprints file content, so
-    edits, additions, and deletions are picked up on the next sync; the
-    fast local poller watches these repositories as well. `ref` and the
-    Git hooks do not apply. Local repositories are additionally watched by a fast
-  poller: every `local_sync_interval` seconds (default 10, 0 disables
-  it) the server computes a read-only fingerprint of the working tree
-  (HEAD + `git status` porcelain) and syncs the repository when it
-  changed — so commits, tracked edits, and untracked file add/remove
-  show up in the index within about one poll. Untracked file content
-  is fingerprinted at sync time: unchanged files are not re-chunked,
-  edited files are re-chunked, and deleted untracked files are dropped
-  from the index.
-- **`coding_standards`**: one file with the organization's coding
-  standards (txt, md, rst, pdf, or docx). It is indexed as the
-  `coding-standards` pseudo-repository in the docs collection with a
-  high retrieval priority (`coding_standards_priority`, default 10):
-  standards chunks rank ahead of equally relevant repository chunks
-  (bounded post-RRF bonus — relevance still dominates). The file's
-  content hash is its "commit", so edits are picked up on the next
-  sync. Search it with `repository="coding-standards"`.
-- **`ref`**: a branch name is fetched and tracked on every sync. A tag
-  or commit SHA pins the repository (a full 40-hex SHA skips the
-  network fetch entirely). `ref` is ignored for local working
-  repositories.
-- **`[embeddings]`**: dense-inference bounds (memory safety and speed).
-  `dense_max_tokens` (default 1024, maximum 8192) truncates a passage
-  before dense embedding; `dense_threads` (default 4) caps the ONNX
-Runtime thread pool. ONNX Runtime arenas retain peak tensor sizes and
-    attention work is quadratic in sequence length, so without these
-    bounds a single long chunk can make one embedding batch reserve tens
-    of GB. `dense_enable_cpu_mem_arena` (default false) additionally
-    disables the ONNX CPU memory arena: buffers are released after each
-    inference, halving peak RAM (measured 5.4 → 2.9 GB) at a ~35%
-    indexing-time cost — set true when indexing speed matters more and
-    RAM is plentiful. `dense_batch_size` (default 1) limits passages
-    per ONNX inference call — at 1, peak inference memory is bounded by
-    a single truncated passage regardless of batch content (raise it
-    only when throughput matters more than memory). Indexing itself
-    embeds and upserts in bounded streams (256 chunks per round), so
-    resident passage/vector buffers never grow with repository size.
-    `index_max_tokens` (default 512) truncates
-    *indexed* passages before embedding (queries are unaffected — they
-    are short): on the measured corpus quality is unchanged at 512 while
-    indexing is faster and lighter. `indexing_workers` (default 1) runs
-    data-parallel embedding with N worker processes during indexing
-    (each loads its own model copy, ~0.1 GB for the default); quality
-    is identical. `hdl_model`/`docs_model`/`code_model` (default: jina
-    v2 small-en, 512 dims — measured equal-or-better retrieval quality
-    at ~3x lower indexing RAM) select the dense model per collection;
-    any fastembed `TextEmbedding` model name works. Switching to a
-    model with a different vector size requires a reindex (delete the
-    collection or `data_dir`). Computed dense vectors are cached
-    content-addressed under `data_dir/dense-cache`, so reindexing, branch
-    flips, and duplicated content skip re-embedding.
-- **`vhdl_ls_hook`**: shell command run at the repository root that
-  generates `vhdl_ls.toml` when the file is missing (before the
-  `vhdl_ls` session for that repository). When no hook is set, the hook
-  fails, or it leaves no file behind, the server writes a built-in
-  default (a `defaultlib` glob for all `.vhd`/`.vhdl` files plus the
-  standard libraries shipped with `vhdl_ls`) and removes it after the
-  session; files a hook creates are owned by the hook and are never
-  removed by the server. For local working repositories the hook runs
-  inside your own checkout.
-- **Local working repositories** index the working tree: HEAD plus
-   uncommitted changes (staged and unstaged) and untracked files
-   (honoring `.gitignore`); chunks are attributed to the current HEAD
-   commit. Untracked indexing can be switched off per repository with
-   `index_untracked = false`; untracked files that were indexed before
-   the flag was turned off are dropped from the index on the next sync.
- - **Submodules are indexed recursively** (nested up to three levels
-   deep). A submodule's files enter the index under their gitlink path
-   as prefix, e.g. `ip/rtl/a.vhd`, so they search alongside the top
-   repository's own files. For remote repositories the server keeps the
-   submodules checked out under `data_dir/repos` (best-effort
-   `git submodule update --init --recursive`; a submodule that cannot be
-   fetched is skipped with a warning, the rest still syncs): a new
-   submodule is indexed wholesale, a pointer move re-chunks the whole
-   submodule and drops the files gone at the new SHA, and a removed
-   submodule purges its entire prefix. For local working repositories
-   the submodule's working tree is indexed in place: a moved pointer or
-   a moved submodule HEAD re-chunks the submodule wholesale, otherwise
-   only its own tracked changes and untracked files are diffed inside
-   it (same `index_untracked` flag applies); a deinitialized or removed
-   submodule purges its prefix.
-- **Per-repository domains/excludes**: index only what a repository
-  should contribute — e.g. `domains = ["hdl"]` for a pure IP
-  repository (`"vhdl"` is accepted as a legacy alias for `"hdl"`),
-  `exclude = ["sim"]` to skip simulation-only files.
-- **Changing embedding models** changes the dense vector dimension;
-  the server fails loudly with an actionable message instead of
-  corrupting the index (delete the collection or `data_dir` and
-  reindex).
-
-## Usage
-
-### Run the server
-
-```console
-$ uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
-```
-
-It serves MCP over stdio until the host closes the connection; a
-background task syncs all repositories every `sync_interval` seconds,
-and local working repositories are additionally change-checked every
-`local_sync_interval` seconds by a fast, read-only poller.
-A single-instance lock (`data_dir/server.lock`) prevents two servers
-from sharing one data directory.
-
-At startup the server runs a self-check of its runtime components —
-`git`, the SQLite runtime (including FTS5), the `sqlite-vec`
-extension, the index schema version, the per-collection embedding
-models, and the HDL analyzers — and logs a one-line summary
-(`startup self-check: ok` or a list of what is degraded). Missing
-*required* components (git, FTS5, sqlite-vec) abort startup with an
-actionable error; missing *optional* components degrade gracefully:
-without `vhdl_ls`/Veridian the affected files fall back to structural
-parsing, and without an embedding model that collection's embedding
-search and indexing are unavailable (lexical search still works) until
-the model is provisioned. `repository_status` reports the current
-component state (analyzers + embedding models).
-
-### Register with an MCP client
+Register the server with your MCP client — no config file needed.
 
 Claude Code:
 
@@ -457,6 +134,25 @@ version's docs):
 command = "uvx"
 args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-mcp"]
 ```
+
+That's it: **the server indexes the directory it is started in.**
+Since your MCP client normally spawns it with your project as the
+working directory, starting your agent inside your repository is
+enough — a Git checkout is indexed as its working tree (HEAD plus
+uncommitted and untracked changes), a plain directory as a bag of
+files. Confirm what got indexed with the `repository_status` tool.
+
+Don't want that? Disable it with `--no-index-cwd` on the command line,
+or `index_cwd = false` in the config file, and run with an empty index
+until you configure `[[repositories]]` explicitly. Need more than the
+current directory — multiple repositories, a remote Git URL, a
+coding-standards file, tuned embedding settings? See
+**[docs/configuration.md](docs/configuration.md)**; add a config file
+at `~/.config/vhdl-rag/config.toml` (or point `--config`/
+`VHDL_RAG_MCP_CONFIG` elsewhere) and any `[[repositories]]` you
+configure there take over from the zero-config default.
+
+## Usage
 
 ### Tools
 
@@ -478,14 +174,9 @@ the given identifiers. `search_hdl`/`search_knowledge` additionally
 accept `language` (e.g. `"verilog"`) to restrict results by language.
 Every search tool also takes `mode`: `hybrid` (default; semantic +
 full-text, RRF-fused), `semantic` (embedding similarity only), or
-`lexical` (full-text match only; no embedding involved). Each
-repository's `priority` (config, default 1) applies a bounded
-post-RRF bonus so higher-priority repositories rank slightly ahead of
-equally relevant chunks elsewhere without ever crossing relevance
-tiers.
-Results are rendered as markdown with source attribution, score,
-language, and referenced identifiers; HDL content is fenced by
-language.
+`lexical` (full-text match only; no embedding involved). Results are
+rendered as markdown with source attribution, score, language, and
+referenced identifiers; HDL content is fenced by language.
 
 Example agent flow:
 
@@ -497,22 +188,29 @@ Example agent flow:
 4. `get_source("company-standards", "rtl/reset_ctrl.vhd", 12, 40)` →
    the exact lines to copy.
 
-## Operations
+### Still indexing?
 
-- **Data directory** (`data_dir`): the SQLite index (`index.sqlite`), the per-repo
-  Git working trees (`<name>/`), sync state
-  (`state/repositories.json`), the log file (`logs/vhdl-rag-mcp.log`),
-  the model cache (`embed-cache`), the dense-vector cache
-  (`dense-cache`), and the lock file. Deleting it resets the index.
-- **State & retries**: a repository's `indexed_commit` advances only
-  after its index update fully succeeded; a failed sync keeps the
-  previous commit and the next sync retries the same diff.
-  `last_sync_error` is visible via `repository_status`.
-- **Removing a repository** from the config: on the next start the
-  server detects it in the state file and automatically drops all of
-  its chunks and state.
-- **Logs**: `stderr` + `logs/vhdl-rag-mcp.log` (rotating, 3×5 MB).
-  `log_level = "DEBUG"` for LSP/git/embedding detail.
+The server starts serving immediately; it does not wait for the
+initial sync to finish (that can take a while for a large repository —
+files need to be parsed, chunked, and embedded). While a repository
+hasn't completed its first sync yet, or is being (re)synced right now,
+search results start with a line like:
+
+```
+Note: currently syncing: my-repo. Results may be thin or incomplete; try again shortly.
+```
+
+Treat it as a cue to wait a few seconds and retry, not as "nothing
+exists". Use `repository_status` to check indexing progress (and
+whether a sync is failing outright rather than just running).
+
+## Configuration
+
+Zero configuration is required (see [Quick start](#quick-start)). Once
+you need more — multiple repositories, a remote Git URL, a
+coding-standards file, embedding-model tuning, air-gapped installs —
+see **[docs/configuration.md](docs/configuration.md)** for the full
+config file reference.
 
 ## Development
 

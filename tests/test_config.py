@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,8 @@ from vhdl_rag_mcp.config import (
     load_config,
 )
 from vhdl_rag_mcp.models import CollectionName
+
+_DEFAULT_DENSE_THREADS = max(1, (os.cpu_count() or 8) // 2)
 
 FULL_CONFIG = """\
 data_dir = "~/vhdl-rag-data"
@@ -64,16 +67,22 @@ path = "~/work/current-project"
 
 
 def test_defaults_when_file_missing(tmp_path: Path) -> None:
-    cfg = load_config(tmp_path / "config.toml", write_default=False)
+    cfg = load_config(
+        tmp_path / "config.toml", write_default=False, cwd=tmp_path / "workdir"
+    )
     assert cfg.data_dir == Path("~/.local/share/vhdl-rag")
     assert cfg.sync_interval == 300
     assert cfg.local_sync_interval == 10
     assert cfg.vhdl_ls_path == "vhdl_ls"
     assert cfg.vhdl_ls_libraries_dir is None
     assert cfg.log_level == "INFO"
-    assert cfg.repositories == []
+    assert cfg.index_cwd is True
+    # No [[repositories]] configured: the cwd is indexed automatically.
+    assert [r.name for r in cfg.repositories] == ["workdir"]
+    assert cfg.repositories[0].path == (tmp_path / "workdir").resolve()
+    assert cfg.repositories[0].filesystem is True  # no .git there
     assert cfg.embeddings.dense_max_tokens == 1024
-    assert cfg.embeddings.dense_threads == 4
+    assert cfg.embeddings.dense_threads == _DEFAULT_DENSE_THREADS
     assert cfg.embeddings.dense_enable_cpu_mem_arena is False
     assert cfg.embeddings.index_max_tokens == 512
     assert cfg.embeddings.indexing_workers == 1
@@ -84,9 +93,53 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
 
 
 def test_default_template_written(tmp_path: Path) -> None:
-    cfg = load_config(tmp_path / "config.toml")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    cfg = load_config(tmp_path / "config.toml", cwd=workdir)
     assert (tmp_path / "config.toml").exists()
-    assert cfg.repositories == []  # template repositories are comments
+    # Template repositories are comments; the cwd is still indexed by default.
+    assert [r.name for r in cfg.repositories] == ["workdir"]
+
+
+def test_index_cwd_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("index_cwd = false\n", encoding="utf-8")
+    cfg = load_config(path, cwd=tmp_path)
+    assert cfg.repositories == []
+
+
+def test_configured_repositories_suppress_default(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[[repositories]]\nname = "explicit"\nurl = "git@x:y.git"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path, cwd=tmp_path)
+    assert [r.name for r in cfg.repositories] == ["explicit"]
+
+
+def test_default_repository_for_cwd_git(tmp_path: Path) -> None:
+    from vhdl_rag_mcp.config import default_repository_for_cwd
+
+    root = tmp_path / "my-repo"
+    (root / ".git").mkdir(parents=True)
+    repo = default_repository_for_cwd(root)
+    assert repo.name == "my-repo"
+    assert repo.path == root.resolve()
+    assert repo.filesystem is False
+
+
+def test_default_repository_for_cwd_sanitizes_name(tmp_path: Path) -> None:
+    from vhdl_rag_mcp.config import default_repository_for_cwd
+
+    root = tmp_path / "my project!!"
+    root.mkdir()
+    repo = default_repository_for_cwd(root)
+    assert repo.name == "my-project"
+
+    dotdir = tmp_path / ".hidden"
+    dotdir.mkdir()
+    assert default_repository_for_cwd(dotdir).name == "workspace"
 
 
 def test_full_config_parsing(tmp_path: Path) -> None:
