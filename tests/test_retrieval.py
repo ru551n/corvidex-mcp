@@ -731,11 +731,23 @@ async def test_search_knowledge_reranks_exactly_once(env) -> None:
     assert {r.result_type for r in results} >= {"hdl"}
 
 
-async def test_search_knowledge_embeds_once_per_shared_model(env) -> None:
-    """The default config uses the same dense model for all three
-    collections, so the (single, expanded) query embeds exactly once
-    for the whole call instead of once per collection."""
-    _store, retrieval = env
+async def test_search_knowledge_embeds_once_per_shared_model(
+    tmp_path: Path,
+) -> None:
+    """When all three collections are configured with the same dense
+    model, the (single, expanded) query embeds exactly once for the
+    whole call instead of once per collection. Explicitly configured
+    here rather than relying on the ambient default (hdl/docs/code
+    need not share a model by default; see
+    ``test_search_knowledge_embeds_once_per_distinct_model``)."""
+    store, retrieval = await _hdl_docs_code_env(
+        tmp_path,
+        EmbeddingsConfig(
+            hdl_model="fake/model-a",
+            docs_model="fake/model-a",
+            code_model="fake/model-a",
+        ),
+    )
     calls: list[CollectionName] = []
     original = retrieval._providers.embed_query
 
@@ -746,6 +758,7 @@ async def test_search_knowledge_embeds_once_per_shared_model(env) -> None:
     retrieval._providers.embed_query = _counting  # type: ignore[method-assign]
     retrieval.search_knowledge("fifo")
     assert len(calls) == 1
+    store.close()
 
 
 async def test_search_knowledge_embeds_once_per_distinct_model(
