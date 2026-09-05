@@ -142,8 +142,8 @@ async def env(tmp_path: Path):
 
 
 def tool_text(result) -> str:
-    """call_tool returns (content blocks, structured output)."""
-    blocks, _structured = result
+    """call_tool returns a CallToolResult (mcp v2); .content holds the blocks."""
+    blocks = result.content
     assert blocks
     return blocks[0].text
 

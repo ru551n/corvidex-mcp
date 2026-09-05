@@ -1,4 +1,4 @@
-"""FastMCP server: VHDL RAG search over configured Git repositories.
+"""MCP server: VHDL RAG search over configured Git repositories.
 
 Exposes ten tools to coding agents:
 
@@ -50,7 +50,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - POSIX
     msvcrt = None  # type: ignore[assignment]
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
@@ -107,8 +107,8 @@ INSTRUCTIONS = (
     "repository='coding-standards' to restrict to it."
 )
 
-_READ_ONLY = ToolAnnotations(readOnlyHint=True)
-_READ_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+_READ_ONLY = ToolAnnotations(read_only_hint=True)
+_READ_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
 
 DEFAULT_LIMIT = 8
 KNOWLEDGE_LIMIT = 10
@@ -436,9 +436,9 @@ def _handle_errors[T: Callable[..., Awaitable[str]]](func: T) -> T:
     return cast(T, wrapper)
 
 
-def create_mcp(app: VhdlRagApp) -> FastMCP:
-    """Create the FastMCP instance with all tools bound to ``app``."""
-    mcp = FastMCP(MCP_NAME, instructions=INSTRUCTIONS)
+def create_mcp(app: VhdlRagApp) -> MCPServer:
+    """Create the MCPServer instance with all tools bound to ``app``."""
+    mcp = MCPServer(MCP_NAME, instructions=INSTRUCTIONS)
     retrieval = app.retrieval
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -776,7 +776,7 @@ def _acquire_lock(config: AppConfig) -> Path:
 # -- startup -----------------------------------------------------------------
 
 
-async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
+async def _serve(app: VhdlRagApp, mcp: MCPServer) -> None:
     """Serve stdio with background sync tasks: the periodic sync (all
     repositories) and the fast change poller (local working repos)."""
     sync_task = asyncio.create_task(app.periodic_sync())
@@ -797,7 +797,7 @@ async def _serve(app: VhdlRagApp, mcp: FastMCP) -> None:
         app.close()
 
 
-async def _main_async(app: VhdlRagApp, mcp: FastMCP) -> None:
+async def _main_async(app: VhdlRagApp, mcp: MCPServer) -> None:
     logger.info("ensuring collections (embedding models load from the local cache)")
     app.ensure_collections()
     app.migrate_index()
