@@ -416,6 +416,96 @@ async def test_request_to_dead_server_raises(fake_server: Path, workspace: Path)
     assert await lsp.document_symbols(workspace / "good.vhd") == ()
 
 
+# -- concurrent requests ------------------------------------------------------
+
+# Buffers two ``test/echo`` requests and replies to the second one first,
+# proving that responses are matched back to their request by id rather
+# than by the order in which they were sent or answered.
+FAKE_SERVER_OUT_OF_ORDER = r"""#!/usr/bin/env python3
+import json
+import sys
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        key, _, value = line.partition(b":")
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers.get(b"content-length", b"0"))
+    return json.loads(sys.stdin.buffer.read(length))
+
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    frame = b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    sys.stdout.buffer.write(frame + body)
+    sys.stdout.buffer.flush()
+
+
+read_message()  # the initialize request
+send({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}})
+msg = read_message()  # initialized
+assert msg is not None and msg.get("method") == "initialized", msg
+
+pending = []
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "test/echo":
+        pending.append(msg)
+        if len(pending) == 2:
+            for request in reversed(pending):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": request["params"],
+                    }
+                )
+            pending = []
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif method == "exit":
+        sys.exit(0)
+"""
+
+
+async def test_concurrent_requests_are_in_flight_and_matched_by_id(
+    tmp_path: Path, workspace: Path
+) -> None:
+    server = executable_lsp_script(
+        tmp_path, "fake_lsp_out_of_order.py", FAKE_SERVER_OUT_OF_ORDER
+    )
+    lsp = VhdlLsp(str(server), workspace)
+    try:
+        await lsp.start()
+        # Both requests must be sent before either response arrives: the
+        # fake server only replies once it has received both, buffering
+        # them and replying to the second one first. With a lock around
+        # the whole request/response cycle this would deadlock (the
+        # second request would never be sent until the first's future
+        # resolves, which never happens).
+        first, second = await asyncio.wait_for(
+            asyncio.gather(
+                lsp._request("test/echo", {"tag": "first"}),
+                lsp._request("test/echo", {"tag": "second"}),
+            ),
+            timeout=5.0,
+        )
+        assert first == {"tag": "first"}
+        assert second == {"tag": "second"}
+    finally:
+        await lsp.shutdown()
+
+
 # -- dispatch unit tests -----------------------------------------------------
 
 

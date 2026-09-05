@@ -24,7 +24,7 @@ line by the chunker).
 
 from __future__ import annotations
 
-from .client import DiagnosticInfo, LspClient
+from .client import LspClient
 
 #: ``veridian.yaml`` keys are case-sensitive; ``log_level`` accepts
 #: exactly Error/Warn/Info/Debug/Trace.
@@ -45,10 +45,10 @@ class VeridianLsp(LspClient):
     language_id = "verilog"
     config_name = "veridian.yaml"
 
-    def is_syntax_error(self, diagnostic: DiagnosticInfo) -> bool:
-        # slang diagnostics have no code field; severity 1 is an Error
-        # (parse errors included), 2 a warning, 3 a hint.
-        return diagnostic.severity == 1
+    # slang diagnostics have no code field; severity 1 is an Error
+    # (parse errors included), 2 a warning, 3 a hint. That matches the
+    # base class's severity-based default, so no override is needed
+    # here.
 
     def default_config_text(self) -> str | None:
         return DEFAULT_VERIDIAN_CONFIG
