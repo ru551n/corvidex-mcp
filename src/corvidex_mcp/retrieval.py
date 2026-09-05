@@ -7,7 +7,11 @@ only), or ``lexical`` (full-text/BM25 only), always with row filters.
 
 Cross-domain search (``search_knowledge``) fuses the per-collection
 rank lists with RRF again (one list per collection, rank-based, so
-the three domains interleave fairly regardless of their sizes).
+the three domains interleave fairly regardless of their sizes), then
+cross-encoder reranks the fused top candidates exactly once (not once
+per collection) before truncating to the requested limit. The query
+is expanded and embedded once per call (embeddings are cached per
+distinct dense model, not repeated per collection).
 
 Cross-referencing: callers may pass ``symbols`` — identifiers the
 results must reference (stored on every chunk's payload); matching is
@@ -197,36 +201,36 @@ class RetrievalService:
 
     # -- store-level search ------------------------------------------------------
 
-    def _search_collection(
+    def _fetch_collection(
         self,
         collection: CollectionName,
-        query: str,
+        dense: list[float],
+        expanded: str,
         limit: int,
         repository: str | None,
         symbols: tuple[str, ...] | None,
         language: str | None,
         mode: str,
     ) -> list[tuple[float, Chunk]]:
-        """One collection in the given search mode: (score, chunk) pairs.
+        """Un-reranked candidates from one collection: (score, chunk) pairs.
 
-        The query is expanded with RTL/HDL domain synonyms before both
-        legs when ``query_expansion_enabled`` (see
-        :mod:`.retrieval_lexicon`). When ``rerank_enabled``, more than
-        ``limit`` candidates are fetched from the store and a
-        cross-encoder reranks them (on the original, unexpanded query)
-        before truncating back to ``limit`` (see :meth:`_rerank`).
+        ``dense`` is the already-embedded dense query vector (empty for
+        the lexical leg, which never embeds); ``expanded`` is the
+        already lexicon-expanded query text (see
+        :mod:`.retrieval_lexicon`) used for both legs. Callers own
+        embedding/expansion so identical work is not repeated across
+        collections that share a model (see :meth:`search` and
+        :meth:`search_knowledge`). When ``rerank_enabled``, more than
+        ``limit`` candidates are fetched from the store so the caller
+        can rerank before truncating back to ``limit`` (see
+        :meth:`_rerank`).
         """
         embeddings = self._config.embeddings
-        expanded = expand_query(query) if embeddings.query_expansion_enabled else query
         fetch_limit = (
             max(limit, embeddings.rerank_candidates)
             if embeddings.rerank_enabled
             else limit
         )
-        # The lexical leg never embeds the query: no model work at all.
-        dense: list[float] = []
-        if mode != "lexical":
-            dense = self._embed_query(collection, expanded)
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
@@ -242,8 +246,7 @@ class RetrievalService:
             should=should,
             mode=mode,
         )
-        pairs = [(sc.score, sc.chunk) for sc in scored]
-        return self._rerank(query, pairs, limit)
+        return [(sc.score, sc.chunk) for sc in scored]
 
     def _rerank(
         self, query: str, pairs: list[tuple[float, Chunk]], limit: int
@@ -299,9 +302,10 @@ class RetrievalService:
         identifiers (cross-referencing). ``language`` restricts results
         to one payload language (e.g. ``verilog`` within the hdl
         collection); for the hdl collection the value is validated
-        against :data:`HDL_LANGUAGES`. The query is expanded and the
+        against :data:`HDL_LANGUAGES`. The query is expanded once (see
+        :mod:`.retrieval_lexicon`), embedded once, and the fetched
         candidates cross-encoder reranked before this returns (see
-        :meth:`_search_collection`, :meth:`_rerank`). The score carries
+        :meth:`_fetch_collection`, :meth:`_rerank`). The score carries
         a bounded per-repository priority bonus (see
         :meth:`_priority_bonus`).
         """
@@ -318,9 +322,16 @@ class RetrievalService:
                 f"unknown HDL language {language!r}; expected one of: "
                 + ", ".join(HDL_LANGUAGES)
             )
-        pairs = self._search_collection(
-            collection, query, limit, repository, symbols, language, mode
+        embeddings = self._config.embeddings
+        expanded = expand_query(query) if embeddings.query_expansion_enabled else query
+        # The lexical leg never embeds the query: no model work at all.
+        dense: list[float] = []
+        if mode != "lexical":
+            dense = self._embed_query(collection, expanded)
+        pairs = self._fetch_collection(
+            collection, dense, expanded, limit, repository, symbols, language, mode
         )
+        pairs = self._rerank(query, pairs, limit)
         boosted = [
             (score + self._priority_bonus(chunk.repository), chunk)
             for score, chunk in pairs
@@ -344,35 +355,65 @@ class RetrievalService:
         language: str | None = None,
         mode: str = "hybrid",
     ) -> list[SearchResult]:
-        """Search all three collections in one strategy, RRF-fused.
+        """Search all three collections in one strategy, fused then reranked.
 
+        The query is expanded once (not per collection, see
+        :mod:`.retrieval_lexicon`) and embedded once per distinct dense
+        model (collections sharing a model, the default, share the
+        embedding too — see :meth:`EmbeddingProviders.model_name`).
         Each collection is queried in the given ``mode`` (see
-        :data:`SEARCH_MODES`) and contributes a rank list; the fused
-        score is the sum of ``1/(RRF_K + rank)`` over the lists, plus
-        the bounded per-repository priority bonus (see
-        :meth:`_priority_bonus`). ``language`` filters every collection
-        (collections without that language simply contribute nothing).
+        :data:`SEARCH_MODES`) and contributes an un-reranked candidate
+        rank list; the lists are RRF-fused (rank, not per-list score:
+        the fused score is the sum of ``1/(RRF_K + rank)``) on the key
+        ``(repository, file, start_line)``. The fused top
+        ``rerank_candidates`` (or top ``limit`` when reranking is
+        disabled) are then cross-encoder reranked exactly once (see
+        :meth:`_rerank`) before truncating to ``limit``, the same
+        single rerank pass :meth:`search` does — not one rerank pass
+        per collection. The final score is the rerank score when
+        reranking is enabled and available, else the fused RRF score,
+        plus the bounded per-repository priority bonus (see
+        :meth:`_priority_bonus`), applied once. ``language`` filters
+        every collection (collections without that language simply
+        contribute nothing). A collection whose embedding model is
+        unavailable is skipped (with a warning) rather than failing the
+        whole search.
         """
         query = self._check_query(query)
         self._repository(repository)
         language = self._check_language_value(language)
         mode = self._check_mode(mode)
+        embeddings = self._config.embeddings
+        expanded = expand_query(query) if embeddings.query_expansion_enabled else query
+        embed_cache: dict[str, list[float]] = {}
         fused: dict[tuple[str, str, int], tuple[float, Chunk]] = {}
         for collection in ALL_COLLECTIONS:
-            if mode != "lexical":
-                try:
-                    self._providers.dimension(collection)  # load the model
-                except Exception as exc:
-                    logger.warning(
-                        "search_knowledge: skipping the %s collection: "
-                        "embedding model unavailable (%s)",
-                        collection.value,
-                        exc,
-                    )
-                    continue
-            pairs = self._search_collection(
-                collection, query, limit, repository, symbols, language, mode
-            )
+            try:
+                dense: list[float] = []
+                if mode != "lexical":
+                    model_name = self._providers.model_name(collection)
+                    if model_name not in embed_cache:
+                        embed_cache[model_name] = self._embed_query(
+                            collection, expanded
+                        )
+                    dense = embed_cache[model_name]
+                pairs = self._fetch_collection(
+                    collection,
+                    dense,
+                    expanded,
+                    limit,
+                    repository,
+                    symbols,
+                    language,
+                    mode,
+                )
+            except RetrievalError as exc:
+                logger.warning(
+                    "search_knowledge: skipping the %s collection: %s",
+                    collection.value,
+                    exc,
+                )
+                continue
             # Rank, not the per-list score, is what fusion uses.
             for rank, (_score, chunk) in enumerate(pairs, start=1):
                 key = (chunk.repository, chunk.file, chunk.start_line)
@@ -382,19 +423,30 @@ class RetrievalService:
                     fused[key] = (term, chunk)
                 else:
                     fused[key] = (entry[0] + term, entry[1])
-        ranked = sorted(
+        fused_ranked = sorted(
             fused.values(),
             key=lambda item: (
-                -(item[0] + self._priority_bonus(item[1].repository)),
+                -item[0],
                 item[1].repository,
                 item[1].file,
                 item[1].start_line,
             ),
         )
-        return [
-            self._to_result(score + self._priority_bonus(chunk.repository), chunk)
-            for score, chunk in ranked[:limit]
+        cap = embeddings.rerank_candidates if embeddings.rerank_enabled else limit
+        reranked = self._rerank(query, fused_ranked[:cap], limit)
+        boosted = [
+            (score + self._priority_bonus(chunk.repository), chunk)
+            for score, chunk in reranked
         ]
+        boosted.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].repository,
+                item[1].file,
+                item[1].start_line,
+            )
+        )
+        return [self._to_result(score, chunk) for score, chunk in boosted]
 
     # -- source access ------------------------------------------------------------
 

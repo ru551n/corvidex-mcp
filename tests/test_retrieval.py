@@ -129,8 +129,16 @@ def make_chunk(
     )
 
 
-@pytest.fixture
-async def env(tmp_path: Path):
+async def _hdl_docs_code_env(
+    tmp_path: Path, embeddings: EmbeddingsConfig | None = None
+) -> tuple[VectorStore, RetrievalService]:
+    """Three-collection environment (hdl/docs/code), config overridable.
+
+    Shared by the ``env`` fixture (default config) and tests that need
+    a non-default :class:`EmbeddingsConfig` (e.g. distinct per-collection
+    models, or reranking disabled) while still exercising fusion across
+    all three collections.
+    """
     up = tmp_path / "upstream"
     up.mkdir()
     git(up, "init", "-q", "-b", "main")
@@ -146,6 +154,7 @@ async def env(tmp_path: Path):
     config = AppConfig(
         data_dir=tmp_path / "data",
         repositories=[RepositoryConfig(name="repo", url=str(up), ref="main")],
+        **({"embeddings": embeddings} if embeddings is not None else {}),
     )
     store = VectorStore(config)
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
@@ -231,6 +240,12 @@ async def env(tmp_path: Path):
     store.upsert_chunks(chunks, dense)
 
     retrieval = RetrievalService(config, git_manager, store, providers, states)
+    return store, retrieval
+
+
+@pytest.fixture
+async def env(tmp_path: Path):
+    store, retrieval = await _hdl_docs_code_env(tmp_path)
     yield store, retrieval
     store.close()
 
@@ -694,4 +709,95 @@ async def test_query_expansion_disabled_is_literal(tmp_path: Path) -> None:
     # indexed chunk's full text (ENTITY_CONTENT says "clk", not "clock").
     results = retrieval_literal.search(CollectionName.HDL, "clock", mode="lexical")
     assert results == []
+    store.close()
+
+
+# -- search_knowledge: fuse-then-rerank (one embed per model, one rerank) -----
+
+
+async def test_search_knowledge_reranks_exactly_once(env) -> None:
+    """The cross-encoder runs once for the whole call, not once per
+    collection, and only ever sees up to ``rerank_candidates`` texts
+    (the fused top candidates), never a full 3-collection fan-out."""
+    _store, retrieval = env
+    fake = FakeReranker()
+    retrieval._providers.rerank = fake.score  # type: ignore[method-assign]
+    results = retrieval.search_knowledge("fifo", limit=3)
+    assert len(fake.calls) == 1
+    _query, num_texts = fake.calls[0]
+    assert num_texts <= retrieval._config.embeddings.rerank_candidates
+    assert len(results) <= 3
+    # Fusion across collections is still exercised (not just the hdl leg).
+    assert {r.result_type for r in results} >= {"hdl"}
+
+
+async def test_search_knowledge_embeds_once_per_shared_model(env) -> None:
+    """The default config uses the same dense model for all three
+    collections, so the (single, expanded) query embeds exactly once
+    for the whole call instead of once per collection."""
+    _store, retrieval = env
+    calls: list[CollectionName] = []
+    original = retrieval._providers.embed_query
+
+    def _counting(collection: CollectionName, text: str) -> list[float]:
+        calls.append(collection)
+        return original(collection, text)
+
+    retrieval._providers.embed_query = _counting  # type: ignore[method-assign]
+    retrieval.search_knowledge("fifo")
+    assert len(calls) == 1
+
+
+async def test_search_knowledge_embeds_once_per_distinct_model(
+    tmp_path: Path,
+) -> None:
+    """Collections configured with distinct dense models each embed
+    once (no more, no less) — the cache key is the model name, not the
+    collection."""
+    store, retrieval = await _hdl_docs_code_env(
+        tmp_path,
+        EmbeddingsConfig(
+            hdl_model="fake/model-a",
+            docs_model="fake/model-b",
+            code_model="fake/model-c",
+        ),
+    )
+    calls: list[CollectionName] = []
+    original = retrieval._providers.embed_query
+
+    def _counting(collection: CollectionName, text: str) -> list[float]:
+        calls.append(collection)
+        return original(collection, text)
+
+    retrieval._providers.embed_query = _counting  # type: ignore[method-assign]
+    retrieval.search_knowledge("fifo")
+    assert sorted(calls) == sorted(CollectionName)
+    store.close()
+
+
+async def test_search_knowledge_fuses_and_truncates_to_limit(env) -> None:
+    """Results remain fused across collections (not just the largest
+    one) and are truncated to ``limit`` after the single rerank pass."""
+    _store, retrieval = env
+    results = retrieval.search_knowledge("fifo", limit=3)
+    assert len(results) <= 3
+    all_results = retrieval.search_knowledge("fifo", limit=20)
+    assert {r.result_type for r in all_results} == {"hdl", "docs", "code"}
+
+
+async def test_search_knowledge_rerank_disabled_is_rrf_ordered(
+    tmp_path: Path,
+) -> None:
+    """With reranking disabled, search_knowledge falls back to (and
+    stays ordered by) the fused RRF score, never invoking the
+    reranker."""
+    store, retrieval = await _hdl_docs_code_env(
+        tmp_path, EmbeddingsConfig(rerank_enabled=False)
+    )
+    fake = FakeReranker()
+    retrieval._providers.rerank = fake.score  # type: ignore[method-assign]
+    results = retrieval.search_knowledge("fifo", limit=20)
+    assert not fake.calls  # never invoked: rerank_enabled is false
+    scores = [r.score for r in results]
+    assert scores == sorted(scores, reverse=True)
     store.close()
