@@ -37,6 +37,15 @@ ALL_DOMAINS: tuple[CollectionName, ...] = (
 #: indexed as this pseudo-repository (see ``coding_standards``).
 CODING_STANDARDS_REPO = "coding-standards"
 
+
+def _default_dense_threads() -> int:
+    """Half the host's CPU count, at least 1 (fallback 4 if undetectable)."""
+    cpu_count = os.cpu_count()
+    if not cpu_count:
+        return 4
+    return max(1, cpu_count // 2)
+
+
 #: Accepted extensions for the coding-standards file.
 STANDARDS_EXTENSIONS: frozenset[str] = frozenset(
     {".txt", ".md", ".rst", ".pdf", ".docx"}
@@ -74,12 +83,14 @@ class EmbeddingsConfig(BaseModel):
         ),
     )
     dense_threads: int = Field(
-        default=4,
+        default_factory=_default_dense_threads,
         ge=1,
         description=(
-            "Intra-op threads for dense ONNX inference. Lower values "
-            "trade per-batch speed for lower memory pressure and less "
-            "CPU saturation during indexing and serving."
+            "Intra-op threads for dense ONNX inference. Defaults to half "
+            "the host's CPU count (at least 1; falls back to 4 if the "
+            "CPU count can't be determined). Lower values trade "
+            "per-batch speed for lower memory pressure and less CPU "
+            "saturation during indexing and serving."
         ),
     )
     dense_enable_cpu_mem_arena: bool = Field(
@@ -460,8 +471,25 @@ class AppConfig(BaseModel):
     log_level: str = Field(
         default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
+    index_cwd: bool = Field(
+        default=True,
+        description=(
+            "When no [[repositories]] are configured, automatically index "
+            "the directory the server is started in (see "
+            "default_repository_for_cwd()). Set to false to disable this: "
+            "with no repositories configured and index_cwd = false, the "
+            "server runs with an empty index instead."
+        ),
+    )
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
-    repositories: list[RepositoryConfig] = Field(default_factory=list)
+    repositories: list[RepositoryConfig] = Field(
+        default_factory=list,
+        description=(
+            "Repositories to index. Empty (the default) means: index the "
+            "directory the server is started in, unless index_cwd is set "
+            "to false — see default_repository_for_cwd()."
+        ),
+    )
 
     @field_validator("data_dir")
     @classmethod
@@ -552,8 +580,45 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "vhdl-rag" / "config.toml"
 
 
+def _sanitize_repo_name(raw: str) -> str:
+    """Turn an arbitrary string (typically a directory name) into a valid
+    repository name, falling back to ``"workspace"`` when nothing usable
+    survives (e.g. a name made only of punctuation, or a leading dot)."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-")
+    return cleaned if NAME_RE.fullmatch(cleaned or "") else "workspace"
+
+
+def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
+    """The repository indexed automatically when none are configured: the
+    directory the server is started in (a coding agent's workspace).
+
+    A Git working tree is indexed as a local working repository (HEAD plus
+    uncommitted and untracked changes, kept in sync by the fast local
+    poller); a plain directory without a ``.git`` is indexed as a
+    filesystem repository (no Git involved). This is what makes
+    ``vhdl-rag-mcp`` useful with zero configuration: as soon as a
+    coding-standards file or other repositories are needed, add
+    ``[[repositories]]`` entries and they take over (this default no
+    longer applies once any repository is configured).
+    """
+    root = (cwd or Path.cwd()).resolve()
+    return RepositoryConfig(
+        name=_sanitize_repo_name(root.name),
+        path=root,
+        filesystem=not (root / ".git").exists(),
+    )
+
+
 _DEFAULT_TEMPLATE = """\
 # vhdl-rag-mcp configuration.
+#
+# With no [[repositories]] below, the directory the server is started in
+# is indexed automatically — no further configuration is required. This
+# file only matters once you need more: a coding-standards file,
+# additional repositories, or non-default runtime settings. Set
+# "index_cwd = false" (or pass --no-index-cwd) to disable the automatic
+# indexing of the current directory and run with an empty index instead
+# until repositories are added below.
 #
 # Indexed domains: VHDL (via vhdl_ls), VHDL-related documentation, and
 # general source code (C/C++, Python, ...). Each repository is either a
@@ -599,6 +664,11 @@ sync_interval = 300
 vhdl_ls_path = "vhdl_ls"
 veridian_path = "veridian"
 log_level = "INFO"
+# # With no [[repositories]] below, index_cwd = true (the default) means
+# # the directory the server is started in is indexed automatically.
+# # Set to false to run with an empty index instead until repositories
+# # are configured below:
+# index_cwd = true
 # # The organization's coding standards as one file (txt, md, rst, pdf,
 # # or docx): indexed as the 'coding-standards' pseudo-repository with a
 # # high retrieval priority (the golden source for conventions):
@@ -610,7 +680,8 @@ log_level = "INFO"
 # # model's full context is 8192; longer rarely helps and memory cost
 # # of attention is quadratic in length):
 # dense_max_tokens = 1024
-# # CPU threads for dense ONNX inference:
+# # CPU threads for dense ONNX inference (default: half the host's CPU
+# # count, at least 1; override with --num-threads or here):
 # dense_threads = 4
 # # ONNX CPU memory arena (fast but retains peak buffers, ~+2.5 GB;
 # # false = lower memory, ~35% slower indexing):
@@ -629,10 +700,13 @@ log_level = "INFO"
 # docs_model = "jinaai/jina-embeddings-v2-small-en"
 # code_model = "jinaai/jina-embeddings-v2-small-en"
 
-# Add one [[repositories]] table per repository to index (uncomment a
-# template below or add your own). With none, the server runs with an
-# empty index. A repository is a remote Git url (cloned and synced by
-# the server) or a local path (your own checkout, indexed in place).
+# With no [[repositories]] configured at all (the default), the server
+# indexes the directory it is started in - typically your current
+# project, with no configuration needed. Add [[repositories]] tables
+# (uncomment a template below or add your own) once you need more: a
+# coding-standards repository, additional IP repositories, etc. A
+# repository is a remote Git url (cloned and synced by the server) or a
+# local path (your own checkout, indexed in place).
 #
 # [[repositories]]
 # name = "company-standards"
@@ -673,38 +747,69 @@ log_level = "INFO"
 """
 
 
-def load_config(path: Path | None = None, write_default: bool = True) -> AppConfig:
+def load_config(
+    path: Path | None = None,
+    write_default: bool = True,
+    cwd: Path | None = None,
+    inject_default_repository: bool = True,
+) -> AppConfig:
     """Load and validate the configuration from ``path``.
 
     When the file does not exist and ``write_default`` is set, a commented
     default template is written and the built-in defaults are returned.
     Raises :class:`ConfigError` on unreadable or invalid configuration.
+
+    When the resulting configuration has no ``[[repositories]]`` at all —
+    which includes the common case of no config file — the directory the
+    server is started in (``cwd``, defaulting to the actual current
+    working directory) is indexed automatically; see
+    :func:`default_repository_for_cwd`. Set ``index_cwd = false`` in the
+    config (or pass ``--no-index-cwd``) to disable this and run with an
+    empty index instead. Pass ``inject_default_repository=False`` to skip
+    this step here (e.g. to apply CLI overrides to ``index_cwd`` first)
+    and call :func:`apply_default_repository` explicitly afterwards.
     """
     if path is None:
         env_path = os.environ.get("VHDL_RAG_MCP_CONFIG")
         path = Path(env_path) if env_path else None
     config_path = (path or default_config_path()).expanduser()
     if not config_path.exists():
-        if not write_default:
-            return AppConfig()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(_DEFAULT_TEMPLATE, encoding="utf-8")
-        return AppConfig()
-    try:
-        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        message = f"cannot read configuration {config_path}: {exc}"
-        if isinstance(exc, tomllib.TOMLDecodeError):
-            # The most common hand-edit mistake is a bare path value
-            # (path = ~/git/foo): valid-looking but invalid TOML, and ~
-            # only means anything after parsing (the loader expands it).
-            message += (
-                ". Hint: TOML values must be quoted strings "
-                '(e.g. path = "~/git/foo"); a bare ~/... value is not '
-                "valid TOML"
-            )
-        raise ConfigError(message) from exc
-    try:
-        return AppConfig.model_validate(raw)
-    except Exception as exc:  # pydantic ValidationError
-        raise ConfigError(f"invalid configuration {config_path}: {exc}") from exc
+        if write_default:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(_DEFAULT_TEMPLATE, encoding="utf-8")
+        config = AppConfig()
+    else:
+        try:
+            raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            message = f"cannot read configuration {config_path}: {exc}"
+            if isinstance(exc, tomllib.TOMLDecodeError):
+                # The most common hand-edit mistake is a bare path value
+                # (path = ~/git/foo): valid-looking but invalid TOML, and ~
+                # only means anything after parsing (the loader expands it).
+                message += (
+                    ". Hint: TOML values must be quoted strings "
+                    '(e.g. path = "~/git/foo"); a bare ~/... value is not '
+                    "valid TOML"
+                )
+            raise ConfigError(message) from exc
+        try:
+            config = AppConfig.model_validate(raw)
+        except Exception as exc:  # pydantic ValidationError
+            raise ConfigError(f"invalid configuration {config_path}: {exc}") from exc
+    if not inject_default_repository:
+        return config
+    return apply_default_repository(config, cwd)
+
+
+def apply_default_repository(config: AppConfig, cwd: Path | None = None) -> AppConfig:
+    """Return ``config`` unchanged, except: if it has no ``[[repositories]]``
+    and ``index_cwd`` is true (both defaults), a repository indexing ``cwd``
+    (the actual current working directory when unset) is added — see
+    :func:`default_repository_for_cwd`. Applied automatically by
+    :func:`load_config` unless ``inject_default_repository=False`` was
+    passed.
+    """
+    if config.repositories or not config.index_cwd:
+        return config
+    return config.model_copy(update={"repositories": [default_repository_for_cwd(cwd)]})

@@ -59,6 +59,7 @@ from .config import (
     AppConfig,
     ConfigError,
     RepositoryConfig,
+    apply_default_repository,
     load_config,
 )
 from .embeddings.providers import EmbeddingProviders
@@ -104,7 +105,11 @@ INSTRUCTIONS = (
     "one repository's index. When a coding-standards file is "
     "configured it is indexed as the 'coding-standards' "
     "pseudo-repository with a high retrieval priority: search with "
-    "repository='coding-standards' to restrict to it."
+    "repository='coding-standards' to restrict to it. A search result "
+    "may start with a 'Note: ... still indexing' line when a repository "
+    "has not finished its initial sync yet (or is being resynced): "
+    "results may be thin or empty in that case — wait a few seconds and "
+    "retry rather than concluding nothing exists."
 )
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True)
@@ -163,6 +168,9 @@ class VhdlRagApp:
         # startup; see ensure_collections / selfcheck).
         self._collection_errors: dict[CollectionName, str] = {}
         self._closed = False
+        # Repository names with a sync (initial, periodic, polled, or
+        # manual) currently in flight — see indexing_note().
+        self._syncing: set[str] = set()
 
     # -- collections ---------------------------------------------------------
 
@@ -260,7 +268,7 @@ class VhdlRagApp:
             if wanted is not None and cfg.name not in wanted:
                 continue
             try:
-                await self.pipeline.sync_repository(cfg)
+                await self._tracked_sync(cfg)
                 reports.append(
                     {
                         "repository": cfg.name,
@@ -300,7 +308,7 @@ class VhdlRagApp:
             return report
         cfg = self._config_or_error(repository)
         try:
-            await self.pipeline.reindex_repository(cfg)
+            await self._tracked_reindex(cfg)
         except Exception as exc:
             logger.exception("%s: reindex failed: %s", cfg.name, exc)
             return {"repository": cfg.name, "status": "error", "error": str(exc)}
@@ -309,6 +317,62 @@ class VhdlRagApp:
             "status": "ok",
             "commit": self.states.get(cfg.name).indexed_commit or "",
         }
+
+    async def _tracked_sync(self, cfg: RepositoryConfig) -> None:
+        """Run ``pipeline.sync_repository`` while marking ``cfg.name`` as
+        currently syncing (see ``indexing_note``)."""
+        self._syncing.add(cfg.name)
+        try:
+            await self.pipeline.sync_repository(cfg)
+        finally:
+            self._syncing.discard(cfg.name)
+
+    async def _tracked_reindex(self, cfg: RepositoryConfig) -> None:
+        """Run ``pipeline.reindex_repository`` while marking ``cfg.name`` as
+        currently syncing (see ``indexing_note``)."""
+        self._syncing.add(cfg.name)
+        try:
+            await self.pipeline.reindex_repository(cfg)
+        finally:
+            self._syncing.discard(cfg.name)
+
+    def indexing_note(self, repository: str | None = None) -> str | None:
+        """A short heads-up for search tool output: whether ``repository``
+        (or, if unset, any configured repository) is being (re)synced right
+        now, or has never completed an initial sync at all. Lets the agent
+        tell a thin/empty result set caused by in-progress (or stalled)
+        indexing apart from a genuine no-match, instead of concluding
+        nothing exists."""
+        if repository is not None:
+            names = [repository]
+        else:
+            names = [cfg.name for cfg in self.config.repositories]
+            if self.config.coding_standards is not None:
+                names.append(CODING_STANDARDS_REPO)
+        syncing = sorted({name for name in names if name in self._syncing})
+        never_synced = sorted(
+            {
+                name
+                for name in names
+                if name not in self._syncing
+                and self.states.get(name).indexed_commit is None
+            }
+        )
+        if not syncing and not never_synced:
+            return None
+        parts: list[str] = []
+        if syncing:
+            parts.append(f"currently syncing: {', '.join(syncing)}")
+        if never_synced:
+            parts.append(
+                f"not yet indexed: {', '.join(never_synced)} (initial sync "
+                "still pending, or a prior sync failed — check "
+                "repository_status)"
+            )
+        return (
+            "Note: " + "; ".join(parts) + ". Results may be thin or "
+            "incomplete; try again shortly."
+        )
 
     def drop_unconfigured_repositories(self) -> list[str]:
         """Drop index chunks and state for repos removed from the config
@@ -371,7 +435,7 @@ class VhdlRagApp:
                     continue
                 in_flight.add(cfg.name)
                 logger.info("%s: local change detected (poll); syncing", cfg.name)
-                task = asyncio.create_task(self.pipeline.sync_repository(cfg))
+                task = asyncio.create_task(self._tracked_sync(cfg))
                 # add_done_callback passes only the task; bind the per-repo
                 # arguments with a partial so the loop variable ``cfg`` is
                 # captured by value, not by reference.
@@ -400,10 +464,9 @@ class VhdlRagApp:
 # -- MCP tools -----------------------------------------------------------------
 
 
-def _render(results: list[SearchResult], empty: str) -> str:
-    if not results:
-        return empty
-    return "\n".join(result.render() for result in results)
+def _render(results: list[SearchResult], empty: str, note: str | None = None) -> str:
+    body = "\n".join(result.render() for result in results) if results else empty
+    return f"{note}\n\n{body}" if note else body
 
 
 def _render_report(reports: list[dict[str, str]]) -> str:
@@ -474,6 +537,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No HDL results. Try a broader query or a different language, "
             "or check repository_status.",
+            note=app.indexing_note(repository),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -505,6 +569,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 mode=mode,
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
+            note=app.indexing_note(repository),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -533,6 +598,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No documentation results. Try a broader query, or check "
             "repository_status.",
+            note=app.indexing_note(repository),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -560,6 +626,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 mode=mode,
             ),
             "No code results. Try a broader query, or check repository_status.",
+            note=app.indexing_note(repository),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -588,6 +655,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No results in any domain. Try a broader query, or check "
             "repository_status.",
+            note=app.indexing_note(repository),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -776,9 +844,14 @@ def _acquire_lock(config: AppConfig) -> Path:
 # -- startup -----------------------------------------------------------------
 
 
-async def _serve(app: VhdlRagApp, mcp: MCPServer) -> None:
-    """Serve stdio with background sync tasks: the periodic sync (all
-    repositories) and the fast change poller (local working repos)."""
+async def _serve(
+    app: VhdlRagApp, mcp: MCPServer, initial_sync: asyncio.Task[list[dict[str, str]]]
+) -> None:
+    """Serve stdio with background sync tasks: the initial sync (started
+    before this is called, so it never delays the MCP handshake — tools
+    called while it is still running see an indexing_note() heads-up),
+    the periodic sync (all repositories), and the fast change poller
+    (local working repos)."""
     sync_task = asyncio.create_task(app.periodic_sync())
     poll_task = (
         asyncio.create_task(app.local_poll()) if app._has_local_repos() else None
@@ -786,9 +859,12 @@ async def _serve(app: VhdlRagApp, mcp: MCPServer) -> None:
     try:
         await mcp.run_stdio_async()
     finally:
+        initial_sync.cancel()
         sync_task.cancel()
         if poll_task is not None:
             poll_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await initial_sync
         with contextlib.suppress(asyncio.CancelledError):
             await sync_task
         if poll_task is not None:
@@ -828,9 +904,14 @@ async def _main_async(app: VhdlRagApp, mcp: MCPServer) -> None:
             "($VHDL_RAG_MCP_CONFIG or ~/.config/vhdl-rag/config.toml) and "
             "restart, or call sync_repositories after updating it."
         )
-    logger.info("initial sync of %d repositories", len(app.config.repositories))
-    await app.sync_all()
-    await _serve(app, mcp)
+    logger.info(
+        "starting initial sync of %d repositories in the background "
+        "(the server starts serving immediately; tools report an "
+        "indexing note for repositories not yet synced)",
+        len(app.config.repositories),
+    )
+    initial_sync = asyncio.create_task(app.sync_all())
+    await _serve(app, mcp, initial_sync)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -882,6 +963,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="override log_level",
     )
+    parser.add_argument(
+        "--no-index-cwd",
+        action="store_true",
+        help=(
+            "disable index_cwd: do not automatically index the directory "
+            "the server is started in when no [[repositories]] are "
+            "configured (run with an empty index instead)"
+        ),
+    )
+    parser.add_argument(
+        "--num-threads",
+        default=None,
+        type=int,
+        metavar="N",
+        help=("override embeddings.dense_threads (default: half the host's CPU count)"),
+    )
     return parser.parse_args(argv)
 
 
@@ -890,11 +987,14 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
 
     The config file is selected by ``--config`` or
     ``VHDL_RAG_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
-    ``--vhdl-ls-path``/``--veridian-path``/``--log-level`` override the
-    file's values.
+    ``--vhdl-ls-path``/``--veridian-path``/``--log-level``/
+    ``--num-threads`` override the file's values.
     """
     args = _parse_args(argv)
-    config = load_config(Path(args.config) if args.config else None)
+    config = load_config(
+        Path(args.config) if args.config else None,
+        inject_default_repository=False,
+    )
     overrides: dict[str, Any] = {}
     if args.data_dir is not None:
         overrides["data_dir"] = Path(args.data_dir)
@@ -908,11 +1008,15 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
         overrides["veridian_path"] = args.veridian_path
     if args.log_level is not None:
         overrides["log_level"] = args.log_level
-    if overrides:
+    if args.no_index_cwd:
+        overrides["index_cwd"] = False
+    if overrides or args.num_threads is not None:
         raw = config.model_dump()
         raw.update(overrides)
+        if args.num_threads is not None:
+            raw["embeddings"]["dense_threads"] = args.num_threads
         config = AppConfig.model_validate(raw)
-    return config
+    return apply_default_repository(config)
 
 
 def main(argv: list[str] | None = None) -> None:

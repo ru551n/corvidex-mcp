@@ -263,6 +263,37 @@ async def test_repository_status_analyzer_available(env, tmp_path: Path) -> None
     assert str(veridian) in text
 
 
+async def test_indexing_note_never_synced_repo(env) -> None:
+    # "broken" (ref = no-such-branch) never completes a sync in the fixture.
+    app, _mcp, _up = env
+    assert app.indexing_note("repo") is None
+    note = app.indexing_note("broken")
+    assert note is not None
+    assert "not yet indexed: broken" in note
+    assert "repository_status" in note
+    # No explicit repository: the note still surfaces the pending one.
+    assert "broken" in (app.indexing_note() or "")
+
+
+async def test_indexing_note_currently_syncing(env) -> None:
+    app, _mcp, _up = env
+    app._syncing.add("repo")
+    try:
+        note = app.indexing_note("repo")
+        assert note is not None
+        assert "currently syncing: repo" in note
+    finally:
+        app._syncing.discard("repo")
+    assert app.indexing_note("repo") is None
+
+
+async def test_search_tool_reports_indexing_note(env) -> None:
+    _app, mcp, _up = env
+    result = await mcp.call_tool("search_docs", {"query": "x", "repository": "broken"})
+    text = tool_text(result)
+    assert text.startswith("Note: not yet indexed: broken")
+
+
 async def test_search_tool_errors(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool(
@@ -644,7 +675,7 @@ async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:
     assert [r.name for r in cfg.repositories] == ["cli-repo"]
     # --config beats the env var.
     other = tmp_path / "other.toml"
-    other.write_text('data_dir = "d2"\n', encoding="utf-8")
+    other.write_text('data_dir = "d2"\nindex_cwd = false\n', encoding="utf-8")
     cfg = config_from_args(["--config", str(other)])
     assert cfg.repositories == []
 
@@ -654,3 +685,18 @@ async def test_cli_overrides_are_revalidated(tmp_path: Path) -> None:
     path.write_text(CLI_CONFIG, encoding="utf-8")
     with pytest.raises(ValidationError):
         config_from_args(["--config", str(path), "--sync-interval", "5"])
+
+
+async def test_cli_no_index_cwd(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('data_dir = "d"\n', encoding="utf-8")
+    cfg = config_from_args(["--config", str(path), "--no-index-cwd"])
+    assert cfg.index_cwd is False
+    assert cfg.repositories == []
+
+
+async def test_cli_num_threads(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(CLI_CONFIG, encoding="utf-8")
+    cfg = config_from_args(["--config", str(path), "--num-threads", "2"])
+    assert cfg.embeddings.dense_threads == 2
