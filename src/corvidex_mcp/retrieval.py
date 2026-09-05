@@ -25,6 +25,7 @@ from .config import CODING_STANDARDS_REPO, AppConfig, ConfigError
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitError, GitManager
 from .models import Chunk, CollectionName, SearchResult
+from .retrieval_lexicon import expand_query
 from .standards import StandardsError, extract_standards_text
 from .state import StateStore
 from .vector_store import ALL_COLLECTIONS, VectorStore
@@ -206,11 +207,26 @@ class RetrievalService:
         language: str | None,
         mode: str,
     ) -> list[tuple[float, Chunk]]:
-        """One collection in the given search mode: (score, chunk) pairs."""
+        """One collection in the given search mode: (score, chunk) pairs.
+
+        The query is expanded with RTL/HDL domain synonyms before both
+        legs when ``query_expansion_enabled`` (see
+        :mod:`.retrieval_lexicon`). When ``rerank_enabled``, more than
+        ``limit`` candidates are fetched from the store and a
+        cross-encoder reranks them (on the original, unexpanded query)
+        before truncating back to ``limit`` (see :meth:`_rerank`).
+        """
+        embeddings = self._config.embeddings
+        expanded = expand_query(query) if embeddings.query_expansion_enabled else query
+        fetch_limit = (
+            max(limit, embeddings.rerank_candidates)
+            if embeddings.rerank_enabled
+            else limit
+        )
         # The lexical leg never embeds the query: no model work at all.
         dense: list[float] = []
         if mode != "lexical":
-            dense = self._embed_query(collection, query)
+            dense = self._embed_query(collection, expanded)
         must: dict[str, str] = {}
         if repository is not None:
             must["repository"] = repository
@@ -220,13 +236,47 @@ class RetrievalService:
         scored = self._store.query(
             collection,
             dense,
-            query,
-            limit=limit,
+            expanded,
+            limit=fetch_limit,
             must=must or None,
             should=should,
             mode=mode,
         )
-        return [(sc.score, sc.chunk) for sc in scored]
+        pairs = [(sc.score, sc.chunk) for sc in scored]
+        return self._rerank(query, pairs, limit)
+
+    def _rerank(
+        self, query: str, pairs: list[tuple[float, Chunk]], limit: int
+    ) -> list[tuple[float, Chunk]]:
+        """Cross-encoder rerank of ``pairs``, truncated to ``limit``.
+
+        Falls back to the input ranking (truncated to ``limit``) when
+        reranking is disabled, there is nothing to rerank, or the
+        model fails to load/run (not provisioned, no network yet) — a
+        missing reranker degrades precision, it never fails the
+        search. The returned score is the sigmoid-normalized
+        cross-encoder relevance in ``(0, 1)`` (see
+        :class:`corvidex_mcp.embeddings.reranker.CrossEncoderReranker`),
+        the same scale family the RRF/cosine scores it replaces use, so
+        it composes with the bounded per-repository priority bonus the
+        same way.
+        """
+        if not self._config.embeddings.rerank_enabled or len(pairs) <= 1:
+            return pairs[:limit]
+        texts = [chunk.content for _, chunk in pairs]
+        try:
+            scores = self._providers.rerank(query, texts)
+        except Exception as exc:
+            logger.warning(
+                "reranking unavailable (%s); returning the unreranked ranking",
+                exc,
+            )
+            return pairs[:limit]
+        reranked = sorted(
+            zip(scores, (chunk for _, chunk in pairs), strict=True),
+            key=lambda item: -item[0],
+        )
+        return reranked[:limit]
 
     # -- public search ------------------------------------------------------------
 
@@ -249,8 +299,11 @@ class RetrievalService:
         identifiers (cross-referencing). ``language`` restricts results
         to one payload language (e.g. ``verilog`` within the hdl
         collection); for the hdl collection the value is validated
-        against :data:`HDL_LANGUAGES`. The score carries a bounded
-        per-repository priority bonus (see :meth:`_priority_bonus`).
+        against :data:`HDL_LANGUAGES`. The query is expanded and the
+        candidates cross-encoder reranked before this returns (see
+        :meth:`_search_collection`, :meth:`_rerank`). The score carries
+        a bounded per-repository priority bonus (see
+        :meth:`_priority_bonus`).
         """
         query = self._check_query(query)
         self._repository(repository)

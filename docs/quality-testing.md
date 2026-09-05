@@ -1,19 +1,21 @@
 # Quality testing (CI)
 
-The unit/e2e suite runs entirely offline with fake embedding providers.
-That verifies *plumbing*, not *retrieval quality*. The quality job
-(`quality-e2e` in `.github/workflows/ci.yml`) closes that gap: it runs
-the **real** production pipeline — git sync, chunking, dense
-embedding, hybrid (dense + full-text, RRF) search — on a small fixture corpus with
-the **real** fastembed models, and asserts that a fixed query battery
-retrieves the expected source files.
+The unit/e2e suite runs entirely offline with fake embedding providers
+and a faked/disabled reranker (see `tests/conftest.py`). That verifies
+*plumbing*, not *retrieval quality*. The quality job (`quality-e2e` in
+`.github/workflows/ci.yml`) closes that gap: it runs the **real**
+production pipeline — git sync, chunking, dense embedding, hybrid
+(dense + full-text, RRF) search, query expansion, and cross-encoder
+reranking — on a small fixture corpus with the **real** fastembed
+models, and asserts that a fixed query battery retrieves the expected
+source files.
 
 ## What runs where
 
 | Job / env | OS | Models | Purpose |
 |---|---|---|---|
 | `test` matrix | ubuntu / windows / macos / RHEL / arm64 | fakes | plumbing, fast, offline |
-| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en + FTS5) | end-to-end retrieval quality |
+| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en + FTS5 + MiniLM-L-6 reranker) | end-to-end retrieval quality |
 | `tests/test_quality.py` locally | any | real | same gate, on demand |
 
 `tests/test_quality.py` is skipped unless
@@ -54,7 +56,7 @@ not a CI gate.
   download would slow the whole pipeline.
 
 The job caches the models in `actions/cache`
-(key `corvidex-embed-cache-v2` →
+(key `corvidex-embed-cache-v3` →
 `/tmp/corvidex-quality/embed-cache`), so the download
 only happens on the first run and after a key bump.
 
@@ -112,10 +114,14 @@ quality battery (real models, structural chunking):
   identifiers unique per file (the full-text leg leans on identifiers; the
   dense leg on topic separation). Re-run locally.
 - **Changing the default model** (the `hdl_model`/`docs_model`/
-  `code_model` config defaults): re-run locally, re-tune thresholds if
-  needed, update the dimension assert in
+  `code_model`/`rerank_model` config defaults): re-run locally, re-tune
+  thresholds if needed, update the dimension assert in
   `test_quality_embedding_determinism`, and **bump the CI cache key**
-  (`corvidex-embed-cache-v2` → `v3`) in `.github/workflows/ci.yml`.
+  in `.github/workflows/ci.yml`.
+- **Reranking/query expansion regressions**: run locally with
+  `rerank_enabled=false` / `query_expansion_enabled=false` (see
+  `EmbeddingsConfig`) to isolate which stage changed the ranking
+  before assuming a model/chunker regression.
 - **Tuning thresholds**: only with a local run that shows stable
   results; document the rationale in a commit message.
 

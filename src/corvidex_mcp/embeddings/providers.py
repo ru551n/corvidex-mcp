@@ -12,6 +12,7 @@ from ..config import AppConfig
 from ..models import CollectionName
 from .assets import bundled_model_dir
 from .provider import FastEmbedProvider
+from .reranker import CrossEncoderReranker
 
 
 class EmbeddingProviders:
@@ -20,6 +21,7 @@ class EmbeddingProviders:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._dense: dict[str, FastEmbedProvider] = {}
+        self._reranker: CrossEncoderReranker | None = None
 
     def _dense_model_name(self, collection: CollectionName) -> str:
         e = self._config.embeddings
@@ -64,3 +66,22 @@ class EmbeddingProviders:
 
     def embed_query(self, collection: CollectionName, text: str) -> list[float]:
         return self._dense_provider(collection).embed_query(text)
+
+    def _rerank_provider(self) -> CrossEncoderReranker:
+        if self._reranker is None:
+            eb = self._config.embeddings
+            self._reranker = CrossEncoderReranker(
+                eb.rerank_model,
+                cache_dir=self._config.embed_cache_dir,
+                threads=eb.dense_threads,
+            )
+        return self._reranker
+
+    def rerank(self, query: str, texts: list[str]) -> list[float]:
+        """Cross-encoder relevance score per text (see :mod:`.reranker`).
+
+        Propagates any load/inference failure; the caller (see
+        :meth:`corvidex_mcp.retrieval.RetrievalService._rerank`) decides
+        how to degrade.
+        """
+        return self._rerank_provider().score(query, texts)

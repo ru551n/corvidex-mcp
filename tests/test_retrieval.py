@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from capability import sqlite_extensions_supported
 
-from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
 from corvidex_mcp.embeddings.provider import FastEmbedProvider
 from corvidex_mcp.embeddings.providers import EmbeddingProviders
 from corvidex_mcp.git_manager import GitManager
@@ -583,3 +583,115 @@ async def test_search_knowledge_modes(env) -> None:
     assert semantic
     assert {r.result_type for r in semantic} == {"hdl", "docs", "code"}
     assert all(0.0 <= r.score <= 1.0 for r in semantic)
+
+
+# -- reranking and query expansion --------------------------------------------
+
+
+class FakeReranker:
+    """Scores each text by how many times "rtl" appears (fake, no ONNX)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        self.calls.append((query, len(texts)))
+        return [float(text.lower().count("rtl")) for text in texts]
+
+
+async def test_rerank_reorders_by_cross_encoder_score(env) -> None:
+    _store, retrieval = env
+    fake = FakeReranker()
+    retrieval._providers.rerank = fake.score  # type: ignore[method-assign]
+    # Both HDL chunks match "fifo" lexically; without reranking the
+    # entity chunk ranks first (it appears earlier/denser). The fake
+    # reranker scores purely on "rtl" occurrences, which only the
+    # architecture chunk's content contains, and must win instead.
+    results = retrieval.search(CollectionName.HDL, "fifo", limit=2)
+    assert [r.symbol for r in results] == ["rtl", "fifo"]
+    assert fake.calls  # the reranker was actually invoked
+
+
+async def _fifo_env(
+    tmp_path: Path, embeddings: EmbeddingsConfig | None = None
+) -> tuple[VectorStore, RetrievalService]:
+    """Minimal single-repository env (one HDL chunk), config overridable."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "main")
+    (up / "rtl").mkdir()
+    (up / "rtl" / "fifo.vhd").write_text(FIFO_VHDL)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "first")
+
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        repositories=[RepositoryConfig(name="repo", url=str(up), ref="main")],
+        **({"embeddings": embeddings} if embeddings is not None else {}),
+    )
+    store = VectorStore(config)
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    providers = fake_providers(config)
+    git_manager = GitManager(config.repos_dir)
+    states = StateStore(config.sqlite_index_path)
+    plan = await git_manager.sync(config.repository("repo"), None)
+    states.set_indexed("repo", plan.commit)
+    chunks = [
+        make_chunk(
+            CollectionName.HDL,
+            "rtl/fifo.vhd",
+            "fifo",
+            "entity",
+            1,
+            3,
+            ENTITY_CONTENT,
+            plan.commit,
+        ),
+    ]
+    dense = providers.embed_passages(CollectionName.HDL, [c.content for c in chunks])
+    store.upsert_chunks(chunks, dense)
+    return store, RetrievalService(config, git_manager, store, providers, states)
+
+
+async def test_rerank_disabled_keeps_store_ranking(tmp_path: Path) -> None:
+    store, retrieval_no_rerank = await _fifo_env(
+        tmp_path, EmbeddingsConfig(rerank_enabled=False)
+    )
+    fake = FakeReranker()
+    retrieval_no_rerank._providers.rerank = fake.score  # type: ignore[method-assign]
+    retrieval_no_rerank.search(CollectionName.HDL, "fifo", limit=2)
+    assert not fake.calls  # never invoked: rerank_enabled is false
+    store.close()
+
+
+async def test_rerank_failure_falls_back_to_unreranked(env) -> None:
+    _store, retrieval = env
+
+    def _boom(query: str, texts: list[str]) -> list[float]:
+        raise RuntimeError("model unavailable")
+
+    retrieval._providers.rerank = _boom  # type: ignore[method-assign]
+    # Falls back to the plain (RRF) ranking instead of raising.
+    results = retrieval.search(CollectionName.HDL, "fifo entity")
+    assert results
+
+
+async def test_query_expansion_widens_lexical_recall(env) -> None:
+    _store, retrieval = env
+    # The doc chunk mentions "rst_n" but not the word "clock"; expansion
+    # of "clock" appends "clk", which the fifo entity chunk (containing
+    # "clk") lexically matches in "lexical" mode.
+    plain = retrieval.search(CollectionName.HDL, "clock", mode="lexical")
+    assert any("clk" in r.content for r in plain)
+
+
+async def test_query_expansion_disabled_is_literal(tmp_path: Path) -> None:
+    store, retrieval_literal = await _fifo_env(
+        tmp_path,
+        EmbeddingsConfig(query_expansion_enabled=False, rerank_enabled=False),
+    )
+    # "clock" alone (no expansion to "clk") does not lexically match the
+    # indexed chunk's full text (ENTITY_CONTENT says "clk", not "clock").
+    results = retrieval_literal.search(CollectionName.HDL, "clock", mode="lexical")
+    assert results == []
+    store.close()
