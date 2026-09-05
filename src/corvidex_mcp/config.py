@@ -1,7 +1,7 @@
-"""Typed TOML configuration for vhdl-rag-mcp.
+"""Typed TOML configuration for corvidex-mcp.
 
-The configuration lives at ``~/.config/vhdl-rag/config.toml`` by
-default; the ``VHDL_RAG_MCP_CONFIG`` environment variable or the
+The configuration lives at ``~/.config/corvidex/config.toml`` by
+default; the ``CORVIDEX_MCP_CONFIG`` environment variable or the
 ``--config`` command-line flag select an alternate file. On first start
 a commented default template is written to the default location if no
 file exists. All validation happens at load time; callers receive
@@ -418,7 +418,7 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    data_dir: Path = Path("~/.local/share/vhdl-rag")
+    data_dir: Path = Path("~/.local/share/corvidex")
     sync_interval: int = Field(
         default=300, ge=10, description="Seconds between periodic git synchronizations"
     )
@@ -574,7 +574,7 @@ class AppConfig(BaseModel):
 
     @property
     def log_file(self) -> Path:
-        return self.logs_dir / "vhdl-rag.log"
+        return self.logs_dir / "corvidex.log"
 
     def repository(self, name: str) -> RepositoryConfig:
         for repo in self.repositories:
@@ -587,7 +587,7 @@ class AppConfig(BaseModel):
 
 
 def default_config_path() -> Path:
-    return Path.home() / ".config" / "vhdl-rag" / "config.toml"
+    return Path.home() / ".config" / "corvidex" / "config.toml"
 
 
 def _sanitize_repo_name(raw: str) -> str:
@@ -606,7 +606,7 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     uncommitted and untracked changes, kept in sync by the fast local
     poller); a plain directory without a ``.git`` is indexed as a
     filesystem repository (no Git involved). This is what makes
-    ``vhdl-rag-mcp`` useful with zero configuration: as soon as a
+    ``corvidex-mcp`` useful with zero configuration: as soon as a
     coding-standards file or other repositories are needed, add
     ``[[repositories]]`` entries and they take over (this default no
     longer applies once any repository is configured).
@@ -621,7 +621,7 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
 
 
 _DEFAULT_TEMPLATE = """\
-# vhdl-rag-mcp configuration.
+# corvidex-mcp configuration.
 #
 # With no [[repositories]] below, the directory the server is started in
 # is indexed automatically — no further configuration is required. This
@@ -661,12 +661,12 @@ _DEFAULT_TEMPLATE = """\
 # path, '*' crosses '/') whose files are not indexed; wildcard-free
 # patterns exclude the whole subtree.
 #
-# This file can be selected with the VHDL_RAG_MCP_CONFIG environment
+# This file can be selected with the CORVIDEX_MCP_CONFIG environment
 # variable or the --config command-line flag. The top-level scalar
 # options also have command-line overrides: --data-dir, --sync-interval,
 # --vhdl-ls-path, --log-level (command line wins).
 
-data_dir = "~/.local/share/vhdl-rag"
+data_dir = "~/.local/share/corvidex"
 sync_interval = 300
 # # Local working repositories (path, not url) are change-checked this
 # # often by a fast poller (commits, tracked edits, untracked add/remove);
@@ -781,7 +781,11 @@ def load_config(
     and call :func:`apply_default_repository` explicitly afterwards.
     """
     if path is None:
-        env_path = os.environ.get("VHDL_RAG_MCP_CONFIG")
+        # VHDL_RAG_MCP_CONFIG is the deprecated name (from the project's
+        # former name, vhdl-rag-mcp); kept as a fallback for existing setups.
+        env_path = os.environ.get("CORVIDEX_MCP_CONFIG") or os.environ.get(
+            "VHDL_RAG_MCP_CONFIG"
+        )
         path = Path(env_path) if env_path else None
     config_path = (path or default_config_path()).expanduser()
     if not config_path.exists():

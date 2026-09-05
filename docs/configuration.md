@@ -10,16 +10,16 @@ semantics (local checkouts, submodules, hooks, etc.).
 
 ## Config file
 
-Location: `~/.config/vhdl-rag/config.toml` (created with a commented
+Location: `~/.config/corvidex/config.toml` (created with a commented
 template on first run if absent). Select another file with the
-`VHDL_RAG_MCP_CONFIG` environment variable or the `--config PATH` flag.
+`CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag.
 The top-level scalar options also have command-line overrides
 (`--data-dir`, `--sync-interval`, `--local-sync-interval`,
 `--vhdl-ls-path`, `--veridian-path`, `--log-level`, `--no-index-cwd`,
 `--num-threads`); the command line wins.
 
 ```toml
-data_dir = "~/.local/share/vhdl-rag"   # all state lives here
+data_dir = "~/.local/share/corvidex"   # all state lives here
 sync_interval = 300                    # seconds between periodic syncs
 local_sync_interval = 10               # fast poller for local working
                                        # repositories (0 disables; remote
@@ -108,8 +108,8 @@ filesystem = true
   `[[repositories]]` entry also disables it — the default only applies
   when repositories is empty.
 - **Config file selection**: the default location is
-  `~/.config/vhdl-rag/config.toml` (a commented template is written
-  there on first run). Select another file with the `VHDL_RAG_MCP_CONFIG`
+  `~/.config/corvidex/config.toml` (a commented template is written
+  there on first run). Select another file with the `CORVIDEX_MCP_CONFIG`
   environment variable or the `--config PATH` flag. The top-level scalar
   options also have command-line overrides (`--data-dir`,
   `--sync-interval`, `--local-sync-interval`, `--vhdl-ls-path`,
@@ -293,7 +293,7 @@ the network. Everything is built on an internet-connected machine:
    machine with the same OS, architecture, and Python version as the
    target.)
 
-4. **Transfer** `dist/vhdl_rag_mcp-*.whl` and the `wheelhouse/`
+4. **Transfer** `dist/corvidex_mcp-*.whl` and the `wheelhouse/`
    directory to the air-gapped host.
 
 5. **Install offline** (Python ≥ 3.12 with `pip`, or uv):
@@ -301,16 +301,16 @@ the network. Everything is built on an internet-connected machine:
    ```console
    $ python3.12 -m venv .venv
    $ .venv/bin/pip install --no-index --find-links wheelhouse \
-       dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
+       dist/corvidex_mcp-0.1.0-py3-none-any.whl
    # with uv: uv venv .venv && uv pip install --python .venv/bin/python \
-   #     --no-index --find-links wheelhouse dist/vhdl_rag_mcp-0.1.0-py3-none-any.whl
+   #     --no-index --find-links wheelhouse dist/corvidex_mcp-0.1.0-py3-none-any.whl
    ```
 
 6. **Register the MCP client** with the absolute path to the installed
    console script (no `uvx`, no network):
 
    ```console
-   $ claude mcp add vhdl-rag-mcp -- /path/to/.venv/bin/vhdl-rag-mcp
+   $ claude mcp add corvidex-mcp -- /path/to/.venv/bin/corvidex-mcp
    ```
 
 On startup the self-check logs that the embedding model is loaded from
@@ -350,7 +350,7 @@ naming it — see [README § Still indexing?](../README.md#still-indexing).
 
 - **Data directory** (`data_dir`): the SQLite index (`index.sqlite`), the per-repo
   Git working trees (`<name>/`), sync state
-  (`state/repositories.json`), the log file (`logs/vhdl-rag-mcp.log`),
+  (`state/repositories.json`), the log file (`logs/corvidex-mcp.log`),
   the model cache (`embed-cache`), the dense-vector cache
   (`dense-cache`), and the lock file. Deleting it resets the index.
 - **State & retries**: a repository's `indexed_commit` advances only
@@ -360,5 +360,5 @@ naming it — see [README § Still indexing?](../README.md#still-indexing).
 - **Removing a repository** from the config: on the next start the
   server detects it in the state file and automatically drops all of
   its chunks and state.
-- **Logs**: `stderr` + `logs/vhdl-rag-mcp.log` (rotating, 3×5 MB).
+- **Logs**: `stderr` + `logs/corvidex-mcp.log` (rotating, 3×5 MB).
   `log_level = "DEBUG"` for LSP/git/embedding detail.

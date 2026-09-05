@@ -1,4 +1,4 @@
-"""LSP clients over stdio (see :mod:`vhdl_rag_mcp.lsp.client`)."""
+"""LSP clients over stdio (see :mod:`corvidex_mcp.lsp.client`)."""
 
 from .analyzers import (
     MODE_FALLBACK,

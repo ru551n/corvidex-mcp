@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from fake_lsp_util import executable_lsp_script
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.lsp import (
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.lsp import (
     MODE_FALLBACK,
     MODE_LSP,
     AnalyzerStatus,
@@ -401,7 +401,7 @@ def test_build_analyzer_statuses_mixed(
     def fake_which(name: str) -> str | None:
         return str(fake_veridian) if name == str(fake_veridian) else None
 
-    monkeypatch.setattr("vhdl_rag_mcp.lsp.analyzers.shutil.which", fake_which)
+    monkeypatch.setattr("corvidex_mcp.lsp.analyzers.shutil.which", fake_which)
     statuses = build_analyzer_statuses(str(fake_veridian), "/no/such/veridian")
     assert statuses["vhdl_ls"].mode == MODE_LSP
     assert statuses["vhdl_ls"].path == str(fake_veridian)

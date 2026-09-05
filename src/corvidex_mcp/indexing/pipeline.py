@@ -4,7 +4,7 @@ One :meth:`IndexPipeline.sync_repository` call moves one configured
 repository from its last indexed commit to the commit its ``ref``
 currently resolves to:
 
-1. git sync (clone/fetch/diff) via :mod:`vhdl_rag_mcp.git_manager`;
+1. git sync (clone/fetch/diff) via :mod:`corvidex_mcp.git_manager`;
 2. deletion of stale chunks (whole repository for a full plan, per-file
    for deleted/renamed-away files);
 3. per-domain chunking of the changed files (VHDL via vhdl_ls, docs,

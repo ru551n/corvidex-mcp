@@ -1,4 +1,10 @@
-# vhdl-rag-mcp
+<p align="center">
+  <img src="docs/logo.png" alt="corvidex-mcp logo" width="200">
+</p>
+
+# corvidex-mcp
+
+**An RTL-centric RAG and indexing MCP.**
 
 An MCP (Model Context Protocol) server that gives coding agents
 high-quality semantic search over an organization's HDL code (VHDL,
@@ -27,7 +33,7 @@ first *retrieves* relevant chunks from a knowledge base and uses those
 as context. For a coding agent, that means the context it needs
 usually lives *outside* the file it is editing — the company's coding
 standards, design guides, and reference IP from earlier projects.
-`vhdl-rag-mcp` is that retrieval layer: it maintains an up-to-date,
+`corvidex-mcp` is that retrieval layer: it maintains an up-to-date,
 semantically searchable index of your repositories and hands the
 agent the verbatim text (with exact repository, file, line range, and
 commit) of every match, so the agent grounds its work in what the
@@ -123,16 +129,16 @@ Register the server with your MCP client — no config file needed.
 Claude Code:
 
 ```console
-$ claude mcp add vhdl-rag-mcp -- uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp
+$ claude mcp add corvidex-mcp -- uvx --from git+ssh://git@github.com/ru551n/corvidex-mcp.git corvidex-mcp
 ```
 
 Maki (TOML config — verify the exact table names against your Maki
 version's docs):
 
 ```toml
-[mcp_servers.vhdl_rag_mcp]
+[mcp_servers.corvidex_mcp]
 command = "uvx"
-args = ["--from", "git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git", "vhdl-rag-mcp"]
+args = ["--from", "git+ssh://git@github.com/ru551n/corvidex-mcp.git", "corvidex-mcp"]
 ```
 
 That's it: **the server indexes the directory it is started in.**
@@ -148,8 +154,8 @@ until you configure `[[repositories]]` explicitly. Need more than the
 current directory — multiple repositories, a remote Git URL, a
 coding-standards file, tuned embedding settings? See
 **[docs/configuration.md](docs/configuration.md)**; add a config file
-at `~/.config/vhdl-rag/config.toml` (or point `--config`/
-`VHDL_RAG_MCP_CONFIG` elsewhere) and any `[[repositories]]` you
+at `~/.config/corvidex/config.toml` (or point `--config`/
+`CORVIDEX_MCP_CONFIG` elsewhere) and any `[[repositories]]` you
 configure there take over from the zero-config default.
 
 ## Usage
@@ -238,7 +244,7 @@ the dependency wheel set).
 Layout:
 
 ```
-src/vhdl_rag_mcp/
+src/corvidex_mcp/
   config.py        typed config (pydantic) + default template
   state.py         atomic repository sync state (schema-versioned)
   git_manager.py   async clone/fetch/checkout + incremental SyncPlan

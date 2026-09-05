@@ -16,19 +16,19 @@ import pytest
 from capability import sqlite_extensions_supported
 from pydantic import ValidationError
 
-from vhdl_rag_mcp.config import (
+from corvidex_mcp.config import (
     CODING_STANDARDS_REPO,
     AppConfig,
     RepositoryConfig,
 )
-from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.git_manager import GitManager
-from vhdl_rag_mcp.models import CollectionName
-from vhdl_rag_mcp.retrieval import RetrievalError, RetrievalService
-from vhdl_rag_mcp.selfcheck import check_coding_standards
-from vhdl_rag_mcp.server import VhdlRagApp
-from vhdl_rag_mcp.standards import (
+from corvidex_mcp.embeddings.provider import FastEmbedProvider
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.git_manager import GitManager
+from corvidex_mcp.models import CollectionName
+from corvidex_mcp.retrieval import RetrievalError, RetrievalService
+from corvidex_mcp.selfcheck import check_coding_standards
+from corvidex_mcp.server import VhdlRagApp
+from corvidex_mcp.standards import (
     STANDARDS_LANGUAGES,
     StandardsError,
     chunk_standards_file,
@@ -36,8 +36,8 @@ from vhdl_rag_mcp.standards import (
     standards_hash,
     sync_coding_standards,
 )
-from vhdl_rag_mcp.state import StateStore
-from vhdl_rag_mcp.vector_store import VectorStore
+from corvidex_mcp.state import StateStore
+from corvidex_mcp.vector_store import VectorStore
 
 pytestmark = pytest.mark.skipif(
     not sqlite_extensions_supported(),
@@ -592,7 +592,7 @@ def test_get_source_standards(tmp_path: Path) -> None:
 
 
 def test_render_report_up_to_date() -> None:
-    from vhdl_rag_mcp.server import _render_report
+    from corvidex_mcp.server import _render_report
 
     out = _render_report(
         [

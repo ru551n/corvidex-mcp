@@ -6,8 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from vhdl_rag_mcp.models import INDEX_SCHEMA_VERSION
-from vhdl_rag_mcp.state import STATE_SCHEMA_VERSION, RepositoryState, StateStore
+from corvidex_mcp.models import INDEX_SCHEMA_VERSION
+from corvidex_mcp.state import STATE_SCHEMA_VERSION, RepositoryState, StateStore
 
 INDEX = "index.sqlite"
 LEGACY = "repositories.json"

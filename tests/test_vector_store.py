@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 from capability import sqlite_extensions_supported
 
-from vhdl_rag_mcp.config import AppConfig
-from vhdl_rag_mcp.models import (
+from corvidex_mcp.config import AppConfig
+from corvidex_mcp.models import (
     INDEX_SCHEMA_VERSION,
     Chunk,
     CollectionName,
     ContentType,
     SearchResult,
 )
-from vhdl_rag_mcp.vector_store import VectorStore, VectorStoreError, point_id
+from corvidex_mcp.vector_store import VectorStore, VectorStoreError, point_id
 
 pytestmark = pytest.mark.skipif(
     not sqlite_extensions_supported(),

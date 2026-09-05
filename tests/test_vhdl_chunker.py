@@ -6,15 +6,15 @@ import itertools
 
 import pytest
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.indexing.vhdl import (
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.indexing.vhdl import (
     MAX_SYMBOLS,
     ChunkSpec,
     chunk_vhdl_file,
     extract_identifiers,
 )
-from vhdl_rag_mcp.lsp.client import SymbolInfo
-from vhdl_rag_mcp.models import CollectionName, ContentType
+from corvidex_mcp.lsp.client import SymbolInfo
+from corvidex_mcp.models import CollectionName, ContentType
 
 FIFO_VHDL = """\
 library ieee;
@@ -292,7 +292,7 @@ def test_spec_is_frozen():
 
 # -- size bound + structural split -------------------------------------------
 
-from vhdl_rag_mcp.indexing.common import MAX_CONTENT_CHARS  # noqa: E402
+from corvidex_mcp.indexing.common import MAX_CONTENT_CHARS  # noqa: E402
 
 
 def _big_architecture(n_proc: int = 16, decl_lines: int = 80) -> tuple[str, int]:

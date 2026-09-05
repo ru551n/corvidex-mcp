@@ -7,11 +7,11 @@ embedding, hybrid (dense + full-text) search — with the **real** fastembed mod
 fixed query battery (``tests/quality/queries.json``) retrieves the
 expected source files.
 
-Opt-in: skipped unless ``VHDL_RAG_RUN_QUALITY=1`` is set. The CI job
+Opt-in: skipped unless ``CORVIDEX_RUN_QUALITY=1`` is set. The CI job
 ``quality-e2e`` (ubuntu-latest only) sets it; the rest of the matrix
 stays offline and fast. Local run (downloads ~1.5 GB of models once):
 
-    VHDL_RAG_RUN_QUALITY=1 uv run pytest tests/test_quality.py -v
+    CORVIDEX_RUN_QUALITY=1 uv run pytest tests/test_quality.py -v
 
 Notes:
 
@@ -37,12 +37,12 @@ from pathlib import Path
 
 import pytest
 
-from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.models import CollectionName
-from vhdl_rag_mcp.server import VhdlRagApp
+from corvidex_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.models import CollectionName
+from corvidex_mcp.server import VhdlRagApp
 
-RUN_QUALITY = os.environ.get("VHDL_RAG_RUN_QUALITY") == "1"
+RUN_QUALITY = os.environ.get("CORVIDEX_RUN_QUALITY") == "1"
 
 HERE = Path(__file__).parent
 CORPUS_DIR = HERE / "quality" / "corpus"
@@ -55,7 +55,7 @@ STRICT_MUST_TOP1 = True
 
 pytestmark = pytest.mark.skipif(
     not RUN_QUALITY,
-    reason="opt-in quality test: set VHDL_RAG_RUN_QUALITY=1 (docs/quality-testing.md)",
+    reason="opt-in quality test: set CORVIDEX_RUN_QUALITY=1 (docs/quality-testing.md)",
 )
 
 GIT_ENV = {
@@ -82,14 +82,14 @@ def git(cwd: Path, *args: str) -> str:
 def quality_data_dir() -> Path:
     """Base for vector store + state; embed-cache lives under it.
 
-    CI points ``VHDL_RAG_QUALITY_DATA`` at the actions/cache path so
+    CI points ``CORVIDEX_QUALITY_DATA`` at the actions/cache path so
     model downloads happen once; locally this is a temp dir.
     """
-    env = os.environ.get("VHDL_RAG_QUALITY_DATA")
+    env = os.environ.get("CORVIDEX_QUALITY_DATA")
     return (
         Path(env)
         if env
-        else Path(os.environ.get("TMPDIR", "/tmp")) / "vhdl-rag-quality-data"
+        else Path(os.environ.get("TMPDIR", "/tmp")) / "corvidex-quality-data"
     )
 
 

@@ -8,7 +8,7 @@ from typing import ClassVar
 import numpy as np
 import pytest
 
-from vhdl_rag_mcp.embeddings import FastEmbedProvider
+from corvidex_mcp.embeddings import FastEmbedProvider
 
 
 class FakeDense:
@@ -269,7 +269,7 @@ def test_parallel_fallback_when_misses_small() -> None:
 
 
 def test_even_slices_balanced() -> None:
-    from vhdl_rag_mcp.embeddings.provider import _even_slices
+    from corvidex_mcp.embeddings.provider import _even_slices
 
     assert _even_slices(10, 4) == [(0, 3), (3, 6), (6, 9), (9, 10)]
     assert _even_slices(3, 8) == [(0, 1), (1, 2), (2, 3)]  # workers > count

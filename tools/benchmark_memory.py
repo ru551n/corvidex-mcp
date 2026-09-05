@@ -41,13 +41,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
-from vhdl_rag_mcp.indexing.code import chunk_code_file
-from vhdl_rag_mcp.indexing.docs import chunk_doc_file
-from vhdl_rag_mcp.indexing.vhdl import chunk_vhdl_file
-from vhdl_rag_mcp.models import Chunk, CollectionName
-from vhdl_rag_mcp.routing import classify_file
-from vhdl_rag_mcp.server import VhdlRagApp
+from corvidex_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
+from corvidex_mcp.indexing.code import chunk_code_file
+from corvidex_mcp.indexing.docs import chunk_doc_file
+from corvidex_mcp.indexing.vhdl import chunk_vhdl_file
+from corvidex_mcp.models import Chunk, CollectionName
+from corvidex_mcp.routing import classify_file
+from corvidex_mcp.server import VhdlRagApp
 
 logger = logging.getLogger("bench.memory")
 
@@ -63,8 +63,8 @@ def peak_rss_mb() -> float:
 def make_app(data_dir: Path, repos: list[tuple[str, Path]]) -> VhdlRagApp:
     data_dir.mkdir(parents=True, exist_ok=True)
     # Reuse a pre-provisioned model cache (air-gapped pattern) when provided
-    # via VHDL_RAG_EMBED_CACHE, so the benchmark does not re-download the model.
-    cache = os.environ.get("VHDL_RAG_EMBED_CACHE")
+    # via CORVIDEX_EMBED_CACHE, so the benchmark does not re-download the model.
+    cache = os.environ.get("CORVIDEX_EMBED_CACHE")
     if cache and not (data_dir / "embed-cache").exists():
         (data_dir / "embed-cache").symlink_to(Path(cache))
     config = AppConfig(
@@ -142,7 +142,7 @@ def token_counter(app: VhdlRagApp):
 
 
 async def run_stages(repos: list[tuple[str, Path]], out: Path) -> None:
-    data_dir = Path(tempfile.mkdtemp(prefix="vhdl-rag-bench-"))
+    data_dir = Path(tempfile.mkdtemp(prefix="corvidex-bench-"))
     try:
         app = make_app(data_dir, repos)
         counts_by_repo: dict[str, int] = {}
@@ -210,7 +210,7 @@ async def run_stages(repos: list[tuple[str, Path]], out: Path) -> None:
         logger.info("D: %s", d)
 
         # F: full pipeline on a fresh app/data dir (the real end-to-end number).
-        data_dir2 = Path(tempfile.mkdtemp(prefix="vhdl-rag-bench-full-"))
+        data_dir2 = Path(tempfile.mkdtemp(prefix="corvidex-bench-full-"))
         app2 = make_app(data_dir2, repos)
         t_setup = time.perf_counter()
         app2.ensure_collections()  # mirrors production startup before sync
@@ -268,7 +268,7 @@ def _sweep_text(tokenizer: Any, n_tokens: int) -> str:
 
 
 async def run_sweep(out: Path) -> None:
-    data_dir = Path(tempfile.mkdtemp(prefix="vhdl-rag-bench-sweep-"))
+    data_dir = Path(tempfile.mkdtemp(prefix="corvidex-bench-sweep-"))
     try:
         app = make_app(data_dir, [])
         app.ensure_collections()  # loads the model
