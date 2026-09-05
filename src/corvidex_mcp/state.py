@@ -7,9 +7,12 @@ are committed as they change; only commit state that reflects a fully
 successful index update is persisted, and a failed index run leaves
 the previous state untouched.
 
-The table is created in the current layout at construction time, so
-there is no layout migration to run. The only upgrade path is a
-one-time import of the legacy ``state/repositories.json`` document
+The table is created in the current layout at construction time; an
+older database missing a column introduced since (e.g. ``submodules``)
+is upgraded in place with an ``ALTER TABLE ... ADD COLUMN`` (see
+:meth:`StateStore._add_missing_columns`) — existing rows keep their
+data and simply get the new column's default value. Separately, there
+is a one-time import of the legacy ``state/repositories.json`` document
 from earlier deployments (see :meth:`StateStore.migrate`):
 
 * a current (v2) document is imported as-is — its indexed commits
@@ -50,8 +53,8 @@ _STATE_VERSION_KEY = "state_schema_version"
 _UPSERT_SQL = (
     "INSERT INTO repositories ("
     "name, indexed_commit, indexed_at, last_sync_at, last_sync_error, "
-    "last_indexed_file_count, local_fingerprint, untracked_indexed"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+    "last_indexed_file_count, local_fingerprint, untracked_indexed, submodules"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT(name) DO UPDATE SET "
     "indexed_commit = excluded.indexed_commit, "
     "indexed_at = excluded.indexed_at, "
@@ -59,7 +62,8 @@ _UPSERT_SQL = (
     "last_sync_error = excluded.last_sync_error, "
     "last_indexed_file_count = excluded.last_indexed_file_count, "
     "local_fingerprint = excluded.local_fingerprint, "
-    "untracked_indexed = excluded.untracked_indexed"
+    "untracked_indexed = excluded.untracked_indexed, "
+    "submodules = excluded.submodules"
 )
 
 
@@ -140,15 +144,35 @@ class StateStore:
             " last_sync_error TEXT,"
             " last_indexed_file_count INTEGER NOT NULL DEFAULT 0,"
             " local_fingerprint TEXT,"
-            " untracked_indexed TEXT NOT NULL DEFAULT '{}'"
+            " untracked_indexed TEXT NOT NULL DEFAULT '{}',"
+            " submodules TEXT NOT NULL DEFAULT '{}'"
             ")"
         )
+        self._add_missing_columns()
         conn.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_STATE_VERSION_KEY, str(STATE_SCHEMA_VERSION)),
         )
         conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Add columns introduced after a database's table was created.
+
+        ``CREATE TABLE IF NOT EXISTS`` above is a no-op against a
+        database from an older deployment, so a newly introduced column
+        (e.g. ``submodules``) is missing from it and must be added
+        explicitly. Existing rows get the column's default value.
+        """
+        conn = self._conn
+        existing = {
+            row["name"] for row in conn.execute("PRAGMA table_info(repositories)")
+        }
+        if "submodules" not in existing:
+            conn.execute(
+                "ALTER TABLE repositories "
+                "ADD COLUMN submodules TEXT NOT NULL DEFAULT '{}'"
+            )
 
     # -- load / persist ------------------------------------------------------
 
@@ -165,6 +189,9 @@ class StateStore:
             untracked = json.loads(row["untracked_indexed"])
             if not isinstance(untracked, dict):
                 raise ValueError("untracked_indexed is not an object")
+            submodules = json.loads(row["submodules"])
+            if not isinstance(submodules, dict):
+                raise ValueError("submodules is not an object")
             return RepositoryState(
                 name=row["name"],
                 indexed_commit=row["indexed_commit"],
@@ -174,6 +201,7 @@ class StateStore:
                 last_indexed_file_count=row["last_indexed_file_count"],
                 local_fingerprint=row["local_fingerprint"],
                 untracked_indexed=untracked,
+                submodules=submodules,
             )
         except (ValueError, TypeError) as exc:
             logger.error("skipping corrupt state row %r: %s", row["name"], exc)
@@ -190,6 +218,7 @@ class StateStore:
             state.last_indexed_file_count,
             state.local_fingerprint,
             json.dumps(state.untracked_indexed),
+            json.dumps(state.submodules),
         )
 
     def _upsert(self, state: RepositoryState) -> None:
@@ -229,14 +258,13 @@ class StateStore:
         """True while a legacy state document awaits import."""
         return self._legacy is not None
 
-    def reset_all_indexed(self, save: bool = True) -> None:
+    def reset_all_indexed(self) -> None:
         """Forget every repository's indexed commit: the next sync
         reindexes each one fully and deterministically."""
         for state in self._states.values():
             state.indexed_commit = None
             state.indexed_at = None
-        if save:
-            self.save()
+        self.save()
 
     # -- legacy JSON import ---------------------------------------------------
 
@@ -336,7 +364,6 @@ class StateStore:
         name: str,
         commit: str,
         file_count: int = 0,
-        save: bool = True,
         submodules: dict[str, str] | None = None,
     ) -> None:
         """Mark a commit as fully indexed. Call only after the index update
@@ -349,12 +376,10 @@ class StateStore:
         state.last_indexed_file_count = file_count
         if submodules is not None:
             state.submodules = dict(submodules)
-        if save:
-            self._upsert(state)
+        self._upsert(state)
 
-    def record_sync(self, name: str, error: str | None, save: bool = True) -> None:
+    def record_sync(self, name: str, error: str | None) -> None:
         state = self.get(name)
         state.last_sync_at = _utcnow()
         state.last_sync_error = error
-        if save:
-            self._upsert(state)
+        self._upsert(state)

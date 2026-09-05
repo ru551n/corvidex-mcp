@@ -238,6 +238,77 @@ def test_reset_all_indexed_forgets_commits(tmp_path: Path) -> None:
     reloaded.close()
 
 
+def test_submodules_persist_across_reload(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.set_indexed("repo1", "abc123", submodules={"ip/x": "abc"})
+    store.close()
+
+    reloaded = make_store(tmp_path)
+    state = reloaded.get("repo1")
+    assert state.submodules == {"ip/x": "abc"}
+    reloaded.close()
+
+
+def test_submodules_untouched_when_not_given(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.set_indexed("repo1", "abc123", submodules={"ip/x": "abc"})
+    store.set_indexed("repo1", "def456")
+    store.close()
+
+    reloaded = make_store(tmp_path)
+    assert reloaded.get("repo1").submodules == {"ip/x": "abc"}
+    reloaded.close()
+
+
+def test_old_schema_database_is_migrated_with_submodules_column(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / INDEX
+    conn = sqlite3.connect(index_path)
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "CREATE TABLE repositories ("
+            " name TEXT PRIMARY KEY,"
+            " indexed_commit TEXT,"
+            " indexed_at TEXT,"
+            " last_sync_at TEXT,"
+            " last_sync_error TEXT,"
+            " last_indexed_file_count INTEGER NOT NULL DEFAULT 0,"
+            " local_fingerprint TEXT,"
+            " untracked_indexed TEXT NOT NULL DEFAULT '{}'"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO repositories (name, indexed_commit, untracked_indexed) "
+            "VALUES (?, ?, ?)",
+            ("repo1", "abc123", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = make_store(tmp_path)
+    # The pre-existing row survives the migration, with the new column
+    # defaulted to an empty map.
+    state = store.get("repo1")
+    assert state.indexed_commit == "abc123"
+    assert state.submodules == {}
+    store.set_indexed("repo1", "abc123", submodules={"ip/x": "def"})
+    store.close()
+
+    conn = sqlite3.connect(index_path)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(repositories)")}
+        row = conn.execute(
+            "SELECT submodules FROM repositories WHERE name = ?", ("repo1",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "submodules" in columns
+    assert row == ('{"ip/x": "def"}',)
+
+
 def test_remove_forgets_state(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     store.set_indexed("repo1", "abc123")
