@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
@@ -675,6 +676,43 @@ def test_filesystem_local_fingerprint(manager: GitManager, fs_root: Path):
     assert fingerprint == plan.fingerprint
     (fs_root / "rtl" / "x.vhd").write_text("entity x is end;\n")
     assert run(manager.local_fingerprint(cfg)) != fingerprint
+
+
+def test_filesystem_fingerprint_format(manager: GitManager, fs_root: Path):
+    """Locks down the walk fingerprint's exact wire format: sha256 of
+    ``"{path}\\t{mtime_ns}\\t{size}\\n"`` lines, sorted by path. The
+    ``os.scandir``-based walk must keep producing this so existing
+    indexes are not invalidated by the rewrite (``commit`` and
+    ``local_fingerprint`` are the fingerprint itself)."""
+    fingerprint, paths = manager._filesystem_fingerprint(fs_root)
+    assert list(paths) == sorted(paths)
+    expected_lines = []
+    for rel in paths:
+        st = (fs_root / rel).stat()
+        expected_lines.append(f"{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+    expected_lines.sort()
+    digest = hashlib.sha256()
+    for line in expected_lines:
+        digest.update(line.encode("utf-8"))
+        digest.update(b"\n")
+    assert fingerprint == digest.hexdigest()
+
+
+def test_filesystem_fingerprint_skips_symlinked_directory(
+    manager: GitManager, tmp_path: Path
+):
+    """A symlinked directory is neither descended into nor recorded
+    itself, matching ``os.walk(..., followlinks=False)``."""
+    root = tmp_path / "fsrepo2"
+    real = tmp_path / "elsewhere"
+    (real).mkdir(parents=True)
+    (real / "outside.vhd").write_text("entity outside is end;\n")
+    root.mkdir()
+    (root / "rtl").mkdir()
+    (root / "rtl" / "a.vhd").write_text("entity a is end;\n")
+    (root / "link_dir").symlink_to(real, target_is_directory=True)
+    _fingerprint, paths = manager._filesystem_fingerprint(root)
+    assert paths == ("rtl/a.vhd",)
 
 
 def test_filesystem_missing_path(manager: GitManager, tmp_path: Path):

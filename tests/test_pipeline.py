@@ -1091,6 +1091,78 @@ async def test_filesystem_unchanged_is_noop(fs_env) -> None:
     assert store.count() == before
 
 
+def _count_reads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Patch ``Path.read_bytes`` to record every path it is called with,
+    while still returning the real content."""
+    calls: list[Path] = []
+    real_read_bytes = Path.read_bytes
+
+    def counting_read_bytes(self: Path, *a: object, **kw: object) -> bytes:
+        calls.append(self)
+        return real_read_bytes(self, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    return calls
+
+
+async def test_filesystem_unchanged_reads_and_hashes_nothing(
+    fs_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second sync of an unchanged filesystem repository must not read
+    (let alone hash) a single file: the unchanged walk fingerprint alone
+    already proves no file's content changed, so the pipeline's plan
+    refinement short-circuits before its content-hashing loop."""
+    store, pipeline, config = fs_env
+    cfg = config.repository("fsrepo")
+    await pipeline.sync_repository(cfg)
+    before = store.count()
+
+    calls = _count_reads(monkeypatch)
+    await pipeline.sync_repository(cfg)
+    assert calls == []
+    assert store.count() == before
+
+
+async def test_filesystem_binary_file_never_hashed(
+    fs_env, fs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unindexable files (here: a binary with no recognized extension)
+    are classified before hashing, so they are never read at all — not
+    on the first sync, not on later ones."""
+    (fs_root / "blob.bin").write_bytes(b"\x00\x01binary-not-utf8\xff")
+
+    store, pipeline, config = fs_env
+    cfg = config.repository("fsrepo")
+
+    calls = _count_reads(monkeypatch)
+    await pipeline.sync_repository(cfg)
+    assert not any(p.name == "blob.bin" for p in calls)
+    assert store.chunks_for_file("fsrepo", "blob.bin") == []
+
+    (fs_root / "rtl" / "fifo.vhd").write_text(FIFO_VHDL + "-- v2\n")
+    calls.clear()
+    await pipeline.sync_repository(cfg)
+    assert not any(p.name == "blob.bin" for p in calls)
+
+
+async def test_filesystem_modified_file_still_detected(
+    fs_env, fs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A content edit moves the walk fingerprint, so the short-circuit
+    does not apply and the modified file is re-chunked."""
+    store, pipeline, config = fs_env
+    cfg = config.repository("fsrepo")
+    await pipeline.sync_repository(cfg)
+
+    (fs_root / "rtl" / "fifo.vhd").write_text(FIFO_VHDL + "-- v2\n")
+    calls = _count_reads(monkeypatch)
+    await pipeline.sync_repository(cfg)
+    assert any(p.name == "fifo.vhd" for p in calls)
+    chunks = store.chunks_for_file("fsrepo", "rtl/fifo.vhd")
+    assert len(chunks) == 3
+    assert any("v2" in c.content for c in chunks)
+
+
 async def test_filesystem_incremental_add_modify_delete(fs_env, fs_root: Path) -> None:
     store, pipeline, config = fs_env
     cfg = config.repository("fsrepo")

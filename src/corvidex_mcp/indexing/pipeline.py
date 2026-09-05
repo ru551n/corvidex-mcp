@@ -184,14 +184,38 @@ class IndexPipeline:
         re-chunking). ``untracked_fingerprints`` is what the caller
         persists after a successful sync. For remote repositories
         (``plan.fingerprint is None``) the plan is returned unchanged.
+
+        Filesystem repositories get a further shortcut: their walk
+        fingerprint already covers every file's content (path + mtime +
+        size — see :meth:`GitManager._filesystem_fingerprint`), so once
+        the repository has been indexed at least once, an unchanged
+        fingerprint proves no file's content changed and the whole
+        content-hashing loop below is skipped — no file is read. Working
+        Git repositories cannot take this shortcut: their fingerprint is
+        ``HEAD`` + porcelain status, which does not move when an
+        existing untracked file is edited in place (see
+        :meth:`GitManager.local_fingerprint`), so their untracked files
+        must still be re-hashed every sync to catch that case.
+
+        Only files :func:`classify_file` considers indexable are hashed;
+        binaries and other unindexable files are never read.
         """
         if plan.fingerprint is None:
             return plan, {}
-        stored = dict(self._states.get(cfg.name).untracked_indexed)
+        state = self._states.get(cfg.name)
+        stored = dict(state.untracked_indexed)
+        if (
+            cfg.is_filesystem
+            and state.indexed_commit is not None
+            and plan.fingerprint == state.local_fingerprint
+        ):
+            return plan, stored
         repo_dir = self._git.repo_dir(cfg)
         fingerprints: dict[str, str] = {}
         new_or_changed: list[str] = []
         for path in plan.untracked:
+            if classify_file(path, cfg.enabled_collections, cfg.exclude) is None:
+                continue
             digest = self._content_fingerprint(repo_dir / path)
             if digest is None:
                 # Unreadable or gone mid-sync: not indexed this round (if it

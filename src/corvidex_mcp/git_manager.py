@@ -981,7 +981,13 @@ class GitManager:
         detection and the fast local poller notices file-set and content
         changes between syncs. ``commit`` is the fingerprint itself, so
         chunk attribution is stable for an unchanged tree. A first sync
-        (no last commit) is a full plan listing every file.
+        (no last commit) is a full plan listing every file. Every file
+        is listed in ``untracked`` on every sync — that part is cheap,
+        just the walk above — but when the walk fingerprint matches the
+        one stored at the last successful sync, the pipeline's plan
+        refinement (:meth:`IndexPipeline._refine_local_plan`) skips
+        reading and hashing every one of those files: an unchanged
+        fingerprint already proves no file's content changed.
         """
         assert cfg.path is not None
         fingerprint, files = self._filesystem_fingerprint(cfg.path)
@@ -1021,23 +1027,27 @@ class GitManager:
         fingerprint changes when the file set changes or a file is
         touched/edited (the poller uses it); content-level change
         detection remains the pipeline's sha256 content fingerprints.
+
+        This runs from the fast local poller every ``local_sync_interval``
+        (as well as at plan time), so it is written for one ``os.scandir``
+        pass per directory rather than ``os.walk`` + ``Path.is_symlink``
+        / ``Path.is_file`` / ``Path.stat``: each ``os.scandir`` entry
+        already carries the directory-entry type (``d_type`` on
+        platforms that support it), so ``is_symlink()`` and
+        ``is_dir()``/``is_file(follow_symlinks=False)`` are typically
+        free, and the one ``stat(follow_symlinks=False)`` call needed for
+        mtime/size reuses that same cached result — one syscall per file
+        instead of three. The final entry list is sorted before hashing,
+        so the (unspecified) order ``os.scandir`` yields entries in does
+        not affect the result; the output is byte-identical to an
+        ``os.walk``-based walk of the same tree.
         """
         if not root.is_dir():
             raise GitError(
                 f"filesystem path {root} does not exist or is not a directory"
             )
         entries: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            for filename in sorted(filenames):
-                if filename.startswith("."):
-                    continue
-                full = Path(dirpath) / filename
-                if full.is_symlink() or not full.is_file():
-                    continue
-                rel = full.relative_to(root).as_posix()
-                st = full.stat()
-                entries.append(f"{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+        GitManager._scan_filesystem_dir(str(root), "", entries)
         entries.sort()
         digest = hashlib.sha256()
         for line in entries:
@@ -1045,6 +1055,33 @@ class GitManager:
             digest.update(b"\n")
         paths = tuple(entry.split("\t", 1)[0] for entry in entries)
         return digest.hexdigest(), paths
+
+    @staticmethod
+    def _scan_filesystem_dir(dirpath: str, rel_prefix: str, entries: list[str]) -> None:
+        """Recursively collect ``"{rel}\\t{mtime_ns}\\t{size}"`` lines for
+        one directory into ``entries`` (appended, unordered).
+
+        ``rel_prefix`` is ``""`` at the root and ``"<dir>/"`` for a
+        descendant, so relative paths are built with plain string
+        concatenation instead of ``Path.relative_to`` /
+        ``PurePath.as_posix``. Hidden entries (dot files/dirs) and
+        symlinks (files or directories) are skipped, matching
+        :meth:`_filesystem_fingerprint`'s docstring; a symlinked
+        directory is neither descended into nor recorded, exactly like
+        ``os.walk(..., followlinks=False)``.
+        """
+        with os.scandir(dirpath) as it:
+            for entry in it:
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_symlink():
+                    continue
+                rel = rel_prefix + entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    GitManager._scan_filesystem_dir(entry.path, rel + "/", entries)
+                elif entry.is_file(follow_symlinks=False):
+                    st = entry.stat(follow_symlinks=False)
+                    entries.append(f"{rel}\t{st.st_mtime_ns}\t{st.st_size}")
 
     # -- file access --------------------------------------------------------
 
