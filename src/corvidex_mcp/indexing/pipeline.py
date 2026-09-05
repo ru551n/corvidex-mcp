@@ -265,8 +265,6 @@ class IndexPipeline:
     async def _apply_plan(self, cfg: RepositoryConfig, plan: SyncPlan) -> None:
         if plan.full:
             self._store.delete_repository(cfg.name)
-        for f in plan.deleted:
-            self._store.delete_file(cfg.name, f)
         for prefix in plan.deleted_submodule_prefixes:
             self._store.delete_file_prefix(cfg.name, prefix)
 
@@ -278,12 +276,15 @@ class IndexPipeline:
             files_by_kind.setdefault(kind, []).append(f)
 
         # Chunk IDs embed the line range, so a modified file's new chunks
-        # get new IDs: remove the file's previous chunks before upserting
-        # (full plans already dropped the whole repository above).
+        # get new IDs: remove deleted files' and modified files' previous
+        # chunks in one batched call before upserting (full plans already
+        # dropped the whole repository above).
+        stale_files = list(plan.deleted)
         if not plan.full:
             for files in files_by_kind.values():
-                for f in files:
-                    self._store.delete_file(cfg.name, f)
+                stale_files.extend(files)
+        if stale_files:
+            self._store.delete_files(cfg.name, stale_files)
 
         chunks: list[Chunk] = []
         vhdl_files = files_by_kind.pop(VHDL_KIND, [])

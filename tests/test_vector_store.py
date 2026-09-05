@@ -480,33 +480,6 @@ def test_chunks_for_file_spans_collections(store: VectorStore) -> None:
     assert store.chunks_for_file("repoA", "other.vhd") == []
 
 
-def test_get_by_symbol(store: VectorStore) -> None:
-    store.upsert_chunks(
-        [
-            make_chunk(symbol="p_write", entity="fifo", content="write process"),
-            make_chunk(
-                symbol="p_read",
-                kind="process",
-                start=21,
-                end=30,
-                entity="fifo",
-                content="read process",
-            ),
-            make_chunk(
-                symbol="log2",
-                kind="function",
-                start=31,
-                end=40,
-                content="log2 function",
-            ),
-        ],
-        dense=[dense(1), dense(2), dense(3)],
-    )
-    by_symbol = store.get_by_symbol("repoA", "log2", "function")
-    assert [c.symbol for c in by_symbol] == ["log2"]
-    assert store.get_by_symbol("repoA", "log2", "process") == []
-
-
 def test_payload_roundtrip_content_and_attribution(store: VectorStore) -> None:
     chunk = make_chunk(
         symbol="p_write",
@@ -601,3 +574,191 @@ def test_queries_on_missing_collection_are_safe(tmp_path: Path) -> None:
     assert store.count() == 0
     assert store.delete_file("repoA", "f.vhd") == 0
     store.close()
+
+
+# -- batched writes ----------------------------------------------------------
+
+
+def _row_count(store: VectorStore, table: str) -> int:
+    row = store._conn.execute(f"SELECT count(*) FROM {table}").fetchone()
+    return int(row[0])
+
+
+def test_delete_files_batches_across_the_bound_parameter_limit(
+    store: VectorStore,
+) -> None:
+    """>900 files in one call: the IN-list is chunked, one transaction."""
+    n = 1200
+    files = [f"rtl/f{i}.vhd" for i in range(n)]
+    chunks = [make_chunk(file=f, symbol=f"s{i}") for i, f in enumerate(files)]
+    keep = make_chunk(file="rtl/keep.vhd", symbol="keep")
+    store.upsert_chunks([*chunks, keep], dense=[dense(i) for i in range(n + 1)])
+    assert store.count() == n + 1
+
+    deleted = store.delete_files("repoA", files)
+    assert deleted == n
+    assert store.count() == 1
+    assert store.chunks_for_file("repoA", "rtl/keep.vhd") != []
+    for f in (files[0], files[n // 2], files[-1]):
+        assert store.chunks_for_file("repoA", f) == []
+    # Rows are gone from every underlying table, not just chunks_hdl.
+    assert _row_count(store, "vec_hdl") == 1
+    assert _row_count(store, "fts_hdl") == 1
+
+
+def test_delete_files_spans_collections_in_one_call(store: VectorStore) -> None:
+    store.upsert_chunks(
+        [
+            make_chunk(file="rtl/fifo.vhd", symbol="p_write"),
+            make_chunk(
+                collection=CollectionName.DOCS,
+                content_type=ContentType.DOCUMENTATION,
+                language="markdown",
+                file="docs/standard.md",
+                symbol="FIFO",
+                kind="section",
+                content="fifo documentation",
+            ),
+            make_chunk(
+                collection=CollectionName.CODE,
+                content_type=ContentType.CODE,
+                language="c",
+                file="src/fifo.c",
+                symbol="fifo_write",
+                kind="function",
+            ),
+        ],
+        dense=[dense(0), dense(1), dense(2)],
+    )
+    deleted = store.delete_files(
+        "repoA", ["rtl/fifo.vhd", "docs/standard.md", "src/fifo.c"]
+    )
+    assert deleted == 3
+    assert store.count() == 0
+
+
+def test_delete_files_empty_is_a_no_op(store: VectorStore) -> None:
+    store.upsert_chunks([make_chunk()], dense=[dense(1)])
+    assert store.delete_files("repoA", []) == 0
+    assert store.count() == 1
+
+
+def test_upsert_more_than_the_bound_parameter_limit(store: VectorStore) -> None:
+    """>900 chunks in one call: the id-lookup and inserts are chunked. Every
+    ``dense(i)`` for i >= 1 normalizes to the same unit vector, so identity
+    is checked via row data (not vector similarity, which cannot
+    distinguish them) for a chunk from each end of the batch split."""
+    n = 1200
+    chunks = [make_chunk(file=f"rtl/f{i}.vhd", symbol=f"s{i}") for i in range(n)]
+    store.upsert_chunks(chunks, dense=[dense(i) for i in range(n)])
+    assert store.count(CollectionName.HDL) == n
+    assert _row_count(store, "vec_hdl") == n
+    assert _row_count(store, "fts_hdl") == n
+    for i in (0, 500, 899, 900, n - 1):
+        chunks_for_file = store.chunks_for_file("repoA", f"rtl/f{i}.vhd")
+        assert [c.symbol for c in chunks_for_file] == [f"s{i}"]
+
+
+def test_upsert_on_conflict_replaces_vec_and_fts_rows_without_duplicates(
+    store: VectorStore,
+) -> None:
+    """Re-upserting the same chunk (across separate calls) hits the
+    ON CONFLICT UPDATE path; the old vec/fts rows must not linger."""
+    chunk = make_chunk(content="original body")
+    store.upsert_chunks([chunk], dense=[dense(1)])
+    assert store.count(CollectionName.HDL) == 1
+    assert _row_count(store, "vec_hdl") == 1
+    assert _row_count(store, "fts_hdl") == 1
+
+    updated = make_chunk(content="rewritten body")
+    assert point_id(updated) == point_id(chunk)  # same canonical id
+    store.upsert_chunks([updated], dense=[dense(2)])
+
+    assert store.count(CollectionName.HDL) == 1
+    assert _row_count(store, "vec_hdl") == 1
+    assert _row_count(store, "fts_hdl") == 1
+    # Lexical mode isolates the full-text leg: hybrid mode would still
+    # surface this chunk for the "original" query via its dense leg (it
+    # is the only row in the collection), which would not tell us
+    # whether the old fts5 row was actually replaced.
+    results = store.query(
+        CollectionName.HDL,
+        dense=dense(2),
+        query_text="rewritten",
+        limit=5,
+        mode="lexical",
+    )
+    assert [r.chunk.content for r in results] == ["rewritten body"]
+    stale = store.query(
+        CollectionName.HDL,
+        dense=dense(2),
+        query_text="original",
+        limit=5,
+        mode="lexical",
+    )
+    assert stale == []
+
+
+def test_upsert_duplicate_id_within_one_call_last_write_wins(
+    store: VectorStore,
+) -> None:
+    first = make_chunk(content="first")
+    second = make_chunk(content="second")  # same repo/file/symbol/lines -> same id
+    assert point_id(first) == point_id(second)
+    store.upsert_chunks([first, second], dense=[dense(1), dense(2)])
+    assert store.count(CollectionName.HDL) == 1
+    assert _row_count(store, "vec_hdl") == 1
+    assert _row_count(store, "fts_hdl") == 1
+    results = store.query(
+        CollectionName.HDL, dense=dense(2), query_text="second", limit=5
+    )
+    assert [r.chunk.content for r in results] == ["second"]
+
+
+def test_index_drop_migration_on_an_existing_db(tmp_path: Path) -> None:
+    """A database created before the redundant-index cleanup has its
+    ``idx_<c>_repo`` and ``idx_<c>_symbol`` indexes dropped on ensure."""
+    config = AppConfig(data_dir=tmp_path / "data")
+    legacy = VectorStore(config)
+    legacy._conn.execute(
+        'CREATE TABLE chunks_hdl (id TEXT PRIMARY KEY, "repository" TEXT, '
+        '"file" TEXT, "symbol_kind" TEXT)'
+    )
+    legacy._conn.execute('CREATE INDEX idx_hdl_repo ON chunks_hdl("repository")')
+    legacy._conn.execute(
+        'CREATE INDEX idx_hdl_repo_file ON chunks_hdl("repository", "file")'
+    )
+    legacy._conn.execute(
+        'CREATE INDEX idx_hdl_symbol ON chunks_hdl("symbol_kind", "repository")'
+    )
+    legacy._conn.execute("CREATE VIRTUAL TABLE vec_hdl USING vec0(embedding float[4])")
+    legacy._conn.execute("CREATE VIRTUAL TABLE fts_hdl USING fts5(content)")
+    legacy._conn.commit()
+    legacy.close()
+
+    def index_names() -> set[str]:
+        rows = store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = 'chunks_hdl'"
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    store = VectorStore(config)
+    assert {"idx_hdl_repo", "idx_hdl_repo_file", "idx_hdl_symbol"} <= index_names()
+    store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
+    # The PRIMARY KEY's implicit unique index is untouched — only the two
+    # redundant secondary indexes are dropped.
+    assert index_names() == {"idx_hdl_repo_file", "sqlite_autoindex_chunks_hdl_1"}
+    store.close()
+
+
+def test_serialize_vector_is_byte_identical_to_sqlite_vec() -> None:
+    import numpy as np
+    import sqlite_vec
+
+    from corvidex_mcp.vector_store import _serialize_vector, _unit_vector
+
+    rng = np.random.default_rng(42)
+    raw = rng.standard_normal(32).astype(np.float32)
+    unit = _unit_vector(raw.tolist())
+    assert _serialize_vector(unit) == sqlite_vec.serialize_float32(unit.tolist())

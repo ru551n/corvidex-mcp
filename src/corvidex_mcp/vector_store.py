@@ -56,7 +56,7 @@ import logging
 import re
 import sqlite3
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,7 +64,7 @@ import numpy as np
 import sqlite_vec  # type: ignore[import-untyped]
 
 from .config import AppConfig
-from .models import INDEX_SCHEMA_VERSION, Chunk, CollectionName
+from .models import INDEX_SCHEMA_VERSION, Chunk, CollectionName, ContentType
 
 logger = logging.getLogger(__name__)
 
@@ -75,16 +75,6 @@ EXTENSION_SUPPORT_ERROR = (
     "install 3.14') or a system/homebrew Python; the self-check "
     "reports the same at startup."
 )
-
-
-def extensions_supported() -> bool:
-    """True when this Python's stdlib SQLite can load loadable
-    extensions (which sqlite-vec needs)."""
-    conn = sqlite3.connect(":memory:")
-    try:
-        return hasattr(conn, "enable_load_extension")
-    finally:
-        conn.close()
 
 
 COLLECTION_HDL = "hdl"
@@ -101,9 +91,10 @@ ALL_COLLECTIONS: tuple[CollectionName, ...] = (
 # default).
 _RRF_K = 60
 
-#: Rows returned by get_by_symbol are capped (a symbol rarely appears in
-#: more than a few constructs of one kind).
-_SYMBOL_LOOKUP_LIMIT = 64
+#: SQLite's default compiled bound-parameter limit (SQLITE_MAX_VARIABLE_NUMBER)
+#: is 999-ish depending on build; batched IN-lists and executemany chunking
+#: stay comfortably under it.
+_MAX_IN_PARAMS = 900
 
 # English stop words dropped from FTS queries: with a pure OR-of-tokens
 # query they would match nearly every document and blur the exact-match
@@ -334,15 +325,15 @@ def _where_clause(
     if should:
         for key, values in should.items():
             _check_filter_key(key)
-            ors: list[str] = []
-            for value in values:
-                ors.append(
-                    f"EXISTS (SELECT 1 FROM json_each(c.{_col(key)}) "
-                    "WHERE json_each.value = ?)"
-                )
-                params.append(value)
-            if ors:
-                parts.append("(" + " OR ".join(ors) + ")")
+            value_list = list(values)
+            if not value_list:
+                continue
+            marks = ", ".join("?" * len(value_list))
+            parts.append(
+                f"EXISTS (SELECT 1 FROM json_each(c.{_col(key)}) "
+                f"WHERE json_each.value IN ({marks}))"
+            )
+            params.extend(value_list)
     if not parts:
         return None
     return " AND ".join(parts), params
@@ -373,10 +364,23 @@ def _unit_vector(vector: Sequence[float]) -> np.ndarray:
     return arr
 
 
+def _serialize_vector(vector: np.ndarray) -> bytes:
+    """Pack a dense vector for ``vec0`` storage.
+
+    Byte-identical to ``sqlite_vec.serialize_float32`` (little-endian
+    float32), without that helper's Python-list round trip.
+    """
+    return np.asarray(vector, dtype="<f4").tobytes()
+
+
+def _batched[T](seq: Sequence[T], size: int) -> Iterator[list[T]]:
+    """Yield ``seq`` in chunks of at most ``size`` (keeps IN-lists and
+    executemany batches under SQLite's bound-parameter limit)."""
+    return (list(seq[i : i + size]) for i in range(0, len(seq), size))
+
+
 def chunk_from_payload(payload: dict[str, Any]) -> Chunk:
     """Rebuild a Chunk from its stored metadata row."""
-    from .models import CollectionName, ContentType
-
     symbols_raw = payload.get("symbols")
     if isinstance(symbols_raw, str):
         symbols_raw = json.loads(symbols_raw)
@@ -440,6 +444,11 @@ class VectorStore:
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
         )
         self._conn.commit()
+        # Cache of collection names with a ``chunks_<name>`` table, refreshed
+        # only by :meth:`_create_collection` and :meth:`_drop_legacy_vhdl`:
+        # the table set otherwise never changes for the life of the process,
+        # so hot read/write paths check this set instead of sqlite_master.
+        self._known_collections: set[str] = self._tables()
         logger.info("sqlite-vec embedded store: %s", path)
 
     def close(self) -> None:
@@ -482,21 +491,14 @@ class VectorStore:
         self._conn.execute(
             f"CREATE TABLE chunks_{collection} (id TEXT PRIMARY KEY, {cols})"
         )
-        repo, file, kind = (
-            _col("repository"),
-            _col("file"),
-            _col("symbol_kind"),
-        )
-        self._conn.execute(
-            f"CREATE INDEX idx_{collection}_repo ON chunks_{collection}({repo})"
-        )
+        repo, file = _col("repository"), _col("file")
+        # A single (repository, file) index: it also serves plain
+        # repository-only lookups as its leftmost prefix, so a separate
+        # single-column index would be redundant write amplification.
+        # (symbol_kind has no equality-filter caller, so it gets no index.)
         self._conn.execute(
             f"CREATE INDEX idx_{collection}_repo_file "
             f"ON chunks_{collection}({repo}, {file})"
-        )
-        self._conn.execute(
-            f"CREATE INDEX idx_{collection}_symbol "
-            f"ON chunks_{collection}({kind}, {repo})"
         )
         # The vec0 table's declared dimension is the drift guard (see
         # ensure_collections).
@@ -511,7 +513,18 @@ class VectorStore:
             "USING fts5(content, tokenize=\"unicode61 tokenchars '_'\")"
         )
         self._conn.commit()
+        self._known_collections.add(collection)
         logger.info("created sqlite-vec collection %r (dim=%d)", collection, dim)
+
+    def _drop_redundant_indexes(self, collection: str) -> None:
+        """Drop indexes made redundant by a leftmost-prefix index or by a
+        removed caller, on a database created before this cleanup.
+
+        Idempotent (``IF EXISTS``): safe to run on every startup.
+        """
+        self._conn.execute(f"DROP INDEX IF EXISTS idx_{collection}_repo")
+        self._conn.execute(f"DROP INDEX IF EXISTS idx_{collection}_symbol")
+        self._conn.commit()
 
     def ensure_collections(self, hdl_dim: int, docs_dim: int, code_dim: int) -> None:
         """Create the collections if missing; fail loudly on dimension drift.
@@ -530,7 +543,7 @@ class VectorStore:
         ):
             if dim == 0:
                 continue
-            if not self._table_exists(f"chunks_{name}"):
+            if name not in self._known_collections:
                 self._create_collection(name, dim)
                 continue
             size = self._vec_dimension(name)
@@ -540,6 +553,7 @@ class VectorStore:
                     f"expected {dim}. The embedding model changed — "
                     "delete the index (or the data directory) and reindex."
                 )
+            self._drop_redundant_indexes(name)
 
     # -- schema versioning ------------------------------------------------------
 
@@ -611,6 +625,7 @@ class VectorStore:
             if self._table_exists(name):
                 self._conn.execute(f"DROP TABLE {name}")
                 dropped = True
+        self._known_collections.discard("vhdl")
         if dropped:
             self._conn.commit()
             logger.info("deleted legacy sqlite-vec collection 'vhdl' (v1 layout)")
@@ -628,24 +643,44 @@ class VectorStore:
         for chunk, d in zip(chunks, dense, strict=True):
             by_collection.setdefault(chunk.collection.value, []).append((chunk, d))
         for collection_name, items in by_collection.items():
-            if not items:
-                continue
             self._upsert_collection(collection_name, items)
 
     def _payload_row(self, chunk: Chunk) -> tuple[Any, ...]:
-        payload = chunk.payload()
         values: list[Any] = []
         for field in _PAYLOAD_FIELDS:
-            value = payload.get(field)
             if field == "symbols":
-                value = json.dumps(list(value)) if value else "[]"
-            values.append(value)
+                values.append(
+                    json.dumps(list(chunk.symbols)) if chunk.symbols else "[]"
+                )
+            elif field == "content_type":
+                values.append(chunk.content_type.value)
+            elif field == "collection":
+                values.append(chunk.collection.value)
+            else:
+                values.append(getattr(chunk, field))
         return (point_id(chunk), *values)
+
+    def _rowids_for_ids(self, collection: str, ids: Sequence[str]) -> dict[str, int]:
+        """``{id: rowid}`` for the ids of ``collection`` that currently exist."""
+        rowid_by_id: dict[str, int] = {}
+        for batch in _batched(ids, _MAX_IN_PARAMS):
+            marks = ", ".join("?" * len(batch))
+            rows = self._conn.execute(
+                f"SELECT id, rowid FROM chunks_{collection} WHERE id IN ({marks})",
+                batch,
+            ).fetchall()
+            rowid_by_id.update((row[0], row[1]) for row in rows)
+        return rowid_by_id
 
     def _upsert_collection(
         self, collection: str, items: list[tuple[Chunk, list[float]]]
     ) -> None:
         conn = self._conn
+        # Later duplicates of the same id win (matches the old sequential
+        # delete-then-insert loop); collapsing them upfront also keeps the
+        # batched vec/fts inserts below from targeting one rowid twice.
+        by_id = {point_id(chunk): (chunk, d) for chunk, d in items}
+        ids = list(by_id.keys())
         fields_sql = ", ".join(_col(f) for f in _PAYLOAD_FIELDS)
         placeholders = ", ".join("?" * len(_PAYLOAD_FIELDS))
         updates_sql = ", ".join(
@@ -653,130 +688,160 @@ class VectorStore:
         )
         upsert_sql = (
             f"INSERT INTO chunks_{collection} (id, {fields_sql}) "
-            f"VALUES (?, {placeholders}) ON CONFLICT(id) DO UPDATE SET "
-            f"{updates_sql} RETURNING rowid"
+            f"VALUES (?, {placeholders}) ON CONFLICT(id) DO UPDATE SET {updates_sql}"
         )
         vec_sql = f"INSERT INTO vec_{collection} (rowid, embedding) VALUES (?, ?)"
         fts_sql = f"INSERT INTO fts_{collection} (rowid, content) VALUES (?, ?)"
         try:
-            for chunk, d in items:
-                rowid = conn.execute(upsert_sql, self._payload_row(chunk)).fetchone()[0]
-                vector = _unit_vector(d)
-                # vec0/fts5 are virtual tables: no OR REPLACE, so an
-                # upsert is delete-then-insert (same transaction).
-                conn.execute(f"DELETE FROM vec_{collection} WHERE rowid = ?", (rowid,))
+            # Rows already present hit the ON CONFLICT UPDATE branch, which
+            # keeps their rowid, so their stale vec0/fts5 rows (keyed by
+            # that same rowid) must be cleared before the row is
+            # re-inserted below. A fresh row gets a brand-new rowid that
+            # was never used, so it needs no such cleanup.
+            existing_rowids = self._rowids_for_ids(collection, ids)
+            conn.executemany(
+                upsert_sql, (self._payload_row(chunk) for chunk, _ in by_id.values())
+            )
+            for batch in _batched(list(existing_rowids.values()), _MAX_IN_PARAMS):
+                marks = ", ".join("?" * len(batch))
                 conn.execute(
-                    vec_sql, (rowid, sqlite_vec.serialize_float32(vector.tolist()))
+                    f"DELETE FROM vec_{collection} WHERE rowid IN ({marks})", batch
                 )
-                conn.execute(f"DELETE FROM fts_{collection} WHERE rowid = ?", (rowid,))
-                conn.execute(fts_sql, (rowid, chunk.content))
+                conn.execute(
+                    f"DELETE FROM fts_{collection} WHERE rowid IN ({marks})", batch
+                )
+            rowid_by_id = self._rowids_for_ids(collection, ids)
+            conn.executemany(
+                vec_sql,
+                (
+                    (rowid_by_id[chunk_id], _serialize_vector(_unit_vector(d)))
+                    for chunk_id, (_, d) in by_id.items()
+                ),
+            )
+            conn.executemany(
+                fts_sql,
+                (
+                    (rowid_by_id[chunk_id], chunk.content)
+                    for chunk_id, (chunk, _) in by_id.items()
+                ),
+            )
             conn.commit()
         except sqlite3.Error as exc:
             conn.rollback()
             raise VectorStoreError(
                 f"upsert into collection {collection!r} failed: {exc}"
             ) from exc
-        logger.info("upserted %d chunks into collection %r", len(items), collection)
+        logger.info("upserted %d chunks into collection %r", len(by_id), collection)
+
+    def _delete_where(
+        self, name: str, predicate_sql: str, params: Sequence[Any], what: str
+    ) -> int:
+        """Delete rows of one collection matching a WHERE predicate.
+
+        Shared by :meth:`delete_repository`, :meth:`delete_file_prefix` and
+        :meth:`delete_files`; the caller owns the transaction (commit or
+        rollback), so this never commits.
+        """
+        if name not in self._known_collections:
+            return 0
+        conn = self._conn
+        rowids = [
+            row[0]
+            for row in conn.execute(
+                f"SELECT rowid FROM chunks_{name} WHERE {predicate_sql}", params
+            )
+        ]
+        if not rowids:
+            return 0
+        for batch in _batched(rowids, _MAX_IN_PARAMS):
+            marks = ", ".join("?" * len(batch))
+            conn.execute(f"DELETE FROM vec_{name} WHERE rowid IN ({marks})", batch)
+            conn.execute(f"DELETE FROM fts_{name} WHERE rowid IN ({marks})", batch)
+        conn.execute(f"DELETE FROM chunks_{name} WHERE {predicate_sql}", params)
+        logger.info("deleted %d stale chunks from %r for %s", len(rowids), name, what)
+        return len(rowids)
 
     def delete_file(self, repository: str, file: str) -> int:
         """Remove all chunks for one file from every collection."""
+        return self.delete_files(repository, [file])
+
+    def delete_files(self, repository: str, files: Iterable[str]) -> int:
+        """Remove all chunks for a batch of files from every collection.
+
+        A single transaction covers every collection and file batch
+        (``file IN (...)``, chunked to stay under SQLite's bound-parameter
+        limit) — the caller no longer pays one transaction per file.
+        """
+        file_list = list(files)
+        if not file_list:
+            return 0
+        conn = self._conn
         total = 0
-        for collection in ALL_COLLECTIONS:
-            total += self._delete(
-                collection, must={"repository": repository, "file": file}
-            )
+        try:
+            for collection in ALL_COLLECTIONS:
+                name = collection.value
+                for batch in _batched(file_list, _MAX_IN_PARAMS - 1):
+                    marks = ", ".join("?" * len(batch))
+                    predicate = (
+                        f"{_col('repository')} = ? AND {_col('file')} IN ({marks})"
+                    )
+                    total += self._delete_where(
+                        name,
+                        predicate,
+                        [repository, *batch],
+                        f"repository={repository} files={len(batch)}",
+                    )
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise VectorStoreError(
+                f"delete_files from repository {repository!r} failed: {exc}"
+            ) from exc
         return total
 
     def delete_repository(self, repository: str) -> int:
+        conn = self._conn
         total = 0
-        for collection in ALL_COLLECTIONS:
-            total += self._delete(collection, must={"repository": repository})
+        try:
+            for collection in ALL_COLLECTIONS:
+                total += self._delete_where(
+                    collection.value,
+                    f"{_col('repository')} = ?",
+                    [repository],
+                    f"repository={repository}",
+                )
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise VectorStoreError(
+                f"delete from repository {repository!r} failed: {exc}"
+            ) from exc
         return total
 
     def delete_file_prefix(self, repository: str, prefix: str) -> int:
         """Remove every chunk whose file path lies under ``prefix/``
         (submodule prefix purge)."""
-        total = 0
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"{escaped}/%"
-        for collection in ALL_COLLECTIONS:
-            name = collection.value
-            if not self._table_exists(f"chunks_{name}"):
-                continue
-            predicate = (
-                f"{_col('repository')} = ? AND {_col('file')} LIKE ? ESCAPE '\\'"
-            )
-            params = [repository, pattern]
-            conn = self._conn
-            try:
-                rowids = [
-                    row[0]
-                    for row in conn.execute(
-                        f"SELECT rowid FROM chunks_{name} WHERE {predicate}",
-                        params,
-                    )
-                ]
-                if not rowids:
-                    continue
-                conn.executemany(
-                    f"DELETE FROM vec_{name} WHERE rowid = ?", [(r,) for r in rowids]
-                )
-                conn.executemany(
-                    f"DELETE FROM fts_{name} WHERE rowid = ?", [(r,) for r in rowids]
-                )
-                conn.execute(f"DELETE FROM chunks_{name} WHERE {predicate}", params)
-                conn.commit()
-            except sqlite3.Error as exc:
-                conn.rollback()
-                raise VectorStoreError(
-                    f"delete from collection {name!r} failed: {exc}"
-                ) from exc
-            logger.info(
-                "deleted %d stale chunks from %r under %s/",
-                len(rowids),
-                name,
-                prefix,
-            )
-            total += len(rowids)
-        return total
-
-    def _delete(self, collection: CollectionName, must: Mapping[str, str]) -> int:
-        name = collection.value
-        if not self._table_exists(f"chunks_{name}"):
-            return 0
-        predicate = " AND ".join(f"{_col(key)} = ?" for key in must)
-        params = [must[key] for key in must]
+        predicate = f"{_col('repository')} = ? AND {_col('file')} LIKE ? ESCAPE '\\'"
+        params = [repository, pattern]
         conn = self._conn
+        total = 0
         try:
-            rowids = [
-                row[0]
-                for row in conn.execute(
-                    f"SELECT rowid FROM chunks_{name} WHERE {predicate}", params
+            for collection in ALL_COLLECTIONS:
+                total += self._delete_where(
+                    collection.value,
+                    predicate,
+                    params,
+                    f"repository={repository} prefix={prefix}/",
                 )
-            ]
-            if not rowids:
-                return 0
-            conn.executemany(
-                f"DELETE FROM vec_{name} WHERE rowid = ?", [(r,) for r in rowids]
-            )
-            conn.executemany(
-                f"DELETE FROM fts_{name} WHERE rowid = ?", [(r,) for r in rowids]
-            )
-            conn.execute(f"DELETE FROM chunks_{name} WHERE {predicate}", params)
             conn.commit()
         except sqlite3.Error as exc:
             conn.rollback()
             raise VectorStoreError(
-                f"delete from collection {name!r} failed: {exc}"
+                f"delete from repository {repository!r} failed: {exc}"
             ) from exc
-        if rowids:
-            logger.info(
-                "deleted %d stale chunks from %r for %s",
-                len(rowids),
-                name,
-                " ".join(f"{k}={v}" for k, v in must.items()),
-            )
-        return len(rowids)
+        return total
 
     # -- reads ----------------------------------------------------------
 
@@ -806,7 +871,7 @@ class VectorStore:
         if mode not in ("hybrid", "semantic", "lexical"):
             raise VectorStoreError(f"unknown query mode {mode!r}")
         name = collection.value
-        if not self._table_exists(f"chunks_{name}"):
+        if name not in self._known_collections:
             return []
         where = _where_clause(must, should)
         where_sql = f" AND {where[0]}" if where else ""
@@ -824,7 +889,7 @@ class VectorStore:
             )
             dense_rows = conn.execute(
                 dense_sql,
-                (sqlite_vec.serialize_float32(vector.tolist()), limit, *where_params),
+                (_serialize_vector(vector), limit, *where_params),
             ).fetchall()
 
         fts_query = _fts_query(query_text or "")
@@ -885,7 +950,7 @@ class VectorStore:
         return sum(self._count(c.value) for c in ALL_COLLECTIONS)
 
     def _count(self, collection: str) -> int:
-        if not self._table_exists(f"chunks_{collection}"):
+        if collection not in self._known_collections:
             return 0
         row = self._conn.execute(f"SELECT count(*) FROM chunks_{collection}").fetchone()
         return int(row[0])
@@ -895,7 +960,7 @@ class VectorStore:
     ) -> int:
         """Rows of one repository, in one collection or all of them."""
         if collection is not None:
-            if not self._table_exists(f"chunks_{collection.value}"):
+            if collection.value not in self._known_collections:
                 return 0
             row = self._conn.execute(
                 f"SELECT count(*) FROM chunks_{collection.value} WHERE repository = ?",
@@ -912,9 +977,9 @@ class VectorStore:
         chunks is indexed — exactly the set ``get_source`` can read."""
         files: set[str] = set()
         for c in [collection] if collection is not None else list(ALL_COLLECTIONS):
-            name = f"chunks_{c.value}"
-            if not self._table_exists(name):
+            if c.value not in self._known_collections:
                 continue
+            name = f"chunks_{c.value}"
             rows = self._conn.execute(
                 f"SELECT DISTINCT {_col('file')} FROM {name} WHERE repository = ?",
                 (repository,),
@@ -927,7 +992,7 @@ class VectorStore:
         chunks: list[Chunk] = []
         for collection in ALL_COLLECTIONS:
             name = collection.value
-            if not self._table_exists(f"chunks_{name}"):
+            if name not in self._known_collections:
                 continue
             rows = self._conn.execute(
                 f"SELECT * FROM chunks_{name} "
@@ -936,18 +1001,3 @@ class VectorStore:
             ).fetchall()
             chunks.extend(chunk_from_payload(dict(row)) for row in rows)
         return chunks
-
-    def get_by_symbol(
-        self, repository: str, symbol: str, symbol_kind: str
-    ) -> list[Chunk]:
-        """HDL chunks of one kind named ``symbol`` in ``repository``."""
-        name = COLLECTION_HDL
-        if not self._table_exists(f"chunks_{name}"):
-            return []
-        rows = self._conn.execute(
-            f"SELECT * FROM chunks_{name} "
-            f"WHERE {_col('repository')} = ? AND {_col('symbol_kind')} = ?",
-            (repository, symbol_kind),
-        ).fetchall()
-        chunks = [chunk_from_payload(dict(row)) for row in rows]
-        return [c for c in chunks if c.symbol == symbol][:_SYMBOL_LOOKUP_LIMIT]
