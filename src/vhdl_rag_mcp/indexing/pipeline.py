@@ -344,7 +344,19 @@ class IndexPipeline:
                     )
                     symbols = None
                 else:
-                    symbols = await lsp.document_symbols(path)
+                    try:
+                        symbols = await lsp.document_symbols(path)
+                    except Exception as exc:  # LspError/timeout, or any other
+                        # per-file LSP crash: contain it to this file so one
+                        # bad file cannot abort the whole repository sync.
+                        logger.warning(
+                            "%s: %s: document_symbols failed (%s); using "
+                            "structural fallback",
+                            cfg.name,
+                            f,
+                            exc,
+                        )
+                        symbols = None
                 chunks.extend(
                     chunk_vhdl_file(
                         cfg,
@@ -421,7 +433,19 @@ class IndexPipeline:
                     )
                     symbols = None
                 else:
-                    symbols = await lsp.document_symbols(path)
+                    try:
+                        symbols = await lsp.document_symbols(path)
+                    except Exception as exc:  # LspError/timeout, or any other
+                        # per-file LSP crash: contain it to this file so one
+                        # bad file cannot abort the whole repository sync.
+                        logger.warning(
+                            "%s: %s: document_symbols failed (%s); using "
+                            "structural fallback",
+                            cfg.name,
+                            f,
+                            exc,
+                        )
+                        symbols = None
                 chunks.extend(
                     chunk_verilog_file(
                         cfg,

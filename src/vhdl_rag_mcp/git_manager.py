@@ -1056,5 +1056,8 @@ class GitManager:
             raise GitError(f"invalid repository file path: {relpath!r}")
         path = self.repo_dir(cfg) / relpath
         if not path.is_file():
-            raise GitError(f"file {relpath!r} not found in {cfg.name!r}")
+            raise GitError(
+                f"file {relpath!r} not found in {cfg.name!r}; use "
+                "repository_files to list valid paths in this repository"
+            )
         return path.read_text(encoding="utf-8", errors="replace")

@@ -28,10 +28,12 @@ from vhdl_rag_mcp.models import (
     Chunk,
     CollectionName,
     ContentType,
+    SearchResult,
 )
 from vhdl_rag_mcp.server import (
     VhdlRagApp,
     _acquire_lock,
+    _render,
     config_from_args,
     create_mcp,
 )
@@ -287,6 +289,72 @@ async def test_indexing_note_currently_syncing(env) -> None:
     assert app.indexing_note("repo") is None
 
 
+async def test_indexing_note_zero_config_auto_indexed(env, tmp_path: Path) -> None:
+    # A repository added by default_repository_for_cwd() (auto_indexed=True)
+    # gets an explicit heads-up naming itself and its directory, not just a
+    # generic "not yet indexed" line.
+    app, _mcp, _up = env
+    auto_repo = RepositoryConfig(
+        name="myproj",
+        path=tmp_path / "myproj",
+        filesystem=True,
+        auto_indexed=True,
+    )
+    app.config = app.config.model_copy(
+        update={"repositories": [*app.config.repositories, auto_repo]}
+    )
+    note = app.indexing_note("myproj")
+    assert note is not None
+    assert "zero-config" in note
+    assert "'myproj'" in note
+    assert str(auto_repo.path) in note
+    assert "not yet indexed: myproj" in note
+
+
+def test_render_appends_truncation_note_at_limit() -> None:
+    commit = "a" * 12
+    results = [
+        SearchResult(
+            result_type="hdl",
+            repository="repo",
+            commit=commit,
+            file="rtl/fifo.vhd",
+            content="entity fifo is end;",
+            score=1.0,
+        )
+        for _ in range(2)
+    ]
+    truncated = _render(results, "empty", limit=2)
+    assert truncated.endswith(
+        "Note: results may be truncated at the limit; increase `limit` "
+        "or refine the query to see more."
+    )
+    not_truncated = _render(results, "empty", limit=5)
+    assert "may be truncated" not in not_truncated
+    # No limit given at all: never appended.
+    assert "may be truncated" not in _render(results, "empty")
+
+
+async def test_search_hdl_tool_truncation_note(env) -> None:
+    app, mcp, _up = env
+    commit = app.states.get("repo").indexed_commit or "abc123"
+    chunks = [
+        make_hdl_chunk(f"rtl/f{i}.vhd", "vhdl", "entity", commit) for i in range(3)
+    ]
+    dense = app.providers.embed_passages(
+        CollectionName.HDL, [c.content for c in chunks]
+    )
+    app.store.upsert_chunks(chunks, dense)
+
+    truncated = tool_text(
+        await mcp.call_tool("search_hdl", {"query": "fifo", "limit": 2})
+    )
+    assert "Note: results may be truncated at the limit" in truncated
+
+    full = tool_text(await mcp.call_tool("search_hdl", {"query": "fifo", "limit": 10}))
+    assert "Note: results may be truncated at the limit" not in full
+
+
 async def test_search_tool_reports_indexing_note(env) -> None:
     _app, mcp, _up = env
     result = await mcp.call_tool("search_docs", {"query": "x", "repository": "broken"})
@@ -389,6 +457,24 @@ async def test_repository_status_tool(
     assert "was not found" in text
 
 
+async def test_repository_status_wraps_errors(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # repository_status must go through the same _handle_errors wrapper as
+    # the other tools: a downstream store/state exception renders as a
+    # clean "Error: ..." string instead of propagating raw.
+    from vhdl_rag_mcp.retrieval import RetrievalError
+
+    app, mcp, _up = env
+
+    def boom(*args, **kwargs):
+        raise RetrievalError("store is unavailable")
+
+    monkeypatch.setattr(app.store, "count_repository", boom)
+    result = await mcp.call_tool("repository_status", {})
+    assert tool_text(result) == "Error: store is unavailable"
+
+
 async def test_repository_status_filesystem_repo(env, tmp_path: Path) -> None:
     app, _mcp, _up = env
     root = tmp_path / "fs"
@@ -433,7 +519,7 @@ async def test_sync_repositories_contains_errors(env) -> None:
     )
     text = tool_text(result)
     assert "- repo: ok" in text
-    assert "- broken: ERROR" in text
+    assert "- broken: Error" in text
     assert "does not resolve" in text
 
     # Selecting only the healthy repo works and is idempotent.

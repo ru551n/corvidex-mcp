@@ -321,6 +321,44 @@ async def test_full_sync_indexes_all_domains(config: AppConfig, env) -> None:
     assert {c.symbol for c in code} == {"fifo_write", "fifo_read"}
 
 
+async def test_lsp_crash_on_one_file_falls_back_without_aborting_sync(
+    config: AppConfig, env, monkeypatch
+) -> None:
+    """document_symbols() raising for one file (LSP crash/timeout/other
+    exception) must not abort the whole repository sync: that file gets
+    the structural fallback and every other file is still indexed."""
+    store, pipeline = env
+    cfg = config.repository("repo")
+
+    from vhdl_rag_mcp.lsp import VhdlLsp
+
+    original = VhdlLsp.document_symbols
+    crashed: list[str] = []
+
+    async def flaky(self: VhdlLsp, path: Path):
+        if path.name == "fifo.vhd":
+            crashed.append(path.name)
+            raise RuntimeError("simulated LSP crash")
+        return await original(self, path)
+
+    monkeypatch.setattr(VhdlLsp, "document_symbols", flaky)
+
+    await pipeline.sync_repository(cfg)  # must not raise/abort
+
+    assert crashed == ["fifo.vhd"]
+    # The crashing file is still indexed, via the structural fallback.
+    fifo = store.chunks_for_file("repo", "rtl/fifo.vhd")
+    assert fifo
+    assert ("entity", "fifo") in {(c.symbol_kind, c.symbol) for c in fifo}
+    # Every other file synced normally — the crash was contained to fifo.vhd.
+    bad = store.chunks_for_file("repo", "rtl/badfile.vhd")
+    assert [(c.symbol_kind, c.symbol) for c in bad] == [("entity", "broken")]
+    code = store.chunks_for_file("repo", "src/fifo.c")
+    assert {c.symbol for c in code} == {"fifo_write", "fifo_read"}
+    docs = store.chunks_for_file("repo", "docs/standard.md")
+    assert docs
+
+
 async def test_empty_plan_when_ref_unchanged(config: AppConfig, env) -> None:
     store, pipeline = env
     cfg = config.repository("repo")

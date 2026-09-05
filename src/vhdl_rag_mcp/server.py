@@ -360,7 +360,19 @@ class VhdlRagApp:
         )
         if not syncing and not never_synced:
             return None
+        pending = set(syncing) | set(never_synced)
+        auto = [
+            cfg
+            for cfg in self.config.repositories
+            if cfg.auto_indexed and cfg.name in pending
+        ]
         parts: list[str] = []
+        if auto:
+            derived = "; ".join(f"{cfg.name!r} ({cfg.path})" for cfg in auto)
+            parts.append(
+                "zero-config: no [[repositories]] are configured, so the "
+                f"server auto-indexed its current directory as {derived}"
+            )
         if syncing:
             parts.append(f"currently syncing: {', '.join(syncing)}")
         if never_synced:
@@ -464,8 +476,18 @@ class VhdlRagApp:
 # -- MCP tools -----------------------------------------------------------------
 
 
-def _render(results: list[SearchResult], empty: str, note: str | None = None) -> str:
+def _render(
+    results: list[SearchResult],
+    empty: str,
+    note: str | None = None,
+    limit: int | None = None,
+) -> str:
     body = "\n".join(result.render() for result in results) if results else empty
+    if limit is not None and len(results) >= limit:
+        body += (
+            "\nNote: results may be truncated at the limit; increase "
+            "`limit` or refine the query to see more."
+        )
     return f"{note}\n\n{body}" if note else body
 
 
@@ -481,7 +503,7 @@ def _render_report(reports: list[dict[str, str]]) -> str:
             )
         else:
             lines.append(
-                f"- {report['repository']}: ERROR: {report.get('error', 'unknown')}"
+                f"- {report['repository']}: Error: {report.get('error', 'unknown')}"
             )
     return "\n".join(lines)
 
@@ -538,6 +560,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No HDL results. Try a broader query or a different language, "
             "or check repository_status.",
             note=app.indexing_note(repository),
+            limit=limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -549,15 +572,12 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         symbols: list[str] | None = None,
         mode: str = "hybrid",
     ) -> str:
-        """Search VHDL source only (the language-restricted form of
-        search_hdl; use search_hdl for Verilog/SystemVerilog or a mix):
-        entities, architectures, processes, packages, functions —
-        semantic + exact-identifier hybrid search. `symbols` restricts
-        to chunks referencing the given identifiers (e.g.
-        ["fifo_write", "rst_n"]). `repository` restricts to one
-        repository name. `mode` selects the search strategy: 'hybrid'
-        (default; semantic + full-text), 'semantic' (embedding
-        similarity only), or 'lexical' (full-text match only)."""
+        """Back-compat alias for search_hdl(language="vhdl"). Prefer
+        search_hdl directly — it covers VHDL plus Verilog/SystemVerilog and
+        takes the same `query`/`limit`/`repository`/`symbols`/`mode`
+        parameters (see its docstring for full parameter docs); this form
+        is kept only for backward compatibility and has no advantage over
+        it."""
         return _render(
             retrieval.search(
                 CollectionName.HDL,
@@ -570,6 +590,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
             note=app.indexing_note(repository),
+            limit=limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -599,6 +620,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No documentation results. Try a broader query, or check "
             "repository_status.",
             note=app.indexing_note(repository),
+            limit=limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -627,6 +649,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No code results. Try a broader query, or check repository_status.",
             note=app.indexing_note(repository),
+            limit=limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -656,6 +679,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No results in any domain. Try a broader query, or check "
             "repository_status.",
             note=app.indexing_note(repository),
+            limit=limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -697,6 +721,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         return out
 
     @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
     async def repository_status() -> str:
         """Show every configured repository: ref, enabled domains, last
         indexed commit, chunk and file counts, last sync time, and any

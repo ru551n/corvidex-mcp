@@ -295,6 +295,16 @@ class RepositoryConfig(BaseModel):
             "never promote a chunk across tiers."
         ),
     )
+    auto_indexed: bool = Field(
+        default=False,
+        description=(
+            "Internal marker set by default_repository_for_cwd(): true "
+            "when this repository was added automatically because no "
+            "[[repositories]] were configured (zero-config indexing of "
+            "the server's current directory), never set by hand in a "
+            "config file."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -606,6 +616,7 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
         name=_sanitize_repo_name(root.name),
         path=root,
         filesystem=not (root / ".git").exists(),
+        auto_indexed=True,
     )
 
 
