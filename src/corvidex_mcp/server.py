@@ -171,6 +171,11 @@ class VhdlRagApp:
         # Repository names with a sync (initial, periodic, polled, or
         # manual) currently in flight — see indexing_note().
         self._syncing: set[str] = set()
+        # HDL analyzer probes (vhdl_ls, Veridian) — spawns a subprocess
+        # per analyzer, so this is memoized on first access instead of
+        # re-probed on every repository_status() call or self-check; see
+        # analyzer_statuses().
+        self._analyzer_statuses: dict[str, AnalyzerStatus] | None = None
 
     # -- collections ---------------------------------------------------------
 
@@ -216,6 +221,16 @@ class VhdlRagApp:
         """Run the startup self-check (after collections + migration)."""
         return run_self_check(self)
 
+    def analyzer_statuses(self) -> dict[str, AnalyzerStatus]:
+        """HDL analyzer probes (vhdl_ls, Veridian), probed once per
+        process and cached — reused by both the startup self-check and
+        the repository_status tool."""
+        if self._analyzer_statuses is None:
+            self._analyzer_statuses = build_analyzer_statuses(
+                self.config.vhdl_ls_path, self.config.veridian_path
+            )
+        return self._analyzer_statuses
+
     def migrate_index(self) -> bool:
         """Migrate the index to the current schema layout (v1 -> v2).
 
@@ -255,9 +270,7 @@ class VhdlRagApp:
         """
         wanted = set(repositories) if repositories is not None else None
         if wanted is not None:
-            known = {cfg.name for cfg in self.config.repositories}
-            if self.config.coding_standards is not None:
-                known.add(CODING_STANDARDS_REPO)
+            known = set(self.config.configured_repository_names())
             unknown = wanted - known
             if unknown:
                 raise RetrievalError(
@@ -346,9 +359,7 @@ class VhdlRagApp:
         if repository is not None:
             names = [repository]
         else:
-            names = [cfg.name for cfg in self.config.repositories]
-            if self.config.coding_standards is not None:
-                names.append(CODING_STANDARDS_REPO)
+            names = list(self.config.configured_repository_names())
         syncing = sorted({name for name in names if name in self._syncing})
         never_synced = sorted(
             {
@@ -390,9 +401,7 @@ class VhdlRagApp:
         """Drop index chunks and state for repos removed from the config
         (the coding-standards pseudo-repository counts as configured when
         the ``coding_standards`` option is set)."""
-        configured = {cfg.name for cfg in self.config.repositories}
-        if self.config.coding_standards is not None:
-            configured.add(CODING_STANDARDS_REPO)
+        configured = set(self.config.configured_repository_names())
         dropped = [
             state.name for state in self.states.all() if state.name not in configured
         ]
@@ -526,6 +535,20 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     mcp = MCPServer(MCP_NAME, instructions=INSTRUCTIONS)
     retrieval = app.retrieval
 
+    def _search(
+        call: Callable[[], list[SearchResult]],
+        empty: str,
+        repository: str | None,
+        limit: int,
+    ) -> str:
+        """Shared tail of every search_* tool: run ``call`` (the
+        retrieval search), then render it with the repository's
+        indexing note and the limit-truncation hint. ``call`` is
+        invoked before ``app.indexing_note`` so an unknown-repository
+        error from the search raises before indexing_note ever sees
+        the (unvalidated) name."""
+        return _render(call(), empty, note=app.indexing_note(repository), limit=limit)
+
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def search_hdl(
@@ -547,8 +570,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         repository name. `mode` selects the search strategy: 'hybrid'
         (default; semantic + full-text), 'semantic' (embedding
         similarity only), or 'lexical' (full-text match only)."""
-        return _render(
-            retrieval.search(
+        return _search(
+            lambda: retrieval.search(
                 CollectionName.HDL,
                 query,
                 limit,
@@ -559,8 +582,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No HDL results. Try a broader query or a different language, "
             "or check repository_status.",
-            note=app.indexing_note(repository),
-            limit=limit,
+            repository,
+            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -578,8 +601,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         parameters (see its docstring for full parameter docs); this form
         is kept only for backward compatibility and has no advantage over
         it."""
-        return _render(
-            retrieval.search(
+        return _search(
+            lambda: retrieval.search(
                 CollectionName.HDL,
                 query,
                 limit,
@@ -589,8 +612,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 mode=mode,
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
-            note=app.indexing_note(repository),
-            limit=limit,
+            repository,
+            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -608,8 +631,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
         (full-text match only)."""
-        return _render(
-            retrieval.search(
+        return _search(
+            lambda: retrieval.search(
                 CollectionName.DOCS,
                 query,
                 limit,
@@ -619,8 +642,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No documentation results. Try a broader query, or check "
             "repository_status.",
-            note=app.indexing_note(repository),
-            limit=limit,
+            repository,
+            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -638,8 +661,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
         (full-text match only)."""
-        return _render(
-            retrieval.search(
+        return _search(
+            lambda: retrieval.search(
                 CollectionName.CODE,
                 query,
                 limit,
@@ -648,8 +671,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 mode=mode,
             ),
             "No code results. Try a broader query, or check repository_status.",
-            note=app.indexing_note(repository),
-            limit=limit,
+            repository,
+            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -668,8 +691,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         strategy: 'hybrid' (default; semantic + full-text), 'semantic'
         (embedding similarity only), or 'lexical' (full-text match
         only)."""
-        return _render(
-            retrieval.search_knowledge(
+        return _search(
+            lambda: retrieval.search_knowledge(
                 query,
                 limit,
                 repository,
@@ -678,8 +701,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No results in any domain. Try a broader query, or check "
             "repository_status.",
-            note=app.indexing_note(repository),
-            limit=limit,
+            repository,
+            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -783,16 +806,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             lines.append(standards_line)
             lines.append("")
         lines.append("HDL analyzers:")
-        for analyzer in build_analyzer_statuses(
-            app.config.vhdl_ls_path, app.config.veridian_path
-        ).values():
-            if analyzer.available:
-                line = f"- {analyzer.name}: {analyzer.mode}, {analyzer.version}"
-                if analyzer.path:
-                    line += f" ({analyzer.path})"
-            else:
-                line = f"- {analyzer.name}: {analyzer.mode} — {analyzer.error}"
-            lines.append(line)
+        for analyzer in app.analyzer_statuses().values():
+            lines.append(f"- {analyzer.name}: {analyzer.describe()}")
         lines.append("")
         lines.append("Embedding models:")
         for collection in ALL_COLLECTIONS:
@@ -869,6 +884,25 @@ def _acquire_lock(config: AppConfig) -> Path:
 # -- startup -----------------------------------------------------------------
 
 
+async def _cancel_and_wait(*tasks: asyncio.Task[Any] | None) -> None:
+    """Cancel every task (``None`` entries are skipped), then await each
+    in turn, suppressing the resulting ``CancelledError``.
+
+    Cancelling all of them up front before awaiting any preserves the
+    same teardown order as three separate cancel/await blocks written
+    out by hand: every task's cancellation is requested before we start
+    waiting on any one of them, instead of staggering it while an
+    earlier task's await is still pending.
+    """
+    for task in tasks:
+        if task is not None:
+            task.cancel()
+    for task in tasks:
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
 async def _serve(
     app: VhdlRagApp, mcp: MCPServer, initial_sync: asyncio.Task[list[dict[str, str]]]
 ) -> None:
@@ -884,17 +918,7 @@ async def _serve(
     try:
         await mcp.run_stdio_async()
     finally:
-        initial_sync.cancel()
-        sync_task.cancel()
-        if poll_task is not None:
-            poll_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await initial_sync
-        with contextlib.suppress(asyncio.CancelledError):
-            await sync_task
-        if poll_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await poll_task
+        await _cancel_and_wait(initial_sync, sync_task, poll_task)
         app.close()
 
 

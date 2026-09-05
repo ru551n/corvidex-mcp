@@ -106,6 +106,3 @@ def build_analyzer_statuses(
         "vhdl_ls": analyzer_status("vhdl_ls", vhdl_ls_path),
         "veridian": analyzer_status("veridian", veridian_path),
     }
-
-
-

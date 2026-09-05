@@ -163,6 +163,31 @@ def test_selfcheck_passes_on_healthy_app(tmp_path):
         app.close()
 
 
+def test_selfcheck_reuses_cached_analyzer_probe(tmp_path, monkeypatch):
+    """run_self_check() must reuse app.analyzer_statuses() (memoized on
+    first access) rather than probing the analyzer binaries again —
+    probing spawns a subprocess per analyzer."""
+    import corvidex_mcp.server as server_mod
+
+    app = make_app(tmp_path)
+    try:
+        calls = 0
+        real_build = server_mod.build_analyzer_statuses
+
+        def counting_build(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(server_mod, "build_analyzer_statuses", counting_build)
+        app.analyzer_statuses()
+        assert calls == 1
+        run_self_check(app)
+        assert calls == 1
+    finally:
+        app.close()
+
+
 def test_model_failure_degrades_the_collection(tmp_path):
     app = make_app(tmp_path, failing=frozenset({CollectionName.HDL}))
     try:

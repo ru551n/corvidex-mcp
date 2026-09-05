@@ -124,9 +124,7 @@ class RetrievalService:
         coding-standards pseudo-repository counts when configured)."""
         if name is None:
             return
-        known = [cfg.name for cfg in self._config.repositories]
-        if self._config.coding_standards is not None:
-            known.append(CODING_STANDARDS_REPO)
+        known = self._config.configured_repository_names()
         if name not in known:
             raise RetrievalError(
                 f"unknown repository {name!r}; configured: {', '.join(known)}"
@@ -503,7 +501,7 @@ class RetrievalService:
                     ),
                     last_sync_error=state.last_sync_error,
                     file_count=state.last_indexed_file_count,
-                    filesystem=cfg.is_filesystem,
+                    filesystem=cfg.filesystem,
                 )
             )
         return statuses

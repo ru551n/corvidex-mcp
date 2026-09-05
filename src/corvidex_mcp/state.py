@@ -234,6 +234,23 @@ class StateStore:
     # -- accessors ------------------------------------------------------------
 
     def get(self, name: str) -> RepositoryState:
+        """Return (creating on first access) the in-memory state for
+        ``name``.
+
+        Side effect: an unknown ``name`` is inserted as a fresh default
+        ``RepositoryState`` — not persisted to disk by ``get()`` itself,
+        but from then on it shows up in ``all()`` (e.g. in
+        ``repository_status()`` / ``drop_unconfigured_repositories()``).
+        This is relied on by ``set_indexed``/``record_sync``, which need
+        ``get()`` to create-and-return the same object they then mutate.
+        Safe as long as every caller only ever passes an already
+        validated name — a configured ``[[repositories]]`` entry, the
+        coding-standards pseudo-repository when configured, or a name
+        just resolved from one of those — which holds for every call
+        site in this codebase (each either iterates configured
+        repositories/state directly, or validates the name first, e.g.
+        ``RetrievalService._repository``, before it can reach here).
+        """
         if name not in self._states:
             self._states[name] = RepositoryState(name=name)
         return self._states[name]

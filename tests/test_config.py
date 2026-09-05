@@ -423,7 +423,7 @@ def test_filesystem_repository_config() -> None:
     repo = RepositoryConfig(
         name="fsrepo", path=Path("~/work/local-ip"), filesystem=True
     )
-    assert repo.is_filesystem
+    assert repo.filesystem
     assert repo.is_local
     assert repo.path == Path("~/work/local-ip").expanduser()
     # 'ref' is accepted (default kept) but does not apply.
@@ -457,7 +457,7 @@ def test_filesystem_round_trip(tmp_path: Path) -> None:
     )
     cfg = load_config(path)
     repo = cfg.repositories[0]
-    assert repo.is_filesystem
+    assert repo.filesystem
     assert repo.index_untracked is False
     assert repo.path == Path("~/work/local-ip").expanduser()
 
