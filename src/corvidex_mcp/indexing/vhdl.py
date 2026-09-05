@@ -30,7 +30,7 @@ from pathlib import Path
 from ..config import RepositoryConfig
 from ..lsp.client import SymbolInfo
 from ..models import Chunk, CollectionName, ContentType
-from .common import MAX_CONTENT_CHARS, MAX_SYMBOLS, MIN_INNER_SPAN, clamp_and_join
+from .common import MAX_CONTENT_CHARS, MAX_SYMBOLS, MIN_INNER_SPAN
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,7 @@ def _resolve_name(symbol: SymbolInfo) -> tuple[str, str]:
     return kind, symbol.name
 
 
-_ARCH_OF_RE = re.compile(
-    r"^\s*architecture\s+[A-Za-z_]\w*\s+of\s+([A-Za-z_]\w*)", re.I
-)
+_ARCH_OF_RE = re.compile(r"^\s*architecture\s+[A-Za-z_]\w*\s+of\s+([A-Za-z_]\w*)", re.I)
 
 
 def _context_for(
