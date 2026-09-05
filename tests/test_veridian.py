@@ -1,4 +1,4 @@
-"""Tests for the Veridian analyzer: client, discovery, status, factory.
+"""Tests for the Veridian analyzer: client, discovery, status.
 
 Runs fully offline against fake Veridian servers (small Python scripts
 speaking the same Content-Length framing, mirroring Veridian's
@@ -14,17 +14,13 @@ from pathlib import Path
 import pytest
 from fake_lsp_util import executable_lsp_script
 
-from corvidex_mcp.config import RepositoryConfig
 from corvidex_mcp.lsp import (
     MODE_FALLBACK,
     MODE_LSP,
-    AnalyzerStatus,
     LspClient,
     VeridianLsp,
-    VhdlLsp,
     analyzer_status,
     build_analyzer_statuses,
-    build_client,
     resolve_binary,
     server_version,
 )
@@ -407,19 +403,6 @@ def test_build_analyzer_statuses_mixed(
     assert statuses["vhdl_ls"].path == str(fake_veridian)
     assert statuses["veridian"].mode == MODE_FALLBACK
     assert statuses["veridian"].error is not None
-
-
-def test_build_client_per_analyzer(fake_veridian: Path) -> None:
-    repo_cfg = RepositoryConfig(name="r", url="u", veridian_hook="make ver")
-    veridian_status = analyzer_status("veridian", str(fake_veridian))
-    client = build_client(veridian_status, repo_cfg, Path("/ws"))
-    assert isinstance(client, VeridianLsp)
-
-    vhdl_status = analyzer_status("vhdl_ls", str(fake_veridian))
-    assert isinstance(build_client(vhdl_status, repo_cfg, Path("/ws")), VhdlLsp)
-
-    dead_status = AnalyzerStatus.unavailable("veridian", "gone")
-    assert build_client(dead_status, repo_cfg, Path("/ws")) is None
 
 
 def test_server_version_unrunnable() -> None:

@@ -66,7 +66,7 @@ from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitManager
 from .indexing import IndexPipeline
 from .logging_setup import setup_logging
-from .lsp import build_analyzer_statuses
+from .lsp import AnalyzerStatus, build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
 from .retrieval import RetrievalError, RetrievalService
 from .selfcheck import SelfCheckResult, run_self_check

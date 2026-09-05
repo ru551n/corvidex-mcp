@@ -6,7 +6,6 @@ from .analyzers import (
     AnalyzerStatus,
     analyzer_status,
     build_analyzer_statuses,
-    build_client,
     resolve_binary,
 )
 from .client import (
@@ -35,7 +34,6 @@ __all__ = [
     "VhdlLsp",
     "analyzer_status",
     "build_analyzer_statuses",
-    "build_client",
     "default_libraries_dir",
     "path_to_uri",
     "resolve_binary",
