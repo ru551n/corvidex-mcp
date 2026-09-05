@@ -468,9 +468,16 @@ class GitManager:
                 sub_dir, "ls-files", "-z", "--others", "--exclude-standard"
             )
             files.update(p for p in others.split("\0") if p)
+        # Nested gitlinks come from the index directly (one cheap call),
+        # instead of stat'ing every tracked file's `<path>/.git`.
+        gitlinks = (
+            await self._gitlinks_in_index(sub_dir)
+            if depth < self._SUBMODULE_DEPTH
+            else {}
+        )
         result: set[str] = set()
-        for path in sorted(files):
-            if depth < self._SUBMODULE_DEPTH and (sub_dir / path / ".git").exists():
+        for path in files:
+            if path in gitlinks and (sub_dir / path / ".git").exists():
                 # A nested submodule: the parent lists it as a gitlink
                 # (a bare path entry), so enumerate its tree instead. The
                 # recursive call already returns paths fully prefixed
