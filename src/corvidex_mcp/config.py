@@ -163,10 +163,14 @@ class EmbeddingsConfig(BaseModel):
         ),
     )
     code_model: str = Field(
-        default="jinaai/jina-embeddings-v2-small-en",
+        default="jinaai/jina-embeddings-v2-base-code",
         description=(
             "Dense embedding model for the code collection (any fastembed "
-            "TextEmbedding model name; see hdl_model for the default)."
+            "TextEmbedding model name). Default: jina v2 base-code (768 "
+            "dims, ~0.6 GB) — pretrained on source code rather than "
+            "prose/RTL text, unlike hdl_model/docs_model's small-en. "
+            "Switching to a model with a different vector size requires "
+            "a reindex (delete the collection or data_dir)."
         ),
     )
     query_expansion_enabled: bool = Field(
@@ -746,11 +750,12 @@ log_level = "INFO"
 # index_max_tokens = 512
 # # Worker processes for data-parallel indexing (1 = single process):
 # indexing_workers = 1
-# # Per-collection dense model (any fastembed TextEmbedding name;
-# # default jina v2 small-en, 512 dims):
+# # Per-collection dense model (any fastembed TextEmbedding name).
+# # hdl/docs default to jina v2 small-en (512 dims); code defaults to
+# # jina v2 base-code (768 dims), pretrained on source code:
 # hdl_model = "jinaai/jina-embeddings-v2-small-en"
 # docs_model = "jinaai/jina-embeddings-v2-small-en"
-# code_model = "jinaai/jina-embeddings-v2-small-en"
+# code_model = "jinaai/jina-embeddings-v2-base-code"
 # # Append RTL/HDL domain synonyms to the query before search (static,
 # # deterministic, no model/network - see retrieval_lexicon.py):
 # query_expansion_enabled = true

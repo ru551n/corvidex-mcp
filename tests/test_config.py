@@ -88,7 +88,7 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.embeddings.indexing_workers == 1
     assert cfg.embeddings.hdl_model == "jinaai/jina-embeddings-v2-small-en"
     assert cfg.embeddings.docs_model == "jinaai/jina-embeddings-v2-small-en"
-    assert cfg.embeddings.code_model == "jinaai/jina-embeddings-v2-small-en"
+    assert cfg.embeddings.code_model == "jinaai/jina-embeddings-v2-base-code"
     assert cfg.dense_cache_dir == cfg.resolved_data_dir / "dense-cache"
 
 

@@ -15,7 +15,7 @@ source files.
 | Job / env | OS | Models | Purpose |
 |---|---|---|---|
 | `test` matrix | ubuntu / windows / macos / RHEL / arm64 | fakes | plumbing, fast, offline |
-| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en + FTS5 + MiniLM-L-6 reranker) | end-to-end retrieval quality |
+| `quality-e2e` | **ubuntu-latest only** | real (jina v2 small-en for hdl/docs, jina v2 base-code for code + FTS5 + MiniLM-L-6 reranker) | end-to-end retrieval quality |
 | `tests/test_quality.py` locally | any | real | same gate, on demand |
 
 `tests/test_quality.py` is skipped unless
