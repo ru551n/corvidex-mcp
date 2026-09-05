@@ -15,6 +15,7 @@ from corvidex_mcp.config import (
     EmbeddingsConfig,
     RepositoryConfig,
     load_config,
+    project_identity_hash,
 )
 from corvidex_mcp.models import CollectionName
 
@@ -70,7 +71,13 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     cfg = load_config(
         tmp_path / "config.toml", write_default=False, cwd=tmp_path / "workdir"
     )
-    assert cfg.data_dir == Path("~/.local/share/corvidex")
+    workdir_root = (tmp_path / "workdir").resolve()
+    # data_dir was not set explicitly: zero-config indexing redirects it to
+    # a per-project subdirectory (see apply_default_repository).
+    assert cfg.data_dir == (
+        Path("~/.local/share/corvidex/projects").expanduser()
+        / f"workdir-{project_identity_hash(workdir_root)}"
+    )
     assert cfg.sync_interval == 300
     assert cfg.local_sync_interval == 10
     assert cfg.vhdl_ls_path == "vhdl_ls"
@@ -78,8 +85,10 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.log_level == "INFO"
     assert cfg.index_cwd is True
     # No [[repositories]] configured: the cwd is indexed automatically.
-    assert [r.name for r in cfg.repositories] == ["workdir"]
-    assert cfg.repositories[0].path == (tmp_path / "workdir").resolve()
+    assert [r.name for r in cfg.repositories] == [
+        f"workdir-{project_identity_hash(workdir_root)}"
+    ]
+    assert cfg.repositories[0].path == workdir_root
     assert cfg.repositories[0].filesystem is True  # no .git there
     assert cfg.embeddings.dense_max_tokens == 1024
     assert cfg.embeddings.dense_threads == _DEFAULT_DENSE_THREADS
@@ -117,7 +126,9 @@ def test_default_template_written(tmp_path: Path) -> None:
     cfg = load_config(tmp_path / "config.toml", cwd=workdir)
     assert (tmp_path / "config.toml").exists()
     # Template repositories are comments; the cwd is still indexed by default.
-    assert [r.name for r in cfg.repositories] == ["workdir"]
+    assert [r.name for r in cfg.repositories] == [
+        f"workdir-{project_identity_hash(workdir.resolve())}"
+    ]
 
 
 def test_index_cwd_disabled(tmp_path: Path) -> None:
@@ -138,27 +149,50 @@ def test_configured_repositories_suppress_default(tmp_path: Path) -> None:
 
 
 def test_default_repository_for_cwd_git(tmp_path: Path) -> None:
-    from corvidex_mcp.config import default_repository_for_cwd
+    from corvidex_mcp.config import default_repository_for_cwd, project_identity_hash
 
     root = tmp_path / "my-repo"
     (root / ".git").mkdir(parents=True)
     repo = default_repository_for_cwd(root)
-    assert repo.name == "my-repo"
+    assert repo.name == f"my-repo-{project_identity_hash(root.resolve())}"
     assert repo.path == root.resolve()
     assert repo.filesystem is False
 
 
 def test_default_repository_for_cwd_sanitizes_name(tmp_path: Path) -> None:
-    from corvidex_mcp.config import default_repository_for_cwd
+    from corvidex_mcp.config import default_repository_for_cwd, project_identity_hash
 
     root = tmp_path / "my project!!"
     root.mkdir()
     repo = default_repository_for_cwd(root)
-    assert repo.name == "my-project"
+    assert repo.name == f"my-project-{project_identity_hash(root.resolve())}"
 
     dotdir = tmp_path / ".hidden"
     dotdir.mkdir()
-    assert default_repository_for_cwd(dotdir).name == "workspace"
+    assert (
+        default_repository_for_cwd(dotdir).name
+        == f"workspace-{project_identity_hash(dotdir.resolve())}"
+    )
+
+
+def test_default_repository_for_cwd_disambiguates_same_basename(
+    tmp_path: Path,
+) -> None:
+    """Two different directories sharing a basename must not collide."""
+    from corvidex_mcp.config import default_repository_for_cwd
+
+    first = tmp_path / "a" / "backend"
+    second = tmp_path / "b" / "backend"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    name_a = default_repository_for_cwd(first).name
+    name_b = default_repository_for_cwd(second).name
+    assert name_a != name_b
+    assert name_a.startswith("backend-")
+    assert name_b.startswith("backend-")
+    # Deterministic: re-deriving for the same path reuses the same name
+    # (incremental sync depends on this).
+    assert default_repository_for_cwd(first).name == name_a
 
 
 def test_full_config_parsing(tmp_path: Path) -> None:

@@ -19,7 +19,20 @@ The top-level scalar options also have command-line overrides
 `--num-threads`); the command line wins.
 
 ```toml
-data_dir = "~/.local/share/corvidex"   # all state lives here
+# data_dir = "~/.local/share/corvidex"  # one shared store for every project;
+                                        # always used once [[repositories]] is
+                                        # set below. With no [[repositories]]
+                                        # (zero-config), leave this unset and
+                                        # each auto-indexed project instead
+                                        # gets its own storage subdirectory
+                                        # under project_data_root, so unrelated
+                                        # projects never share an index.sqlite
+                                        # or sync state; set data_dir here to
+                                        # opt back into one shared store.
+# project_data_root = "~/.local/share/corvidex/projects"  # per-project
+                                        # storage root (zero-config only,
+                                        # ignored if data_dir is set or
+                                        # [[repositories]] is configured)
 sync_interval = 300                    # seconds between periodic syncs
 local_sync_interval = 10               # fast poller for local working
                                        # repositories (0 disables; remote
@@ -103,10 +116,26 @@ filesystem = true
   repository (HEAD plus uncommitted and untracked changes), a plain
   directory as a filesystem repository. Its name is derived from the
   directory name (sanitized to `[A-Za-z0-9._-]`, falling back to
-  `workspace`). Set `index_cwd = false` (or pass `--no-index-cwd`) to
-  disable this and run with an empty index instead. Adding even one
-  `[[repositories]]` entry also disables it — the default only applies
-  when repositories is empty.
+  `workspace`) plus a short hash of the resolved path (e.g.
+  `backend-a1b2c3d4`), so two different directories that happen to
+  share a basename never collide; use `repository_status` to see the
+  exact name assigned. Set `index_cwd = false` (or pass
+  `--no-index-cwd`) to disable this and run with an empty index instead.
+  Adding even one `[[repositories]]` entry also disables it — the
+  default only applies when repositories is empty.
+- **Per-project storage (zero-config only)**: because zero-config is
+  meant to "just work" when the server is started in different
+  projects over time, each auto-indexed project gets its own
+  `index.sqlite` and sync state in a subdirectory of `project_data_root`
+  (default `~/.local/share/corvidex/projects`), named after the
+  auto-derived repository (see above, already collision-proof). Models
+  and the dense-vector cache stay shared under `data_dir` regardless
+  (they are large, content-addressed, and safe to reuse across
+  projects). Setting `data_dir` explicitly opts back into a single
+  shared index across every project — and once any `[[repositories]]`
+  entry is configured, the shared store is always used (so
+  `search_knowledge` can search across all configured repositories from
+  one index).
 - **Config file selection**: the default location is
   `~/.config/corvidex/config.toml` (a commented template is written
   there on first run). Select another file with the `CORVIDEX_MCP_CONFIG`
