@@ -46,6 +46,24 @@ MAX_EXTRA_TERMS = 6
 #: not an identifier lookup and is still expanded.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*$")
 
+#: Precompiled `\b<term>\b` patterns, built once at import time rather
+#: than per call: ``expand_query`` runs on every search (up to 3x per
+#: :meth:`corvidex_mcp.retrieval.RetrievalService.search_knowledge` call
+#: before the fuse-then-rerank rework, once per call after it), and the
+#: lexicon is static, so there is nothing to gain from re-escaping and
+#: recompiling the same regex text on every call.
+_TERM_PATTERNS: dict[str, re.Pattern[str]] = {
+    term: re.compile(rf"\b{re.escape(term)}\b") for term in LEXICON
+}
+
+#: Precompiled alias patterns, keyed the same way, for the "already
+#: present verbatim" check.
+_ALIAS_PATTERNS: dict[str, re.Pattern[str]] = {
+    alias: re.compile(rf"\b{re.escape(alias)}\b")
+    for aliases in LEXICON.values()
+    for alias in aliases
+}
+
 
 def expand_query(query: str) -> str:
     """Append matched lexicon synonyms to ``query``.
@@ -64,7 +82,7 @@ def expand_query(query: str) -> str:
     for term, aliases in LEXICON.items():
         if len(extra) >= MAX_EXTRA_TERMS:
             break
-        if not re.search(rf"\b{re.escape(term)}\b", lowered):
+        if not _TERM_PATTERNS[term].search(lowered):
             continue
         for alias in aliases:
             if len(extra) >= MAX_EXTRA_TERMS:
@@ -72,7 +90,7 @@ def expand_query(query: str) -> str:
             if alias in seen or alias == term:
                 continue
             # Do not append an alias already present verbatim in the query.
-            if re.search(rf"\b{re.escape(alias)}\b", lowered):
+            if _ALIAS_PATTERNS[alias].search(lowered):
                 continue
             seen.add(alias)
             extra.append(alias)
