@@ -16,14 +16,14 @@ from capability import sqlite_extensions_supported
 from fake_lsp_util import executable_lsp_script
 from fake_veridian_util import fake_veridian as make_fake_veridian
 
-from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.git_manager import GitError, GitManager
-from vhdl_rag_mcp.indexing.pipeline import IndexPipeline
-from vhdl_rag_mcp.models import Chunk, CollectionName, ContentType
-from vhdl_rag_mcp.state import StateStore
-from vhdl_rag_mcp.vector_store import VectorStore
+from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.embeddings.provider import FastEmbedProvider
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.git_manager import GitError, GitManager
+from corvidex_mcp.indexing.pipeline import IndexPipeline
+from corvidex_mcp.models import Chunk, CollectionName, ContentType
+from corvidex_mcp.state import StateStore
+from corvidex_mcp.vector_store import VectorStore
 
 pytestmark = pytest.mark.skipif(
     not sqlite_extensions_supported(),
@@ -330,7 +330,7 @@ async def test_lsp_crash_on_one_file_falls_back_without_aborting_sync(
     store, pipeline = env
     cfg = config.repository("repo")
 
-    from vhdl_rag_mcp.lsp import VhdlLsp
+    from corvidex_mcp.lsp import VhdlLsp
 
     original = VhdlLsp.document_symbols
     crashed: list[str] = []

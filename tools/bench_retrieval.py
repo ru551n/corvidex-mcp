@@ -17,10 +17,10 @@ count only as top-1 hits; every query also reports a top-3 hit.
 
 Opt-in and manual: it loads the real embedding model and is NOT part
 of the offline CI suite. Reuse a pre-provisioned model cache
-(air-gapped pattern) via VHDL_RAG_EMBED_CACHE so it does not download.
+(air-gapped pattern) via CORVIDEX_EMBED_CACHE so it does not download.
 
 Usage:
-  VHDL_RAG_EMBED_CACHE=/path/to/fastembed-cache \
+  CORVIDEX_EMBED_CACHE=/path/to/fastembed-cache \
     uv run --no-sync python tools/bench_retrieval.py \
         --repo /path/to/tsfpga \
         --queries /path/to/queries.json \
@@ -43,8 +43,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
-from vhdl_rag_mcp.server import VhdlRagApp
+from corvidex_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
+from corvidex_mcp.server import VhdlRagApp
 
 logger = logging.getLogger("bench.retrieval")
 
@@ -56,8 +56,8 @@ DEFAULT_QUERIES = "/home/sebbe/lance-compare/queries.json"
 def make_app(data_dir: Path, repo_name: str, repo_path: Path) -> VhdlRagApp:
     data_dir.mkdir(parents=True, exist_ok=True)
     # Reuse a pre-provisioned model cache (air-gapped pattern) when
-    # provided via VHDL_RAG_EMBED_CACHE, so the benchmark never downloads.
-    cache = os.environ.get("VHDL_RAG_EMBED_CACHE")
+    # provided via CORVIDEX_EMBED_CACHE, so the benchmark never downloads.
+    cache = os.environ.get("CORVIDEX_EMBED_CACHE")
     if cache and not (data_dir / "embed-cache").exists():
         (data_dir / "embed-cache").symlink_to(Path(cache))
     config = AppConfig(
@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--limit", type=int, default=8, help="search result limit")
     parser.add_argument(
         "--data-dir",
-        default="/tmp/vhdl-rag-bench-retrieval",
+        default="/tmp/corvidex-bench-retrieval",
         help="scratch data dir (fresh index per run)",
     )
     parser.add_argument("--out", default="runs/bench_retrieval.json")

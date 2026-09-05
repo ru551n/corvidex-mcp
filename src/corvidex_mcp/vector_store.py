@@ -287,6 +287,11 @@ _FILTER_KEYS = frozenset(
 # Namespace for deterministic row IDs (stable across commits and
 # processes; makes re-upserts idempotent).
 _ID_NAMESPACE = uuid.NAMESPACE_URL
+#: Intentionally NOT renamed with the vhdl-rag-mcp -> corvidex-mcp rebrand:
+#: this string only namespaces the UUIDv5 hash below, it is never displayed,
+#: and changing it would make every existing chunk ID in an already-built
+#: index look "new" on the next sync (forcing a full re-embed and risking
+#: orphaned old-prefixed rows if reconciliation ever misses one).
 _ID_PREFIX = "vhdl-rag-mcp::"
 
 

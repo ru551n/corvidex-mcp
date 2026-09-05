@@ -20,24 +20,24 @@ import pytest
 from capability import sqlite_extensions_supported
 from pydantic import ValidationError
 
-from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.models import (
+from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.embeddings.provider import FastEmbedProvider
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.models import (
     INDEX_SCHEMA_VERSION,
     Chunk,
     CollectionName,
     ContentType,
     SearchResult,
 )
-from vhdl_rag_mcp.server import (
+from corvidex_mcp.server import (
     VhdlRagApp,
     _acquire_lock,
     _render,
     config_from_args,
     create_mcp,
 )
-from vhdl_rag_mcp.state import StateStore
+from corvidex_mcp.state import StateStore
 
 pytestmark = pytest.mark.skipif(
     not sqlite_extensions_supported(),
@@ -463,7 +463,7 @@ async def test_repository_status_wraps_errors(
     # repository_status must go through the same _handle_errors wrapper as
     # the other tools: a downstream store/state exception renders as a
     # clean "Error: ..." string instead of propagating raw.
-    from vhdl_rag_mcp.retrieval import RetrievalError
+    from corvidex_mcp.retrieval import RetrievalError
 
     app, mcp, _up = env
 
@@ -713,7 +713,7 @@ async def test_migrate_index_drops_legacy_vhdl_collection(env) -> None:
 
 
 CLI_CONFIG = """\
-data_dir = "~/.local/share/vhdl-rag"
+data_dir = "~/.local/share/corvidex"
 sync_interval = 120
 log_level = "WARNING"
 
@@ -756,7 +756,7 @@ async def test_cli_config_flag_and_overrides(tmp_path: Path) -> None:
 async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "alt.toml"
     path.write_text(CLI_CONFIG, encoding="utf-8")
-    monkeypatch.setenv("VHDL_RAG_MCP_CONFIG", str(path))
+    monkeypatch.setenv("CORVIDEX_MCP_CONFIG", str(path))
     cfg = config_from_args([])
     assert [r.name for r in cfg.repositories] == ["cli-repo"]
     # --config beats the env var.

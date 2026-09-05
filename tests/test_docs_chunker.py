@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.indexing.common import extract_code_identifiers
-from vhdl_rag_mcp.indexing.docs import chunk_doc_file
-from vhdl_rag_mcp.models import CollectionName, ContentType
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.indexing.common import extract_code_identifiers
+from corvidex_mcp.indexing.docs import chunk_doc_file
+from corvidex_mcp.models import CollectionName, ContentType
 
 CFG = RepositoryConfig(name="docs", url="git@example.com:co/docs.git")
 
@@ -190,7 +190,7 @@ def test_extract_code_identifiers():
 
 def test_extract_code_identifiers_caps_and_noise():
     code = " ".join(f"id{i:02d}" for i in range(150)) + " 123 a"
-    from vhdl_rag_mcp.indexing.common import MAX_SYMBOLS
+    from corvidex_mcp.indexing.common import MAX_SYMBOLS
 
     out = extract_code_identifiers(code)
     assert len(out) == MAX_SYMBOLS

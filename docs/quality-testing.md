@@ -17,7 +17,7 @@ retrieves the expected source files.
 | `tests/test_quality.py` locally | any | real | same gate, on demand |
 
 `tests/test_quality.py` is skipped unless
-`VHDL_RAG_RUN_QUALITY=1` is set, so it never runs inside the matrix
+`CORVIDEX_RUN_QUALITY=1` is set, so it never runs inside the matrix
 jobs (which do not set the variable) and never downloads models on
 Windows/macOS/RHEL/arm64 runners.
 
@@ -54,20 +54,20 @@ not a CI gate.
   download would slow the whole pipeline.
 
 The job caches the models in `actions/cache`
-(key `vhdl-rag-embed-cache-v2` →
-`/tmp/vhdl-rag-quality/embed-cache`), so the download
+(key `corvidex-embed-cache-v2` →
+`/tmp/corvidex-quality/embed-cache`), so the download
 only happens on the first run and after a key bump.
 
 ## Running locally
 
 ```sh
 # one-off (downloads ~1.5 GB of models on first run):
-VHDL_RAG_RUN_QUALITY=1 uv run pytest tests/test_quality.py -v
+CORVIDEX_RUN_QUALITY=1 uv run pytest tests/test_quality.py -v
 ```
 
 The models are kept under `<data dir>/embed-cache` — locally
-`$TMPDIR/vhdl-rag-quality-data`, or point
-`VHDL_RAG_QUALITY_DATA=/some/dir` to reuse a pre-populated
+`$TMPDIR/corvidex-quality-data`, or point
+`CORVIDEX_QUALITY_DATA=/some/dir` to reuse a pre-populated
 `embed-cache/` (same layout fastembed/`huggingface_hub` produce).
 
 ## Failure triage
@@ -115,7 +115,7 @@ quality battery (real models, structural chunking):
   `code_model` config defaults): re-run locally, re-tune thresholds if
   needed, update the dimension assert in
   `test_quality_embedding_determinism`, and **bump the CI cache key**
-  (`vhdl-rag-embed-cache-v2` → `v3`) in `.github/workflows/ci.yml`.
+  (`corvidex-embed-cache-v2` → `v3`) in `.github/workflows/ci.yml`.
 - **Tuning thresholds**: only with a local run that shows stable
   results; document the rationale in a commit message.
 

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from fake_lsp_util import executable_lsp_script
 
-from vhdl_rag_mcp.lsp import (
+from corvidex_mcp.lsp import (
     DiagnosticInfo,
     LspError,
     SymbolInfo,
@@ -154,7 +154,7 @@ def workspace(tmp_path: Path) -> Path:
 
 
 def test_parse_symbols_nested():
-    from vhdl_rag_mcp.lsp.client import _parse_symbols
+    from corvidex_mcp.lsp.client import _parse_symbols
 
     out = _parse_symbols(
         [
@@ -203,14 +203,14 @@ def test_parse_symbols_nested():
 
 
 def test_parse_symbols_empty():
-    from vhdl_rag_mcp.lsp.client import _parse_symbols
+    from corvidex_mcp.lsp.client import _parse_symbols
 
     assert _parse_symbols(None) == ()
     assert _parse_symbols([]) == ()
 
 
 def test_parse_content_length():
-    from vhdl_rag_mcp.lsp.client import _parse_content_length
+    from corvidex_mcp.lsp.client import _parse_content_length
 
     assert _parse_content_length(b"Content-Length: 42\r\n") == 42
     assert _parse_content_length(b"CONTENT-LENGTH: 7\r\nOther: x\r\n") == 7

@@ -23,11 +23,11 @@ import pytest
 from fake_lsp_util import executable_lsp_script
 from test_pipeline import FAKE_LSP
 
-from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.models import CollectionName
-from vhdl_rag_mcp.server import VhdlRagApp
+from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.embeddings.provider import FastEmbedProvider
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.models import CollectionName
+from corvidex_mcp.server import VhdlRagApp
 
 REAL_BIN = os.environ.get("VHDL_LS_TEST_BIN")
 REAL_VERIDIAN = os.environ.get("VERIDIAN_TEST_BIN")

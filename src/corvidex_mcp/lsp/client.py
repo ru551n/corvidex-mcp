@@ -3,7 +3,7 @@
 One :class:`LspClient` instance per repository, for one sync run:
 
 - the workspace is the repository working tree (checked out at the target
-  commit by :mod:`vhdl_rag_mcp.git_manager`);
+  commit by :mod:`corvidex_mcp.git_manager`);
 - when the server reads a workspace config file (vhdl_ls's
   ``vhdl_ls.toml``, Veridian's ``veridian.yaml``), the file must exist
   before the session starts: an existing one is respected and left in

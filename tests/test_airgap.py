@@ -6,7 +6,7 @@ blocked (any network attempt fails hard), the process must still
 1. load the dense model with zero downloads: from the model files
    bundled in the package (``assets/``, provisioned by
    ``tools/bundle_model.py``), or, when the assets are not present,
-   from a pre-provisioned local cache (``VHDL_RAG_EMBED_CACHE``),
+   from a pre-provisioned local cache (``CORVIDEX_EMBED_CACHE``),
 2. pass the startup self-check (runtime components + models),
 3. sync a local working repository through the real pipeline (real
    embedding, real sqlite-vec + FTS5 store), and
@@ -18,7 +18,7 @@ The bundled-model path needs nothing extra:
 
 The cache fallback (assets not provisioned into the source tree):
 
-    VHDL_RAG_EMBED_CACHE=/path/to/embed-cache uv run pytest tests/test_airgap.py -v
+    CORVIDEX_EMBED_CACHE=/path/to/embed-cache uv run pytest tests/test_airgap.py -v
 """
 
 from __future__ import annotations
@@ -31,21 +31,21 @@ from pathlib import Path
 import pytest
 from capability import sqlite_extensions_supported
 
-from vhdl_rag_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.assets import bundled_model_dir
-from vhdl_rag_mcp.models import CollectionName
-from vhdl_rag_mcp.server import VhdlRagApp
+from corvidex_mcp.config import AppConfig, EmbeddingsConfig, RepositoryConfig
+from corvidex_mcp.embeddings.assets import bundled_model_dir
+from corvidex_mcp.models import CollectionName
+from corvidex_mcp.server import VhdlRagApp
 
-CACHE = os.environ.get("VHDL_RAG_EMBED_CACHE")
+CACHE = os.environ.get("CORVIDEX_EMBED_CACHE")
 BUNDLED = bundled_model_dir("jinaai/jina-embeddings-v2-small-en")
 
 pytestmark = pytest.mark.skipif(
     not (CACHE or BUNDLED) or not sqlite_extensions_supported(),
     reason=(
         "air-gap acceptance: requires the default model either bundled in "
-        "the package (src/vhdl_rag_mcp/assets/, provisioned by "
+        "the package (src/corvidex_mcp/assets/, provisioned by "
         "tools/bundle_model.py) or a pre-provisioned fastembed cache "
-        "(VHDL_RAG_EMBED_CACHE), and a Python whose stdlib SQLite "
+        "(CORVIDEX_EMBED_CACHE), and a Python whose stdlib SQLite "
         "supports loadable extensions (sqlite-vec)"
     ),
 )

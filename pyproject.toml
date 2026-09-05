@@ -1,7 +1,7 @@
 [project]
-name = "vhdl-rag-mcp"
+name = "corvidex-mcp"
 version = "0.1.0"
-description = "MCP server providing semantic RAG search over VHDL Git repositories and VHDL-related documentation"
+description = "corvidex-mcp: an RTL-centric RAG and indexing MCP"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-vhdl-rag-mcp = "vhdl_rag_mcp.server:main"
+corvidex-mcp = "corvidex_mcp.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -30,7 +30,7 @@ where = ["src"]
 # source tree by tools/bundle_model.py on the machine that builds the
 # wheel); the small JSON files are committed.
 [tool.setuptools.package-data]
-vhdl_rag_mcp = [
+corvidex_mcp = [
     "assets/**/*",
 ]
 

@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.git_manager import (
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.git_manager import (
     GitError,
     GitManager,
     _hint,
     parse_name_status_z,
 )
-from vhdl_rag_mcp.routing import classify_file
+from corvidex_mcp.routing import classify_file
 
 ENV = {
     **os.environ,
@@ -482,7 +482,7 @@ def test_local_read_file_and_tree_untouched(manager: GitManager, work_repo: Path
 def test_routing_vhdl():
     kind = classify_file("rtl/fifo.vhd")
     assert kind is not None
-    from vhdl_rag_mcp.models import CollectionName, ContentType
+    from corvidex_mcp.models import CollectionName, ContentType
 
     assert kind.content_type is ContentType.SOURCE
     assert kind.collection is CollectionName.HDL
@@ -492,7 +492,7 @@ def test_routing_vhdl():
 
 
 def test_routing_verilog():
-    from vhdl_rag_mcp.models import CollectionName, ContentType
+    from corvidex_mcp.models import CollectionName, ContentType
 
     for path, lang in (
         ("rtl/fifo.v", "verilog"),
@@ -517,7 +517,7 @@ def test_routing_verilog():
 
 
 def test_routing_docs():
-    from vhdl_rag_mcp.models import CollectionName, ContentType
+    from corvidex_mcp.models import CollectionName, ContentType
 
     for ext, lang in (
         (".md", "markdown"),
@@ -533,7 +533,7 @@ def test_routing_docs():
 
 
 def test_routing_code_and_unknown():
-    from vhdl_rag_mcp.models import CollectionName, ContentType
+    from corvidex_mcp.models import CollectionName, ContentType
 
     for ext, lang in (
         (".c", "c"),
@@ -551,7 +551,7 @@ def test_routing_code_and_unknown():
 
 
 def test_routing_domains_restriction():
-    from vhdl_rag_mcp.models import CollectionName
+    from corvidex_mcp.models import CollectionName
 
     domains = frozenset({CollectionName.HDL})
     assert classify_file("rtl/fifo.vhd", domains=domains) is not None

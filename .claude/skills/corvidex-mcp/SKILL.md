@@ -1,11 +1,11 @@
 ---
-name: vhdl-rag-mcp
-description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the vhdl-rag-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), or when a question spans docs, RTL, and test/simulation code.
+name: corvidex-mcp
+description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the corvidex-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), or when a question spans docs, RTL, and test/simulation code.
 ---
 
-# vhdl-rag-mcp — VHDL knowledge base
+# corvidex-mcp — RTL-centric RAG and indexing MCP
 
-The `vhdl-rag-mcp` server indexes configured Git repositories into three
+The `corvidex-mcp` server indexes configured Git repositories into three
 hybrid (dense + full-text, RRF-fused) search collections: **hdl**
 (per-construct chunks), **docs** (per-section chunks), and **code**
 (per-function/class chunks). When the config sets `coding_standards`,
@@ -18,8 +18,8 @@ cross-referencing key between domains.
 
 ## Setup (once, per machine)
 
-1. Config at `~/.config/vhdl-rag/config.toml` (or the
-   `VHDL_RAG_MCP_CONFIG` env var / `--config` flag) — one
+1. Config at `~/.config/corvidex/config.toml` (or the
+   `CORVIDEX_MCP_CONFIG` env var / `--config` flag) — one
    `[[repositories]]` entry per repository with `name` and exactly one
    of `url` (remote, cloned by the server) or `path` (your own local
    working checkout, indexed in place and never modified). For `url`
@@ -37,7 +37,7 @@ cross-referencing key between domains.
    without it those files fall back to structural parsing (still
    indexed, coarser chunks). Per repo, `vhdl_ls_hook` / `veridian_hook`
    can generate the workspace config when missing.
-4. Register the server (Claude Code): `claude mcp add vhdl-rag-mcp -- uvx --from git+ssh://git@github.com/ru551n/vhdl-rag-mcp.git vhdl-rag-mcp`
+4. Register the server (Claude Code): `claude mcp add corvidex-mcp -- uvx --from git+ssh://git@github.com/ru551n/corvidex-mcp.git corvidex-mcp`
 5. Verify: call `repository_status` — each repo should show an indexed
    commit and no `last error` (a misconfigured url/ref shows an
    actionable hint there). If empty or stale, call `sync_repositories`.

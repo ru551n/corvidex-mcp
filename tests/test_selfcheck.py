@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 from capability import sqlite_extensions_supported
 
-from vhdl_rag_mcp.config import AppConfig, RepositoryConfig
-from vhdl_rag_mcp.embeddings.provider import FastEmbedProvider
-from vhdl_rag_mcp.embeddings.providers import EmbeddingProviders
-from vhdl_rag_mcp.models import CollectionName
-from vhdl_rag_mcp.retrieval import RetrievalError
-from vhdl_rag_mcp.selfcheck import (
+from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.embeddings.provider import FastEmbedProvider
+from corvidex_mcp.embeddings.providers import EmbeddingProviders
+from corvidex_mcp.models import CollectionName
+from corvidex_mcp.retrieval import RetrievalError
+from corvidex_mcp.selfcheck import (
     ComponentStatus,
     SelfCheckResult,
     check_fts5,
@@ -21,9 +21,9 @@ from vhdl_rag_mcp.selfcheck import (
     check_sqlite_vec,
     run_self_check,
 )
-from vhdl_rag_mcp.server import VhdlRagApp
-from vhdl_rag_mcp.state import StateStore
-from vhdl_rag_mcp.vector_store import VectorStore
+from corvidex_mcp.server import VhdlRagApp
+from corvidex_mcp.state import StateStore
+from corvidex_mcp.vector_store import VectorStore
 
 pytestmark = pytest.mark.skipif(
     not sqlite_extensions_supported(),
@@ -103,7 +103,7 @@ def test_required_checks_pass_in_this_runtime():
 
 
 def test_git_missing_is_fatal(monkeypatch: pytest.MonkeyPatch):
-    import vhdl_rag_mcp.selfcheck as selfcheck
+    import corvidex_mcp.selfcheck as selfcheck
 
     monkeypatch.setattr(selfcheck.shutil, "which", lambda _name: None)
     check = check_git()

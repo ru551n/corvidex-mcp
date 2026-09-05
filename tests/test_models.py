@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.models import (
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.models import (
     INDEX_SCHEMA_VERSION,
     Chunk,
     CollectionName,

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from vhdl_rag_mcp.config import (
+from corvidex_mcp.config import (
     ALL_DOMAINS,
     AppConfig,
     ConfigError,
@@ -16,12 +16,12 @@ from vhdl_rag_mcp.config import (
     RepositoryConfig,
     load_config,
 )
-from vhdl_rag_mcp.models import CollectionName
+from corvidex_mcp.models import CollectionName
 
 _DEFAULT_DENSE_THREADS = max(1, (os.cpu_count() or 8) // 2)
 
 FULL_CONFIG = """\
-data_dir = "~/vhdl-rag-data"
+data_dir = "~/corvidex-data"
 sync_interval = 60
 vhdl_ls_path = "/opt/vhdl_ls/bin/vhdl_ls"
 vhdl_ls_libraries_dir = "~/git/rust_hdl/vhdl_libraries"
@@ -70,7 +70,7 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     cfg = load_config(
         tmp_path / "config.toml", write_default=False, cwd=tmp_path / "workdir"
     )
-    assert cfg.data_dir == Path("~/.local/share/vhdl-rag")
+    assert cfg.data_dir == Path("~/.local/share/corvidex")
     assert cfg.sync_interval == 300
     assert cfg.local_sync_interval == 10
     assert cfg.vhdl_ls_path == "vhdl_ls"
@@ -90,6 +90,25 @@ def test_defaults_when_file_missing(tmp_path: Path) -> None:
     assert cfg.embeddings.docs_model == "jinaai/jina-embeddings-v2-small-en"
     assert cfg.embeddings.code_model == "jinaai/jina-embeddings-v2-small-en"
     assert cfg.dense_cache_dir == cfg.resolved_data_dir / "dense-cache"
+
+
+def test_config_env_var_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CORVIDEX_MCP_CONFIG`` wins; ``VHDL_RAG_MCP_CONFIG`` (the deprecated
+    name, from the project's former name vhdl-rag-mcp) is a fallback."""
+    new_path = tmp_path / "new.toml"
+    old_path = tmp_path / "old.toml"
+    new_path.write_text('data_dir = "~/new-data"\n', encoding="utf-8")
+    old_path.write_text('data_dir = "~/old-data"\n', encoding="utf-8")
+
+    monkeypatch.setenv("VHDL_RAG_MCP_CONFIG", str(old_path))
+    cfg = load_config(write_default=False, cwd=tmp_path)
+    assert cfg.data_dir == Path("~/old-data").expanduser()
+
+    monkeypatch.setenv("CORVIDEX_MCP_CONFIG", str(new_path))
+    cfg = load_config(write_default=False, cwd=tmp_path)
+    assert cfg.data_dir == Path("~/new-data").expanduser()
 
 
 def test_default_template_written(tmp_path: Path) -> None:
@@ -119,7 +138,7 @@ def test_configured_repositories_suppress_default(tmp_path: Path) -> None:
 
 
 def test_default_repository_for_cwd_git(tmp_path: Path) -> None:
-    from vhdl_rag_mcp.config import default_repository_for_cwd
+    from corvidex_mcp.config import default_repository_for_cwd
 
     root = tmp_path / "my-repo"
     (root / ".git").mkdir(parents=True)
@@ -130,7 +149,7 @@ def test_default_repository_for_cwd_git(tmp_path: Path) -> None:
 
 
 def test_default_repository_for_cwd_sanitizes_name(tmp_path: Path) -> None:
-    from vhdl_rag_mcp.config import default_repository_for_cwd
+    from corvidex_mcp.config import default_repository_for_cwd
 
     root = tmp_path / "my project!!"
     root.mkdir()
@@ -146,7 +165,7 @@ def test_full_config_parsing(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(FULL_CONFIG, encoding="utf-8")
     cfg = load_config(path)
-    assert cfg.data_dir == Path("~/vhdl-rag-data").expanduser()
+    assert cfg.data_dir == Path("~/corvidex-data").expanduser()
     assert cfg.sync_interval == 60
     assert cfg.vhdl_ls_path == "/opt/vhdl_ls/bin/vhdl_ls"
     assert (
@@ -228,7 +247,7 @@ def test_domains_validation() -> None:
 
 
 def test_dense_batch_size_validation() -> None:
-    from vhdl_rag_mcp.config import EmbeddingsConfig
+    from corvidex_mcp.config import EmbeddingsConfig
 
     assert EmbeddingsConfig().dense_batch_size == 1  # strict per-passage bound
     assert EmbeddingsConfig(dense_batch_size=4).dense_batch_size == 4
@@ -252,7 +271,7 @@ def test_data_dir_expanded(tmp_path: Path) -> None:
     assert cfg.resolved_data_dir.name == "x"
     assert cfg.repos_dir == cfg.resolved_data_dir / "repos"
     assert cfg.state_dir == cfg.resolved_data_dir / "state"
-    assert cfg.log_file == cfg.resolved_data_dir / "logs" / "vhdl-rag.log"
+    assert cfg.log_file == cfg.resolved_data_dir / "logs" / "corvidex.log"
     assert cfg.sqlite_index_path == cfg.resolved_data_dir / "index.sqlite"
 
 

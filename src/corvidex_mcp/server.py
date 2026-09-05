@@ -1,4 +1,4 @@
-"""MCP server: VHDL RAG search over configured Git repositories.
+"""MCP server: RTL-centric RAG and indexing over configured Git repositories.
 
 Exposes ten tools to coding agents:
 
@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 #: Held open for the process lifetime while the lock is taken.
 _LOCK_HANDLE: object | None = None
 
-MCP_NAME = "vhdl_rag_mcp"
+MCP_NAME = "corvidex_mcp"
 
 INSTRUCTIONS = (
     "Semantic search over an organization's HDL code (VHDL, Verilog, "
@@ -843,7 +843,7 @@ def _acquire_lock(config: AppConfig) -> Path:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             logger.error(
-                "another vhdl-rag-mcp instance holds the lock (%s); exiting",
+                "another corvidex-mcp instance holds the lock (%s); exiting",
                 lock_path,
             )
             raise SystemExit(1) from None
@@ -854,7 +854,7 @@ def _acquire_lock(config: AppConfig) -> Path:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             logger.error(
-                "another vhdl-rag-mcp instance holds the lock (%s); exiting",
+                "another corvidex-mcp instance holds the lock (%s); exiting",
                 lock_path,
             )
             raise SystemExit(1) from None
@@ -926,7 +926,7 @@ async def _main_async(app: VhdlRagApp, mcp: MCPServer) -> None:
             "no repositories and no coding_standards file configured: the "
             "index stays empty. Add [[repositories]] entries (or a "
             "coding_standards file) to the config file "
-            "($VHDL_RAG_MCP_CONFIG or ~/.config/vhdl-rag/config.toml) and "
+            "($CORVIDEX_MCP_CONFIG or ~/.config/corvidex/config.toml) and "
             "restart, or call sync_repositories after updating it."
         )
     logger.info(
@@ -941,7 +941,7 @@ async def _main_async(app: VhdlRagApp, mcp: MCPServer) -> None:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="vhdl-rag-mcp",
+        prog="corvidex-mcp",
         description="MCP server: semantic search over VHDL repositories.",
     )
     parser.add_argument(
@@ -949,8 +949,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "config file (default: $VHDL_RAG_MCP_CONFIG or "
-            "~/.config/vhdl-rag/config.toml)"
+            "config file (default: $CORVIDEX_MCP_CONFIG or "
+            "~/.config/corvidex/config.toml)"
         ),
     )
     parser.add_argument(
@@ -1011,7 +1011,7 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
     """Parse CLI arguments and load the config with overrides applied.
 
     The config file is selected by ``--config`` or
-    ``VHDL_RAG_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
+    ``CORVIDEX_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
     ``--vhdl-ls-path``/``--veridian-path``/``--log-level``/
     ``--num-threads`` override the file's values.
     """
@@ -1049,11 +1049,11 @@ def main(argv: list[str] | None = None) -> None:
     try:
         config = config_from_args(argv)
     except (ConfigError, ValidationError) as exc:
-        print(f"vhdl-rag-mcp: {exc}", file=sys.stderr)
+        print(f"corvidex-mcp: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     setup_logging(config.log_level, config.log_file)
     logger.info(
-        "vhdl-rag-mcp starting (data_dir=%s, %d repositories)",
+        "corvidex-mcp starting (data_dir=%s, %d repositories)",
         config.resolved_data_dir,
         len(config.repositories),
     )

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.indexing.code import chunk_code_file
-from vhdl_rag_mcp.models import CollectionName, ContentType
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.indexing.code import chunk_code_file
+from corvidex_mcp.models import CollectionName, ContentType
 
 CFG = RepositoryConfig(name="code", url="git@example.com:co/code.git")
 

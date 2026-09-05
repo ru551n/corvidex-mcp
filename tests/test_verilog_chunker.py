@@ -8,14 +8,14 @@ extraction with comment/directive handling.
 
 from __future__ import annotations
 
-from vhdl_rag_mcp.config import RepositoryConfig
-from vhdl_rag_mcp.indexing.verilog import (
+from corvidex_mcp.config import RepositoryConfig
+from corvidex_mcp.indexing.verilog import (
     MIN_INNER_SPAN,
     chunk_verilog_file,
     extract_identifiers,
 )
-from vhdl_rag_mcp.lsp.client import SymbolInfo
-from vhdl_rag_mcp.models import CollectionName, ContentType
+from corvidex_mcp.lsp.client import SymbolInfo
+from corvidex_mcp.models import CollectionName, ContentType
 
 CFG = RepositoryConfig(name="repo", url="git@example.com:co/repo.git")
 

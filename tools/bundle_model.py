@@ -3,7 +3,7 @@
 Run before building the wheel: it provisions a fastembed TextEmbedding
 model (default: the built-in default,
 jinaai/jina-embeddings-v2-small-en) into
-``src/vhdl_rag_mcp/assets/<org>-<model>/`` with the exact layout
+``src/corvidex_mcp/assets/<org>-<model>/`` with the exact layout
 fastembed loads:
 
     <dest>/onnx/model.onnx
@@ -39,7 +39,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from vhdl_rag_mcp.embeddings.assets import (
+from corvidex_mcp.embeddings.assets import (
     ASSETS_DIR,
     MODEL_DIR_FILES,
     asset_subdir,
@@ -89,7 +89,7 @@ def main() -> None:
         "--cache-dir",
         default=None,
         help=(
-            "fastembed/HF download cache directory (default: ~/.cache/vhdl-rag-models)"
+            "fastembed/HF download cache directory (default: ~/.cache/corvidex-models)"
         ),
     )
     parser.add_argument(
@@ -121,7 +121,7 @@ def main() -> None:
         cache = (
             Path(args.cache_dir).expanduser()
             if args.cache_dir
-            else Path.home() / ".cache" / "vhdl-rag-models"
+            else Path.home() / ".cache" / "corvidex-models"
         )
         cache.mkdir(parents=True, exist_ok=True)
         print(

@@ -1,7 +1,7 @@
 """Multi-collection embedding providers.
 
 The three collections may use different dense models (per
-:mod:`vhdl_rag_mcp.config` ``EmbeddingsConfig``). This wrapper owns the
+:mod:`corvidex_mcp.config` ``EmbeddingsConfig``). This wrapper owns the
 providers lazily: models are loaded on first use and cached in the
 configured ``embed-cache`` directory.
 """
