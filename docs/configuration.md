@@ -63,9 +63,11 @@ log_level = "INFO"
 # indexing_workers = 1                 # worker processes for data-parallel
 #                                      # dense embedding (1 = single process;
 #                                      # each worker loads its own model copy)
-# hdl_model = "jinaai/jina-embeddings-v2-small-en"  # any fastembed
-# docs_model = "jinaai/jina-embeddings-v2-small-en"  # TextEmbedding name;
-# code_model = "jinaai/jina-embeddings-v2-small-en"  # default: small-en (512 dims)
+# hdl_model = "jinaai/jina-embeddings-v2-small-en"  # any fastembed TextEmbedding
+# docs_model = "jinaai/jina-embeddings-v2-small-en"  # name; hdl/docs default to
+#                                                     # small-en (512 dims); code
+# code_model = "jinaai/jina-embeddings-v2-base-code"  # defaults to base-code
+#                                                      # (768 dims, code-pretrained)
 
 # With any [[repositories]] configured, the zero-config cwd default no
 # longer applies — these are indexed instead.
@@ -172,10 +174,13 @@ filesystem = true
   indexing is faster and lighter. `indexing_workers` (default 1) runs
   data-parallel embedding with N worker processes during indexing
   (each loads its own model copy, ~0.1 GB for the default); quality
-  is identical. `hdl_model`/`docs_model`/`code_model` (default: jina
-  v2 small-en, 512 dims — measured equal-or-better retrieval quality
-  at ~3x lower indexing RAM) select the dense model per collection;
-  any fastembed `TextEmbedding` model name works. Switching to a
+  is identical. `hdl_model`/`docs_model`/`code_model` select the dense
+  model per collection; `hdl_model`/`docs_model` default to jina v2
+  small-en (512 dims — measured equal-or-better retrieval quality at
+  ~3x lower indexing RAM than the base models), while `code_model`
+  defaults to jina v2 base-code (768 dims), pretrained on source code
+  rather than prose/RTL text. Any fastembed `TextEmbedding` model name
+  works. Switching to a
   model with a different vector size requires a reindex (delete the
   collection or `data_dir`). Computed dense vectors are cached
   content-addressed under `data_dir/dense-cache`, so reindexing, branch
