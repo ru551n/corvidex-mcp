@@ -1020,28 +1020,35 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
         Path(args.config) if args.config else None,
         inject_default_repository=False,
     )
-    overrides: dict[str, Any] = {}
-    if args.data_dir is not None:
-        overrides["data_dir"] = Path(args.data_dir)
-    if args.sync_interval is not None:
-        overrides["sync_interval"] = args.sync_interval
-    if args.local_sync_interval is not None:
-        overrides["local_sync_interval"] = args.local_sync_interval
-    if args.vhdl_ls_path is not None:
-        overrides["vhdl_ls_path"] = args.vhdl_ls_path
-    if args.veridian_path is not None:
-        overrides["veridian_path"] = args.veridian_path
-    if args.log_level is not None:
-        overrides["log_level"] = args.log_level
+    overrides: dict[str, Any] = {
+        field: getattr(args, field)
+        for field in _CLI_SCALAR_OVERRIDES
+        if getattr(args, field) is not None
+    }
     if args.no_index_cwd:
         overrides["index_cwd"] = False
     if overrides or args.num_threads is not None:
-        raw = config.model_dump()
+        # Re-validate from the *explicitly set* fields only: a full
+        # model_dump() would mark every default as user-set, which
+        # apply_default_repository() relies on (model_fields_set) to
+        # decide whether data_dir may be redirected per project.
+        raw = config.model_dump(exclude_unset=True)
         raw.update(overrides)
         if args.num_threads is not None:
-            raw["embeddings"]["dense_threads"] = args.num_threads
+            raw.setdefault("embeddings", {})["dense_threads"] = args.num_threads
         config = AppConfig.model_validate(raw)
     return apply_default_repository(config)
+
+
+#: Top-level scalar CLI flags whose argparse dest equals the AppConfig field.
+_CLI_SCALAR_OVERRIDES = (
+    "data_dir",
+    "sync_interval",
+    "local_sync_interval",
+    "vhdl_ls_path",
+    "veridian_path",
+    "log_level",
+)
 
 
 def main(argv: list[str] | None = None) -> None:

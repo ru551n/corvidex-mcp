@@ -781,6 +781,28 @@ async def test_cli_no_index_cwd(tmp_path: Path) -> None:
     assert cfg.repositories == []
 
 
+async def test_cli_overrides_keep_per_project_data_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CLI flags must not turn defaults into "explicitly set" fields.
+
+    Re-validating a full ``model_dump()`` marks every field as set, which
+    would silently defeat the zero-config per-project ``data_dir``
+    redirect (``apply_default_repository`` keys on ``model_fields_set``).
+    """
+    path = tmp_path / "config.toml"
+    path.write_text('project_data_root = "proj"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    plain = config_from_args(["--config", str(path)])
+    flagged = config_from_args(["--config", str(path), "--log-level", "DEBUG"])
+    assert plain.data_dir == flagged.data_dir
+    assert flagged.data_dir.parent == Path("proj")
+    assert flagged.log_level == "DEBUG"
+    # An explicit --data-dir still wins over the per-project redirect.
+    explicit = config_from_args(["--config", str(path), "--data-dir", "shared"])
+    assert explicit.data_dir == Path("shared")
+
+
 async def test_cli_num_threads(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(CLI_CONFIG, encoding="utf-8")
