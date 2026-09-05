@@ -75,6 +75,13 @@ is, not a stale snapshot.
   hybrid (dense + full-text, RRF-fused) search: semantic similarity
   *and* exact identifier matching in one call. Ask about `rst_n` and
   you get it.
+- **Query expansion and reranking.** Queries are expanded with a
+  static RTL/HDL synonym lexicon before search (`clock` also matches
+  `clk`, `generic` also matches `parameter`, ...), and the fused
+  candidates are reranked by a cross-encoder for higher precision than
+  RRF fusion alone — both on by default and both degrade gracefully
+  (a reranker that isn't provisioned yet falls back to the unreranked
+  ranking rather than failing the search).
 - **HDL-aware chunking.** VHDL files are chunked per construct
   (entity, architecture, process, package, function, component) using
   the [vhdl_ls](https://vhdl-lang.org/) language server

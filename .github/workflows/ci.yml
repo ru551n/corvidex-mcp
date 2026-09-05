@@ -51,10 +51,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /tmp/corvidex-quality/embed-cache
-          # Bump -v2 when the default models (config defaults) or the
+          # Bump -v3 when the default models (config defaults) or the
           # fastembed version change; see docs/quality-testing.md.
-          key: corvidex-embed-cache-v2
-          restore-keys: corvidex-embed-cache-v2
+          key: corvidex-embed-cache-v3
+          restore-keys: corvidex-embed-cache-v3
       - name: Install dependencies
         run: uv sync --frozen
       - name: Run quality tests

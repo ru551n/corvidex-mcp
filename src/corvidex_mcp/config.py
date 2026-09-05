@@ -169,6 +169,47 @@ class EmbeddingsConfig(BaseModel):
             "TextEmbedding model name; see hdl_model for the default)."
         ),
     )
+    query_expansion_enabled: bool = Field(
+        default=True,
+        description=(
+            "Append RTL/HDL domain synonyms to the query before embedding "
+            "and full-text search (e.g. 'clock' also matches 'clk'; see "
+            "retrieval_lexicon.py). Static and deterministic: no model, no "
+            "network call. The original query terms are never removed, "
+            "only appended to."
+        ),
+    )
+    rerank_enabled: bool = Field(
+        default=True,
+        description=(
+            "Rerank the top rerank_candidates results of each search with "
+            "a cross-encoder before truncating to the requested limit, for "
+            "higher precision than RRF fusion alone. Runs through the same "
+            "local ONNX/fastembed infrastructure as the dense models. A "
+            "reranker that fails to load or run (model not provisioned, "
+            "no network) degrades gracefully: results fall back to the "
+            "unreranked ranking rather than failing the search."
+        ),
+    )
+    rerank_model: str = Field(
+        default="Xenova/ms-marco-MiniLM-L-6-v2",
+        description=(
+            "Cross-encoder reranker model (any fastembed TextCrossEncoder "
+            "model name). Default: MiniLM-L-6 (0.08 GB) - fast, well-"
+            "established MS MARCO reranker. Stronger/heavier alternatives: "
+            "'Xenova/ms-marco-MiniLM-L-12-v2', 'BAAI/bge-reranker-base'."
+        ),
+    )
+    rerank_candidates: int = Field(
+        default=25,
+        ge=1,
+        le=200,
+        description=(
+            "Candidates fetched from the store before reranking, then "
+            "truncated to the requested limit after rerank. Only takes "
+            "effect when rerank_enabled and limit < rerank_candidates."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_index_cap(self) -> EmbeddingsConfig:
@@ -710,6 +751,15 @@ log_level = "INFO"
 # hdl_model = "jinaai/jina-embeddings-v2-small-en"
 # docs_model = "jinaai/jina-embeddings-v2-small-en"
 # code_model = "jinaai/jina-embeddings-v2-small-en"
+# # Append RTL/HDL domain synonyms to the query before search (static,
+# # deterministic, no model/network - see retrieval_lexicon.py):
+# query_expansion_enabled = true
+# # Cross-encoder reranking of the top rerank_candidates results for
+# # higher precision than RRF fusion alone (falls back to the unreranked
+# # ranking if the model can't load, e.g. no network yet):
+# rerank_enabled = true
+# rerank_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+# rerank_candidates = 25
 
 # With no [[repositories]] configured at all (the default), the server
 # indexes the directory it is started in - typically your current
