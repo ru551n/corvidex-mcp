@@ -10,6 +10,13 @@
     {
       "matchManagers": ["github-actions"],
       "groupName": "github-actions"
+    },
+    {
+      "matchUpdateTypes": ["patch"],
+      "groupName": "patch updates (automerged)",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
     }
   ],
   "lockFileMaintenance": {
