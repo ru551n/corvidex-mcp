@@ -190,12 +190,11 @@ class LspClient:
     ) -> None:
         self._binary = binary
         self._workspace = workspace
-        self._config_name = self.config_name
         self._hook = config_hook
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
+        self._stderr_reader: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
-        self._request_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_id = 0
         self._diagnostics: dict[str, list[DiagnosticInfo]] = {}
@@ -235,12 +234,14 @@ class LspClient:
             stderr=asyncio.subprocess.PIPE,
         )
         self._reader = asyncio.create_task(self._read_loop())
+        self._stderr_reader = asyncio.create_task(self._drain_stderr())
         try:
+            root_uri = path_to_uri(self._workspace)
             result = await self._request(
                 "initialize",
                 {
                     "processId": None,
-                    "rootUri": path_to_uri(self._workspace),
+                    "rootUri": root_uri,
                     "capabilities": {
                         "textDocument": {
                             "documentSymbol": {
@@ -250,7 +251,7 @@ class LspClient:
                     },
                     "workspaceFolders": [
                         {
-                            "uri": path_to_uri(self._workspace),
+                            "uri": root_uri,
                             "name": self._workspace.name,
                         }
                     ],
@@ -291,18 +292,23 @@ class LspClient:
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await self._reader
             self._reader = None
+        if self._stderr_reader is not None:
+            self._stderr_reader.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._stderr_reader
+            self._stderr_reader = None
         self._fail_pending(LspError("language server shut down"))
-        if self._owns_workspace_config and self._config_name is not None:
-            self._workspace.joinpath(self._config_name).unlink(missing_ok=True)
+        if self._owns_workspace_config and self.config_name is not None:
+            self._workspace.joinpath(self.config_name).unlink(missing_ok=True)
 
     async def _ensure_workspace_config(self) -> None:
-        if self._config_name is None:
+        if self.config_name is None:
             return
-        config_path = self._workspace / self._config_name
+        config_path = self._workspace / self.config_name
         if config_path.exists():
             logger.info(
                 "using repository-provided %s in %s",
-                self._config_name,
+                self.config_name,
                 self._workspace,
             )
             return
@@ -329,7 +335,7 @@ class LspClient:
         successfully and the file now exists. Its output is owned by the
         hook, so the server never removes it.
         """
-        assert self._hook is not None and self._config_name is not None
+        assert self._hook is not None and self.config_name is not None
         if sys.platform == "win32":
             shell_args = ["cmd", "/c", self._hook]
         else:
@@ -359,7 +365,7 @@ class LspClient:
                 err.decode(errors="replace").strip()[-500:],
             )
             return False
-        return config_path_exists(self._workspace, self._config_name)
+        return self._workspace.joinpath(self.config_name).exists()
 
     # -- document flow --------------------------------------------------------
 
@@ -388,11 +394,6 @@ class LspClient:
         except LspError as exc:
             logger.warning("could not open %s (server unavailable): %s", path, exc)
 
-    async def close_document(self, path: Path) -> None:
-        await self._notify(
-            "textDocument/didClose", {"textDocument": {"uri": path_to_uri(path)}}
-        )
-
     async def wait_until_quiet(self, timeout: float = QUIET_TIMEOUT) -> None:
         """Wait until the server stops emitting diagnostics.
 
@@ -407,7 +408,6 @@ class LspClient:
                 "language server gone before analysis in %s", self._workspace
             )
             return
-        self._quiet_event.clear()
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -460,30 +460,35 @@ class LspClient:
         self, method: str, params: Any, timeout: float = REQUEST_TIMEOUT
     ) -> Any:
         assert self._proc is not None and self._proc.stdin is not None
-        async with self._request_lock:
-            self._next_id += 1
-            request_id = self._next_id
-            future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-            self._pending[request_id] = future
-            try:
-                await self._send(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "method": method,
-                        "params": params,
-                    }
-                )
-            except LspError as exc:
-                self._pending.pop(request_id, None)
-                future.cancel()
-                raise exc
-            try:
-                return await asyncio.wait_for(future, timeout)
-            except TimeoutError:
-                self._pending.pop(request_id, None)
-                future.cancel()
-                raise LspTimeout(f"{method} timed out after {timeout:.0f}s") from None
+        # Id allocation is atomic (single-threaded asyncio, no ``await``
+        # between the increment and the ``_pending`` registration) and
+        # ``_send`` serializes the actual frame writes through
+        # ``_write_lock``, so several requests may be in flight at once;
+        # responses are matched back to their future by id in
+        # ``_dispatch`` regardless of the order they arrive in.
+        self._next_id += 1
+        request_id = self._next_id
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        try:
+            await self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+        except LspError as exc:
+            self._pending.pop(request_id, None)
+            future.cancel()
+            raise exc
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self._pending.pop(request_id, None)
+            future.cancel()
+            raise LspTimeout(f"{method} timed out after {timeout:.0f}s") from None
 
     async def _notify(self, method: str, params: Any) -> None:
         assert self._proc is not None
@@ -501,6 +506,24 @@ class LspClient:
                 await self._proc.stdin.drain()
         except Exception as exc:
             raise LspError(f"failed to send to language server: {exc}") from exc
+
+    async def _drain_stderr(self) -> None:
+        """Log the server's stderr at DEBUG so its pipe never backs up.
+
+        Some servers are chatty on stderr; nothing else reads that
+        pipe, so an unread server would eventually block on a full
+        64 KiB buffer and every request would then look like a hung
+        server (``wait_until_quiet``/request timeouts) with no clue as
+        to why.
+        """
+        assert self._proc is not None and self._proc.stderr is not None
+        stream = self._proc.stderr
+        name = Path(self._binary).name
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            logger.debug("%s: %s", name, line.decode(errors="replace").rstrip())
 
     async def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -576,10 +599,6 @@ class LspClient:
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
-
-
-def config_path_exists(workspace: Path, config_name: str) -> bool:
-    return workspace.joinpath(config_name).exists()
 
 
 def _parse_content_length(header: bytes) -> int | None:
@@ -660,17 +679,3 @@ class VhdlLsp(LspClient):
                 "is_third_party = true",
             ]
         return "\n".join(lines)
-
-
-# Kept for import convenience (used by tests).
-__all__ = [
-    "DiagnosticInfo",
-    "LspClient",
-    "LspError",
-    "LspTimeout",
-    "SymbolInfo",
-    "VhdlLsp",
-    "default_libraries_dir",
-    "path_to_uri",
-    "server_version",
-]
