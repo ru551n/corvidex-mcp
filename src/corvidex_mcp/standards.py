@@ -16,6 +16,7 @@ drops the chunks again.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from pathlib import Path
@@ -156,7 +157,7 @@ def _local_fingerprint(path: Path) -> str | None:
     return hashlib.sha256(f"{st.st_mtime_ns}\t{st.st_size}".encode()).hexdigest()
 
 
-def sync_coding_standards(
+async def sync_coding_standards(
     config: AppConfig,
     providers: EmbeddingProviders,
     store: VectorStore,
@@ -192,7 +193,7 @@ def sync_coding_standards(
             "commit": state.indexed_commit[:12],
         }
     try:
-        text = extract_standards_text(path)
+        text = await asyncio.to_thread(extract_standards_text, path)
     except StandardsError as exc:
         logger.error("%s: %s", name, exc)
         states.record_sync(name, str(exc))
@@ -211,7 +212,7 @@ def sync_coding_standards(
     try:
         _remove(store, states)  # previous version (replace, not merge)
         if chunks:
-            dense = providers.embed_passages(
+            dense = await providers.embed_passages_async(
                 CollectionName.DOCS, [c.content for c in chunks]
             )
             store.upsert_chunks(chunks, dense)
