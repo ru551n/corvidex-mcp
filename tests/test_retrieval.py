@@ -255,7 +255,7 @@ async def env(tmp_path: Path):
 
 async def test_search_returns_ranked_results(env) -> None:
     _store, retrieval = env
-    results = retrieval.search(CollectionName.HDL, "fifo entity")
+    results = await retrieval.search(CollectionName.HDL, "fifo entity")
     assert results
     top = results[0]
     assert top.result_type == "hdl"
@@ -268,9 +268,9 @@ async def test_search_returns_ranked_results(env) -> None:
 
 async def test_search_symbol_cross_reference(env) -> None:
     _store, retrieval = env
-    results = retrieval.search(CollectionName.HDL, "reset", symbols=("rst_n",))
+    results = await retrieval.search(CollectionName.HDL, "reset", symbols=("rst_n",))
     assert not results  # no VHDL chunk references rst_n
-    docs = retrieval.search(
+    docs = await retrieval.search(
         CollectionName.DOCS, "reset conventions", symbols=("rst_n",)
     )
     assert docs
@@ -281,17 +281,17 @@ async def test_search_symbol_cross_reference(env) -> None:
 async def test_search_repository_filter_and_errors(env) -> None:
     _store, retrieval = env
     with pytest.raises(RetrievalError, match="unknown repository"):
-        retrieval.search(CollectionName.HDL, "x", repository="nope")
+        await retrieval.search(CollectionName.HDL, "x", repository="nope")
     with pytest.raises(RetrievalError, match="must not be empty"):
-        retrieval.search(CollectionName.HDL, "   ")
-    filtered = retrieval.search(CollectionName.CODE, "fifo", repository="repo")
+        await retrieval.search(CollectionName.HDL, "   ")
+    filtered = await retrieval.search(CollectionName.CODE, "fifo", repository="repo")
     assert filtered
     assert all(r.repository == "repo" for r in filtered)
 
 
 async def test_search_knowledge_fuses_domains(env) -> None:
     _store, retrieval = env
-    results = retrieval.search_knowledge("fifo", limit=20)
+    results = await retrieval.search_knowledge("fifo", limit=20)
     assert {r.result_type for r in results} == {"hdl", "docs", "code"}
     scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
@@ -299,13 +299,13 @@ async def test_search_knowledge_fuses_domains(env) -> None:
 
 async def test_search_knowledge_respects_limit(env) -> None:
     _store, retrieval = env
-    assert len(retrieval.search_knowledge("fifo", limit=2)) <= 2
+    assert len(await retrieval.search_knowledge("fifo", limit=2)) <= 2
 
 
 async def test_search_language_filter_per_language(env) -> None:
     _store, retrieval = env
     for language in ("vhdl", "verilog", "systemverilog"):
-        results = retrieval.search(CollectionName.HDL, "fifo", language=language)
+        results = await retrieval.search(CollectionName.HDL, "fifo", language=language)
         assert results, language
         assert all(r.language == language for r in results), language
 
@@ -313,7 +313,7 @@ async def test_search_language_filter_per_language(env) -> None:
 async def test_search_language_filter_is_exact(env) -> None:
     _store, retrieval = env
     # 'verilog' must not match the systemverilog or vhdl chunks.
-    results = retrieval.search(CollectionName.HDL, "fifo", language="verilog")
+    results = await retrieval.search(CollectionName.HDL, "fifo", language="verilog")
     assert all(r.language == "verilog" for r in results)
     files = {r.file for r in results}
     assert "rtl/fifo_pkg.sv" not in files
@@ -323,16 +323,16 @@ async def test_search_language_filter_is_exact(env) -> None:
 async def test_search_language_validation(env) -> None:
     _store, retrieval = env
     with pytest.raises(RetrievalError, match="unknown HDL language"):
-        retrieval.search(CollectionName.HDL, "fifo", language="verilog-2005")
+        await retrieval.search(CollectionName.HDL, "fifo", language="verilog-2005")
     with pytest.raises(RetrievalError, match="must not be empty"):
-        retrieval.search(CollectionName.HDL, "fifo", language="  ")
+        await retrieval.search(CollectionName.HDL, "fifo", language="  ")
     # Non-hdl collections accept pass-through languages.
-    assert retrieval.search(CollectionName.CODE, "fifo", language="c")
+    assert await retrieval.search(CollectionName.CODE, "fifo", language="c")
 
 
 async def test_search_knowledge_language_filter(env) -> None:
     _store, retrieval = env
-    results = retrieval.search_knowledge("fifo", limit=20, language="c")
+    results = await retrieval.search_knowledge("fifo", limit=20, language="c")
     assert results
     assert all(r.language == "c" for r in results)
     # The hdl domain simply contributes nothing for a code language.
@@ -341,11 +341,11 @@ async def test_search_knowledge_language_filter(env) -> None:
 
 async def test_results_carry_language_metadata(env) -> None:
     _store, retrieval = env
-    results = retrieval.search(CollectionName.HDL, "fifo", limit=10)
+    results = await retrieval.search(CollectionName.HDL, "fifo", limit=10)
     assert results
     assert {r.language for r in results} <= {"vhdl", "verilog", "systemverilog"}
     # Every hdl result has a language; cross-domain too.
-    knowledge = retrieval.search_knowledge("fifo", limit=20)
+    knowledge = await retrieval.search_knowledge("fifo", limit=20)
     assert all(r.language for r in knowledge)
 
 
@@ -482,12 +482,12 @@ async def test_priority_bonus_adds_one_step_per_unit(tmp_path: Path) -> None:
         contents={"base": "gamma delta", "extra": "gamma delta extra"},
     )
     step = 1.0 / (60 * 61)
-    results = retrieval.search(CollectionName.HDL, "alpha beta")
+    results = await retrieval.search(CollectionName.HDL, "alpha beta")
     assert [r.repository for r in results] == ["extra", "base"]
     assert results[0].score == pytest.approx(1.0 / 62 + step)
     assert results[1].score == pytest.approx(1.0 / 61)
     # The same bonus applies in cross-domain fusion.
-    fused = retrieval.search_knowledge("alpha beta")
+    fused = await retrieval.search_knowledge("alpha beta")
     assert [r.repository for r in fused] == ["extra", "base"]
     store.close()
 
@@ -509,7 +509,7 @@ async def test_priority_bonus_saturates_and_cannot_cross_tiers(
         },
     )
     cap = 0.25 / 61
-    results = retrieval.search(CollectionName.HDL, "alpha beta")
+    results = await retrieval.search(CollectionName.HDL, "alpha beta")
     assert results[0].repository == "anchor"
     by_repo = {r.repository: r.score for r in results}
     # Dense ranks: anchor (len 10, index 0), base (len 10, index 1),
@@ -531,7 +531,7 @@ async def test_semantic_mode_is_dense_only(env) -> None:
     # the ordering is pure embedding similarity. The entity chunk's
     # vector is the query-aligned one (first index, longest content):
     # score 1.0, the rest within [0, 1] below it.
-    results = retrieval.search(CollectionName.HDL, "zzzqqq", mode="semantic")
+    results = await retrieval.search(CollectionName.HDL, "zzzqqq", mode="semantic")
     assert results
     assert results[0].file == "rtl/fifo.vhd"
     assert results[0].start_line == 1
@@ -539,7 +539,7 @@ async def test_semantic_mode_is_dense_only(env) -> None:
     assert all(0.0 <= r.score <= 1.0 for r in results)
     assert all(r.score < results[0].score for r in results[1:])
     # Case-insensitive mode names.
-    again = retrieval.search(CollectionName.HDL, "zzzqqq", mode="SEMANTIC")
+    again = await retrieval.search(CollectionName.HDL, "zzzqqq", mode="SEMANTIC")
     assert [r.file for r in again] == [r.file for r in results]
 
 
@@ -548,7 +548,7 @@ async def test_lexical_mode_is_fulltext_only(env) -> None:
     # "entity OR fifo": only the two fifo.vhd design units contain those
     # tokens (fifo_tb / fifo_pkg are single '_'-joined tokens). Ranked
     # by BM25; the display score is the rank's RRF term.
-    results = retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
+    results = await retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
     assert [(r.file, r.start_line) for r in results] == [
         ("rtl/fifo.vhd", 1),
         ("rtl/fifo.vhd", 5),
@@ -556,13 +556,13 @@ async def test_lexical_mode_is_fulltext_only(env) -> None:
     assert results[0].score == pytest.approx(1.0 / 61)
     assert results[1].score == pytest.approx(1.0 / 62)
     # No full-text matches: the lexical leg is empty (no dense fallback).
-    assert retrieval.search(CollectionName.HDL, "zzzqqq", mode="lexical") == []
+    assert await retrieval.search(CollectionName.HDL, "zzzqqq", mode="lexical") == []
 
 
 async def test_hybrid_mode_is_the_default(env) -> None:
     _store, retrieval = env
-    default = retrieval.search(CollectionName.HDL, "entity fifo")
-    explicit = retrieval.search(CollectionName.HDL, "entity fifo", mode="hybrid")
+    default = await retrieval.search(CollectionName.HDL, "entity fifo")
+    explicit = await retrieval.search(CollectionName.HDL, "entity fifo", mode="hybrid")
     assert [(r.file, r.start_line) for r in default] == [
         (r.file, r.start_line) for r in explicit
     ]
@@ -571,22 +571,22 @@ async def test_hybrid_mode_is_the_default(env) -> None:
     # Hybrid is distinct from lexical on a query where the dense leg
     # disagrees (the entity chunk is dense-best here too, but the
     # scores live on different scales).
-    lexical = retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
+    lexical = await retrieval.search(CollectionName.HDL, "entity fifo", mode="lexical")
     assert default[0].score != lexical[0].score
 
 
 async def test_invalid_mode_is_rejected(env) -> None:
     _store, retrieval = env
     with pytest.raises(RetrievalError, match="unknown search mode"):
-        retrieval.search(CollectionName.HDL, "fifo", mode="cosine")
+        await retrieval.search(CollectionName.HDL, "fifo", mode="cosine")
     with pytest.raises(RetrievalError, match="unknown search mode"):
-        retrieval.search_knowledge("fifo", mode="")
+        await retrieval.search_knowledge("fifo", mode="")
 
 
 async def test_search_knowledge_modes(env) -> None:
     _store, retrieval = env
     # Lexical across domains: only hdl chunks contain the tokens.
-    lexical = retrieval.search_knowledge("entity fifo", mode="lexical")
+    lexical = await retrieval.search_knowledge("entity fifo", mode="lexical")
     assert [r.result_type for r in lexical] == ["hdl", "hdl"]
     assert [(r.file, r.start_line) for r in lexical] == [
         ("rtl/fifo.vhd", 1),
@@ -594,7 +594,7 @@ async def test_search_knowledge_modes(env) -> None:
     ]
     # Semantic across domains: every collection contributes its dense
     # top; scores are cosine similarities in [0, 1].
-    semantic = retrieval.search_knowledge("zzzqqq", mode="semantic")
+    semantic = await retrieval.search_knowledge("zzzqqq", mode="semantic")
     assert semantic
     assert {r.result_type for r in semantic} == {"hdl", "docs", "code"}
     assert all(0.0 <= r.score <= 1.0 for r in semantic)
@@ -622,7 +622,7 @@ async def test_rerank_reorders_by_cross_encoder_score(env) -> None:
     # entity chunk ranks first (it appears earlier/denser). The fake
     # reranker scores purely on "rtl" occurrences, which only the
     # architecture chunk's content contains, and must win instead.
-    results = retrieval.search(CollectionName.HDL, "fifo", limit=2)
+    results = await retrieval.search(CollectionName.HDL, "fifo", limit=2)
     assert [r.symbol for r in results] == ["rtl", "fifo"]
     assert fake.calls  # the reranker was actually invoked
 
@@ -674,7 +674,7 @@ async def test_rerank_disabled_keeps_store_ranking(tmp_path: Path) -> None:
     )
     fake = FakeReranker()
     retrieval_no_rerank._providers.rerank = fake.score  # type: ignore[method-assign]
-    retrieval_no_rerank.search(CollectionName.HDL, "fifo", limit=2)
+    await retrieval_no_rerank.search(CollectionName.HDL, "fifo", limit=2)
     assert not fake.calls  # never invoked: rerank_enabled is false
     store.close()
 
@@ -687,7 +687,7 @@ async def test_rerank_failure_falls_back_to_unreranked(env) -> None:
 
     retrieval._providers.rerank = _boom  # type: ignore[method-assign]
     # Falls back to the plain (RRF) ranking instead of raising.
-    results = retrieval.search(CollectionName.HDL, "fifo entity")
+    results = await retrieval.search(CollectionName.HDL, "fifo entity")
     assert results
 
 
@@ -696,7 +696,7 @@ async def test_query_expansion_widens_lexical_recall(env) -> None:
     # The doc chunk mentions "rst_n" but not the word "clock"; expansion
     # of "clock" appends "clk", which the fifo entity chunk (containing
     # "clk") lexically matches in "lexical" mode.
-    plain = retrieval.search(CollectionName.HDL, "clock", mode="lexical")
+    plain = await retrieval.search(CollectionName.HDL, "clock", mode="lexical")
     assert any("clk" in r.content for r in plain)
 
 
@@ -707,7 +707,9 @@ async def test_query_expansion_disabled_is_literal(tmp_path: Path) -> None:
     )
     # "clock" alone (no expansion to "clk") does not lexically match the
     # indexed chunk's full text (ENTITY_CONTENT says "clk", not "clock").
-    results = retrieval_literal.search(CollectionName.HDL, "clock", mode="lexical")
+    results = await retrieval_literal.search(
+        CollectionName.HDL, "clock", mode="lexical"
+    )
     assert results == []
     store.close()
 
@@ -722,7 +724,7 @@ async def test_search_knowledge_reranks_exactly_once(env) -> None:
     _store, retrieval = env
     fake = FakeReranker()
     retrieval._providers.rerank = fake.score  # type: ignore[method-assign]
-    results = retrieval.search_knowledge("fifo", limit=3)
+    results = await retrieval.search_knowledge("fifo", limit=3)
     assert len(fake.calls) == 1
     _query, num_texts = fake.calls[0]
     assert num_texts <= retrieval._config.embeddings.rerank_candidates
@@ -756,7 +758,7 @@ async def test_search_knowledge_embeds_once_per_shared_model(
         return original(collection, text)
 
     retrieval._providers.embed_query = _counting  # type: ignore[method-assign]
-    retrieval.search_knowledge("fifo")
+    await retrieval.search_knowledge("fifo")
     assert len(calls) == 1
     store.close()
 
@@ -783,7 +785,7 @@ async def test_search_knowledge_embeds_once_per_distinct_model(
         return original(collection, text)
 
     retrieval._providers.embed_query = _counting  # type: ignore[method-assign]
-    retrieval.search_knowledge("fifo")
+    await retrieval.search_knowledge("fifo")
     assert sorted(calls) == sorted(CollectionName)
     store.close()
 
@@ -792,9 +794,9 @@ async def test_search_knowledge_fuses_and_truncates_to_limit(env) -> None:
     """Results remain fused across collections (not just the largest
     one) and are truncated to ``limit`` after the single rerank pass."""
     _store, retrieval = env
-    results = retrieval.search_knowledge("fifo", limit=3)
+    results = await retrieval.search_knowledge("fifo", limit=3)
     assert len(results) <= 3
-    all_results = retrieval.search_knowledge("fifo", limit=20)
+    all_results = await retrieval.search_knowledge("fifo", limit=20)
     assert {r.result_type for r in all_results} == {"hdl", "docs", "code"}
 
 
@@ -809,7 +811,7 @@ async def test_search_knowledge_rerank_disabled_is_rrf_ordered(
     )
     fake = FakeReranker()
     retrieval._providers.rerank = fake.score  # type: ignore[method-assign]
-    results = retrieval.search_knowledge("fifo", limit=20)
+    results = await retrieval.search_knowledge("fifo", limit=20)
     assert not fake.calls  # never invoked: rerank_enabled is false
     scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)

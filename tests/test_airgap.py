@@ -156,11 +156,13 @@ async def test_air_gapped_index_and_search(
         assert app.store.count() > 0
 
         # All three search modes answer offline.
-        hybrid = app.retrieval.search_knowledge("fifo reset", mode="hybrid")
+        hybrid = await app.retrieval.search_knowledge("fifo reset", mode="hybrid")
         assert hybrid
-        semantic = app.retrieval.search_knowledge("fifo reset", mode="semantic")
+        semantic = await app.retrieval.search_knowledge("fifo reset", mode="semantic")
         assert semantic
-        lexical = app.retrieval.search_knowledge("std_logic rst_n", mode="lexical")
+        lexical = await app.retrieval.search_knowledge(
+            "std_logic rst_n", mode="lexical"
+        )
         assert lexical
         assert any(r.file.endswith("fifo.vhd") for r in lexical)
     finally:
