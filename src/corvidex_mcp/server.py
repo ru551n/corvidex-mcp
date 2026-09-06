@@ -301,7 +301,7 @@ class VhdlRagApp:
         if self.config.coding_standards is not None and (
             wanted is None or CODING_STANDARDS_REPO in wanted
         ):
-            report = sync_coding_standards(
+            report = await sync_coding_standards(
                 self.config, self.providers, self.store, self.states
             )
             if report is not None:
@@ -313,7 +313,7 @@ class VhdlRagApp:
         if repository == CODING_STANDARDS_REPO:
             if self.config.coding_standards is None:
                 raise RetrievalError("no coding_standards file is configured")
-            report = sync_coding_standards(
+            report = await sync_coding_standards(
                 self.config, self.providers, self.store, self.states
             )
             if report is None:  # only when unconfigured; guarded above
@@ -535,8 +535,8 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     mcp = MCPServer(MCP_NAME, instructions=INSTRUCTIONS)
     retrieval = app.retrieval
 
-    def _search(
-        call: Callable[[], list[SearchResult]],
+    async def _search(
+        call: Callable[[], Awaitable[list[SearchResult]]],
         empty: str,
         repository: str | None,
         limit: int,
@@ -547,7 +547,9 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         invoked before ``app.indexing_note`` so an unknown-repository
         error from the search raises before indexing_note ever sees
         the (unvalidated) name."""
-        return _render(call(), empty, note=app.indexing_note(repository), limit=limit)
+        return _render(
+            await call(), empty, note=app.indexing_note(repository), limit=limit
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
@@ -570,7 +572,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         repository name. `mode` selects the search strategy: 'hybrid'
         (default; semantic + full-text), 'semantic' (embedding
         similarity only), or 'lexical' (full-text match only)."""
-        return _search(
+        return await _search(
             lambda: retrieval.search(
                 CollectionName.HDL,
                 query,
@@ -601,7 +603,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         parameters (see its docstring for full parameter docs); this form
         is kept only for backward compatibility and has no advantage over
         it."""
-        return _search(
+        return await _search(
             lambda: retrieval.search(
                 CollectionName.HDL,
                 query,
@@ -631,7 +633,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
         (full-text match only)."""
-        return _search(
+        return await _search(
             lambda: retrieval.search(
                 CollectionName.DOCS,
                 query,
@@ -661,7 +663,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
         (full-text match only)."""
-        return _search(
+        return await _search(
             lambda: retrieval.search(
                 CollectionName.CODE,
                 query,
@@ -691,7 +693,7 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         strategy: 'hybrid' (default; semantic + full-text), 'semantic'
         (embedding similarity only), or 'lexical' (full-text match
         only)."""
-        return _search(
+        return await _search(
             lambda: retrieval.search_knowledge(
                 query,
                 limit,

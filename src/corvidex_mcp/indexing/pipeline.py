@@ -323,7 +323,7 @@ class IndexPipeline:
                     )
 
         if chunks:
-            self._upsert(cfg, chunks)
+            await self._upsert(cfg, chunks)
             logger.info("%s: indexed %d chunks", cfg.name, len(chunks))
 
     async def _chunk_with_lsp(
@@ -490,7 +490,7 @@ class IndexPipeline:
     #: repository index is.
     _STREAM_CHUNK = 256
 
-    def _upsert(self, cfg: RepositoryConfig, chunks: list[Chunk]) -> None:
+    async def _upsert(self, cfg: RepositoryConfig, chunks: list[Chunk]) -> None:
         """Embed (dense per collection) and upsert, in bounded streams."""
         indexes_by_collection: dict[CollectionName, list[int]] = {}
         for i, chunk in enumerate(chunks):
@@ -499,7 +499,7 @@ class IndexPipeline:
             items = [chunks[i] for i in indexes]
             for start in range(0, len(items), self._STREAM_CHUNK):
                 group = items[start : start + self._STREAM_CHUNK]
-                dense = self._providers.embed_passages(
+                dense = await self._providers.embed_passages_async(
                     collection, [c.content for c in group]
                 )
                 self._store.upsert_chunks(group, dense)

@@ -161,10 +161,10 @@ class RetrievalService:
             )
         return mode
 
-    def _embed_query(self, collection: CollectionName, query: str) -> list[float]:
+    async def _embed_query(self, collection: CollectionName, query: str) -> list[float]:
         """Query embedding with a clear error on a degraded model."""
         try:
-            return self._providers.embed_query(collection, query)
+            return await self._providers.embed_query_async(collection, query)
         except Exception as exc:
             raise RetrievalError(
                 f"the embedding model for the {collection.value} collection "
@@ -246,7 +246,7 @@ class RetrievalService:
         )
         return [(sc.score, sc.chunk) for sc in scored]
 
-    def _rerank(
+    async def _rerank(
         self, query: str, pairs: list[tuple[float, Chunk]], limit: int
     ) -> list[tuple[float, Chunk]]:
         """Cross-encoder rerank of ``pairs``, truncated to ``limit``.
@@ -266,7 +266,7 @@ class RetrievalService:
             return pairs[:limit]
         texts = [chunk.content for _, chunk in pairs]
         try:
-            scores = self._providers.rerank(query, texts)
+            scores = await self._providers.rerank_async(query, texts)
         except Exception as exc:
             logger.warning(
                 "reranking unavailable (%s); returning the unreranked ranking",
@@ -281,7 +281,7 @@ class RetrievalService:
 
     # -- public search ------------------------------------------------------------
 
-    def search(
+    async def search(
         self,
         collection: CollectionName,
         query: str,
@@ -325,11 +325,11 @@ class RetrievalService:
         # The lexical leg never embeds the query: no model work at all.
         dense: list[float] = []
         if mode != "lexical":
-            dense = self._embed_query(collection, expanded)
+            dense = await self._embed_query(collection, expanded)
         pairs = self._fetch_collection(
             collection, dense, expanded, limit, repository, symbols, language, mode
         )
-        pairs = self._rerank(query, pairs, limit)
+        pairs = await self._rerank(query, pairs, limit)
         boosted = [
             (score + self._priority_bonus(chunk.repository), chunk)
             for score, chunk in pairs
@@ -344,7 +344,7 @@ class RetrievalService:
         )
         return [self._to_result(score, chunk) for score, chunk in boosted]
 
-    def search_knowledge(
+    async def search_knowledge(
         self,
         query: str,
         limit: int = 10,
@@ -391,7 +391,7 @@ class RetrievalService:
                 if mode != "lexical":
                     model_name = self._providers.model_name(collection)
                     if model_name not in embed_cache:
-                        embed_cache[model_name] = self._embed_query(
+                        embed_cache[model_name] = await self._embed_query(
                             collection, expanded
                         )
                     dense = embed_cache[model_name]
@@ -431,7 +431,7 @@ class RetrievalService:
             ),
         )
         cap = embeddings.rerank_candidates if embeddings.rerank_enabled else limit
-        reranked = self._rerank(query, fused_ranked[:cap], limit)
+        reranked = await self._rerank(query, fused_ranked[:cap], limit)
         boosted = [
             (score + self._priority_bonus(chunk.repository), chunk)
             for score, chunk in reranked

@@ -154,9 +154,9 @@ async def test_quality_battery(quality_remote: Path) -> None:
         strict_total = 0
         for q in QUERIES:
             if q["collection"] == "knowledge":
-                results = app.retrieval.search_knowledge(q["query"], limit=5)
+                results = await app.retrieval.search_knowledge(q["query"], limit=5)
             else:
-                results = app.retrieval.search(
+                results = await app.retrieval.search(
                     CollectionName(q["collection"]), q["query"], limit=5
                 )
             top_files = [r.file for r in results[:3]]

@@ -8,6 +8,8 @@ configured ``embed-cache`` directory.
 
 from __future__ import annotations
 
+import asyncio
+
 from ..config import AppConfig
 from ..models import CollectionName
 from .assets import bundled_model_dir
@@ -67,6 +69,20 @@ class EmbeddingProviders:
     def embed_query(self, collection: CollectionName, text: str) -> list[float]:
         return self._dense_provider(collection).embed_query(text)
 
+    async def embed_passages_async(
+        self, collection: CollectionName, texts: list[str]
+    ) -> list[list[float]]:
+        """:meth:`embed_passages`, off the event loop (ONNX inference is
+        CPU-bound)."""
+        return await asyncio.to_thread(self.embed_passages, collection, texts)
+
+    async def embed_query_async(
+        self, collection: CollectionName, text: str
+    ) -> list[float]:
+        """:meth:`embed_query`, off the event loop (ONNX inference is
+        CPU-bound)."""
+        return await asyncio.to_thread(self.embed_query, collection, text)
+
     def _rerank_provider(self) -> CrossEncoderReranker:
         if self._reranker is None:
             eb = self._config.embeddings
@@ -85,3 +101,8 @@ class EmbeddingProviders:
         how to degrade.
         """
         return self._rerank_provider().score(query, texts)
+
+    async def rerank_async(self, query: str, texts: list[str]) -> list[float]:
+        """:meth:`rerank`, off the event loop (cross-encoder inference is
+        CPU-bound)."""
+        return await asyncio.to_thread(self.rerank, query, texts)

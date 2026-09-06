@@ -305,7 +305,7 @@ def make_git_repo(path: Path) -> None:
 # -- sync ---------------------------------------------------------------------
 
 
-def test_sync_standards_full_lifecycle(tmp_path: Path) -> None:
+async def test_sync_standards_full_lifecycle(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     std = tmp_path / "standards.md"
@@ -314,27 +314,33 @@ def test_sync_standards_full_lifecycle(tmp_path: Path) -> None:
     app = make_app(config)
     try:
         # First sync: indexed.
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None
         assert report["status"] == "ok", report
         assert report["repository"] == CODING_STANDARDS_REPO
         assert app.store.count_repository(CODING_STANDARDS_REPO) > 0
 
         # Unchanged sync: up-to-date.
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None
         assert report["status"] == "up-to-date", report
 
         # Edited file: reindexed at a new digest.
         first_commit = app.states.get(CODING_STANDARDS_REPO).indexed_commit
         std.write_text(STANDARD_MD_V2, encoding="utf-8")
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None
         assert report["status"] == "ok", report
         new_commit = app.states.get(CODING_STANDARDS_REPO).indexed_commit
         assert new_commit and new_commit != first_commit
         # The removed section is gone from the index.
-        results = app.retrieval.search(
+        results = await app.retrieval.search(
             CollectionName.DOCS,
             "naming",
             limit=10,
@@ -347,7 +353,9 @@ def test_sync_standards_full_lifecycle(tmp_path: Path) -> None:
         # Option removed: chunks and state are dropped.
         config_none = make_config(tmp_path, None)
         assert (
-            sync_coding_standards(config_none, app.providers, app.store, app.states)
+            await sync_coding_standards(
+                config_none, app.providers, app.store, app.states
+            )
             is None
         )
         assert app.store.count_repository(CODING_STANDARDS_REPO) == 0
@@ -356,7 +364,7 @@ def test_sync_standards_full_lifecycle(tmp_path: Path) -> None:
         app.close()
 
 
-def test_sync_standards_cheap_fingerprint_skips_extraction(
+async def test_sync_standards_cheap_fingerprint_skips_extraction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The mtime+size fingerprint short-circuits re-extraction/re-hashing
@@ -381,7 +389,9 @@ def test_sync_standards_cheap_fingerprint_skips_extraction(
 
     monkeypatch.setattr(standards_mod, "extract_standards_text", spy_extract)
     try:
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None and report["status"] == "ok", report
         assert calls == 1
         fp_after_first = app.states.get(CODING_STANDARDS_REPO).local_fingerprint
@@ -389,7 +399,9 @@ def test_sync_standards_cheap_fingerprint_skips_extraction(
 
         # (a) Unchanged file: the cheap fingerprint alone short-circuits
         # before extract_standards_text is even called again.
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None and report["status"] == "up-to-date", report
         assert calls == 1
 
@@ -398,7 +410,9 @@ def test_sync_standards_cheap_fingerprint_skips_extraction(
         # dedup still reports up-to-date (no reindex).
         first_commit = app.states.get(CODING_STANDARDS_REPO).indexed_commit
         os.utime(std, ns=(std.stat().st_atime_ns + 5_000_000_000,) * 2)
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None and report["status"] == "up-to-date", report
         assert calls == 2
         assert app.states.get(CODING_STANDARDS_REPO).indexed_commit == first_commit
@@ -406,7 +420,9 @@ def test_sync_standards_cheap_fingerprint_skips_extraction(
 
         # (c) An actual content change is still detected and reindexed.
         std.write_text(STANDARD_MD_V2, encoding="utf-8")
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None and report["status"] == "ok", report
         assert calls == 3
         new_commit = app.states.get(CODING_STANDARDS_REPO).indexed_commit
@@ -415,13 +431,15 @@ def test_sync_standards_cheap_fingerprint_skips_extraction(
         app.close()
 
 
-def test_sync_standards_missing_file_reports_error(tmp_path: Path) -> None:
+async def test_sync_standards_missing_file_reports_error(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     config = make_config(tmp_path, tmp_path / "missing.md")
     app = make_app(config)
     try:
-        report = sync_coding_standards(config, app.providers, app.store, app.states)
+        report = await sync_coding_standards(
+            config, app.providers, app.store, app.states
+        )
         assert report is not None
         assert report["status"] == "error", report
         assert "not found" in report["error"]
@@ -569,7 +587,7 @@ def test_check_coding_standards(tmp_path: Path) -> None:
 # -- integration fixes ------------------------------------------------------------
 
 
-def test_drop_unconfigured_keeps_standards(tmp_path: Path) -> None:
+async def test_drop_unconfigured_keeps_standards(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     std = tmp_path / "standards.md"
@@ -577,7 +595,7 @@ def test_drop_unconfigured_keeps_standards(tmp_path: Path) -> None:
     config = make_config(tmp_path, std)
     app = make_app(config)
     try:
-        sync_coding_standards(config, app.providers, app.store, app.states)
+        await sync_coding_standards(config, app.providers, app.store, app.states)
         assert app.store.count_repository(CODING_STANDARDS_REPO) > 0
         # A startup drop must not treat the pseudo-repository as
         # unconfigured while the option is set.
@@ -589,14 +607,14 @@ def test_drop_unconfigured_keeps_standards(tmp_path: Path) -> None:
         app.close()
 
 
-def test_drop_unconfigured_drops_stale_standards(tmp_path: Path) -> None:
+async def test_drop_unconfigured_drops_stale_standards(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     std = tmp_path / "standards.md"
     std.write_text(STANDARD_MD, encoding="utf-8")
     config = make_config(tmp_path, std)
     app = make_app(config)
-    sync_coding_standards(config, app.providers, app.store, app.states)
+    await sync_coding_standards(config, app.providers, app.store, app.states)
     app.close()
     # Option removed from the config: the next startup drops the chunks.
     config_none = make_config(tmp_path, None)
@@ -610,7 +628,7 @@ def test_drop_unconfigured_drops_stale_standards(tmp_path: Path) -> None:
         app2.close()
 
 
-def test_get_source_standards(tmp_path: Path) -> None:
+async def test_get_source_standards(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     std = tmp_path / "standards.md"
@@ -618,7 +636,7 @@ def test_get_source_standards(tmp_path: Path) -> None:
     config = make_config(tmp_path, std)
     app = make_app(config)
     try:
-        sync_coding_standards(config, app.providers, app.store, app.states)
+        await sync_coding_standards(config, app.providers, app.store, app.states)
         out = app.retrieval.get_source(CODING_STANDARDS_REPO, std.name)
         assert "coding-standards:standards.md @" in out
         assert "rst_n" in out

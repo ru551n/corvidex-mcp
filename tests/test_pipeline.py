@@ -990,8 +990,13 @@ class _SpyProviders:
         self.sizes.append(len(texts))
         return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
+    async def embed_passages_async(self, collection, texts) -> list[list[float]]:
+        return self.embed_passages(collection, texts)
 
-def test_upsert_streams_embeds_and_commits(tmp_path: Path, config: AppConfig) -> None:
+
+async def test_upsert_streams_embeds_and_commits(
+    tmp_path: Path, config: AppConfig
+) -> None:
     store = VectorStore(config)
     store.ensure_collections(hdl_dim=4, docs_dim=4, code_dim=4)
     states = StateStore(config.sqlite_index_path)
@@ -1014,7 +1019,7 @@ def test_upsert_streams_embeds_and_commits(tmp_path: Path, config: AppConfig) ->
         )
         for n in range(300)
     ]
-    pipeline._upsert(config.repository("repo"), chunks)
+    await pipeline._upsert(config.repository("repo"), chunks)
     # Bounded streams: 256 + 44, not one 300-passages call.
     assert spy.sizes == [256, 44]
     # Every chunk is durably upserted.

@@ -216,7 +216,7 @@ async def test_full_lifecycle_with_restart(
     app = make_app(config)
     assert app.store.count() == 7
     assert app.states.get("repo").indexed_commit == commit1
-    results = app.retrieval.search(CollectionName.HDL, "fifo write pointer")
+    results = await app.retrieval.search(CollectionName.HDL, "fifo write pointer")
     assert results and results[0].repository == "repo"
 
     # Advance the remote: modify (new line ranges -> new chunk IDs), add,
@@ -337,7 +337,7 @@ async def test_real_veridian_end_to_end(tmp_path: Path) -> None:
         assert any(c.symbol_kind == "design_unit" for c in verilog)
         assert any(c.symbol_kind == "package" for c in sv)
         # Cross-language cross-reference over the shared identifier.
-        results = app.retrieval.search(
+        results = await app.retrieval.search(
             CollectionName.HDL, "fifo", symbols=("FIFO_DEPTH",), limit=20
         )
         assert {r.language for r in results} == {"verilog", "systemverilog"}

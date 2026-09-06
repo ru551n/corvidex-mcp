@@ -188,7 +188,7 @@ def test_selfcheck_reuses_cached_analyzer_probe(tmp_path, monkeypatch):
         app.close()
 
 
-def test_model_failure_degrades_the_collection(tmp_path):
+async def test_model_failure_degrades_the_collection(tmp_path):
     app = make_app(tmp_path, failing=frozenset({CollectionName.HDL}))
     try:
         assert app.collection_error(CollectionName.HDL) is not None
@@ -207,17 +207,19 @@ def test_model_failure_degrades_the_collection(tmp_path):
         assert "model:hdl" in result.summary()
         # Embedding search of the degraded collection is a clear error ...
         with pytest.raises(RetrievalError, match="unavailable"):
-            app.retrieval.search(CollectionName.HDL, "fifo")
+            await app.retrieval.search(CollectionName.HDL, "fifo")
         # ... lexical search of it still works (no embedding involved).
-        assert app.retrieval.search(CollectionName.HDL, "fifo", mode="lexical") == []
+        assert (
+            await app.retrieval.search(CollectionName.HDL, "fifo", mode="lexical") == []
+        )
         # Cross-domain search skips the degraded collection instead of
         # failing.
-        assert app.retrieval.search_knowledge("fifo") == []
+        assert await app.retrieval.search_knowledge("fifo") == []
     finally:
         app.close()
 
 
-def test_all_models_degraded(tmp_path):
+async def test_all_models_degraded(tmp_path):
     app = make_app(
         tmp_path,
         failing=frozenset(
@@ -233,9 +235,11 @@ def test_all_models_degraded(tmp_path):
             CollectionName.CODE,
         ):
             with pytest.raises(RetrievalError, match="unavailable"):
-                app.retrieval.search(collection, "fifo")
+                await app.retrieval.search(collection, "fifo")
         # Everything lexical still works.
-        assert app.retrieval.search(CollectionName.HDL, "fifo", mode="lexical") == []
-        assert app.retrieval.search_knowledge("fifo", mode="lexical") == []
+        assert (
+            await app.retrieval.search(CollectionName.HDL, "fifo", mode="lexical") == []
+        )
+        assert await app.retrieval.search_knowledge("fifo", mode="lexical") == []
     finally:
         app.close()
