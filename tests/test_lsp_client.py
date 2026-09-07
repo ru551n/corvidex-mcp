@@ -20,9 +20,11 @@ from fake_lsp_util import executable_lsp_script
 
 from corvidex_mcp.lsp import (
     DiagnosticInfo,
+    Location,
     LspError,
     SymbolInfo,
     VhdlLsp,
+    WorkspaceSymbolInfo,
     default_libraries_dir,
     path_to_uri,
 )
@@ -136,9 +138,141 @@ while True:
 """
 
 
+NAV_FAKE_SERVER = r"""#!/usr/bin/env python3
+import json
+import sys
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        key, _, value = line.partition(b":")
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers.get(b"content-length", b"0"))
+    return json.loads(sys.stdin.buffer.read(length))
+
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    frame = b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    sys.stdout.buffer.write(frame + body)
+    sys.stdout.buffer.flush()
+
+
+def pos_range(line, char):
+    return {
+        "start": {"line": line, "character": char},
+        "end": {"line": line, "character": char + 3},
+    }
+
+
+read_message()  # the initialize request
+send(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "capabilities": {
+                "documentSymbolProvider": True,
+                "definitionProvider": True,
+                "referencesProvider": True,
+                "hoverProvider": True,
+                "workspaceSymbolProvider": True,
+            }
+        },
+    }
+)
+msg = read_message()  # initialized
+assert msg is not None and msg.get("method") == "initialized", msg
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "textDocument/didOpen":
+        continue
+    elif method == "textDocument/definition":
+        char = msg["params"]["position"]["character"]
+        uri = msg["params"]["textDocument"]["uri"]
+        if char == 0:
+            result = None
+        elif char == 1:
+            result = {"uri": uri, "range": pos_range(5, 0)}
+        elif char == 2:
+            result = [{"uri": uri, "range": pos_range(5, 0)}]
+        else:
+            result = [
+                {
+                    "targetUri": uri,
+                    "targetRange": pos_range(9, 0),
+                    "targetSelectionRange": pos_range(9, 2),
+                }
+            ]
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+    elif method == "textDocument/references":
+        uri = msg["params"]["textDocument"]["uri"]
+        include_decl = msg["params"]["context"]["includeDeclaration"]
+        result = [{"uri": uri, "range": pos_range(1, 0)}]
+        if include_decl:
+            result.append({"uri": uri, "range": pos_range(5, 0)})
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+    elif method == "textDocument/hover":
+        char = msg["params"]["position"]["character"]
+        if char == 0:
+            contents = None
+        elif char == 1:
+            contents = "plain hover text"
+        elif char == 2:
+            contents = {"kind": "markdown", "value": "**bold** hover"}
+        else:
+            contents = [
+                {"language": "vhdl", "value": "signal x : std_logic;"},
+                "a second part",
+            ]
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "result": None if contents is None else {"contents": contents},
+            }
+        )
+    elif method == "workspace/symbol":
+        query = msg["params"]["query"]
+        if query == "nomatch":
+            result = []
+        else:
+            result = [
+                {
+                    "name": "fifo",
+                    "kind": 2,
+                    "location": {
+                        "uri": "file:///ws/fifo.vhd",
+                        "range": pos_range(0, 0),
+                    },
+                }
+            ]
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif method == "exit":
+        sys.exit(0)
+"""
+
+
 @pytest.fixture
 def fake_server(tmp_path: Path) -> Path:
     return executable_lsp_script(tmp_path, "fake_lsp.py", FAKE_SERVER)
+
+
+@pytest.fixture
+def nav_fake_server(tmp_path: Path) -> Path:
+    return executable_lsp_script(tmp_path, "nav_fake_lsp.py", NAV_FAKE_SERVER)
 
 
 @pytest.fixture
@@ -216,6 +350,61 @@ def test_parse_content_length():
     assert _parse_content_length(b"CONTENT-LENGTH: 7\r\nOther: x\r\n") == 7
     assert _parse_content_length(b"X: 1\r\n") is None
     assert _parse_content_length(b"Content-Length: abc\r\n") is None
+
+
+def test_parse_locations_null_single_list_and_link():
+    from corvidex_mcp.lsp.client import _parse_locations
+
+    rng = {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5}}
+    assert _parse_locations(None) == ()
+
+    single = _parse_locations({"uri": "file:///a.vhd", "range": rng})
+    assert single == (Location("file:///a.vhd", 1, 2, 1, 5),)
+
+    as_list = _parse_locations([{"uri": "file:///a.vhd", "range": rng}])
+    assert as_list == (Location("file:///a.vhd", 1, 2, 1, 5),)
+
+    link = _parse_locations(
+        [{"targetUri": "file:///b.vhd", "targetSelectionRange": rng}]
+    )
+    assert link == (Location("file:///b.vhd", 1, 2, 1, 5),)
+
+    # Malformed items are skipped rather than raising.
+    assert _parse_locations([{"nothing": "useful"}]) == ()
+
+
+def test_parse_workspace_symbols():
+    from corvidex_mcp.lsp.client import _parse_workspace_symbols
+
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}}
+    out = _parse_workspace_symbols(
+        [
+            {
+                "name": "fifo",
+                "kind": 2,
+                "location": {"uri": "file:///f.vhd", "range": rng},
+            }
+        ]
+    )
+    assert out == (WorkspaceSymbolInfo("fifo", 2, "file:///f.vhd", 0, 0),)
+    assert _parse_workspace_symbols(None) == ()
+    assert _parse_workspace_symbols([{"name": "no-location"}]) == ()
+
+
+def test_parse_hover_contents_shapes():
+    from corvidex_mcp.lsp.client import _parse_hover_contents
+
+    assert _parse_hover_contents(None) is None
+    assert _parse_hover_contents("plain") == "plain"
+    assert (
+        _parse_hover_contents({"kind": "markdown", "value": "**bold**"}) == "**bold**"
+    )
+    assert _parse_hover_contents({"language": "vhdl", "value": "signal x;"}) == (
+        "signal x;"
+    )
+    joined = _parse_hover_contents(["a", {"value": "b"}])
+    assert joined == "a\n\nb"
+    assert _parse_hover_contents("   ") is None
 
 
 def test_default_config_text_uses_glob_when_no_files_given():
@@ -336,6 +525,146 @@ async def test_repository_config_respected(fake_server: Path, workspace: Path):
         await lsp.shutdown()
     # A repository-provided config must be left in place.
     assert (workspace / "vhdl_ls.toml").exists()
+
+
+# -- navigation: definition/references/hover/workspace_symbol ---------------
+
+
+async def test_navigation_short_circuits_when_capability_not_advertised(
+    workspace: Path,
+) -> None:
+    """A client that never started (or a server that never advertised
+    the capability) degrades to empty/None without sending a request."""
+    lsp = VhdlLsp("unused-binary", workspace)
+    assert not lsp.supports_definition
+    assert not lsp.supports_references
+    assert not lsp.supports_hover
+    assert not lsp.supports_workspace_symbol
+    assert await lsp.definition(workspace / "good.vhd", 0, 0) == ()
+    assert await lsp.references(workspace / "good.vhd", 0, 0) == ()
+    assert await lsp.hover(workspace / "good.vhd", 0, 0) is None
+    assert await lsp.workspace_symbol("fifo") == ()
+
+
+async def test_definition_single_location(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert lsp.supports_definition
+        locs = await lsp.definition(workspace / "good.vhd", 0, 1)
+        assert len(locs) == 1
+        assert isinstance(locs[0], Location)
+        assert locs[0].start_line == 5
+        assert locs[0].uri.endswith("good.vhd")
+    finally:
+        await lsp.shutdown()
+
+
+async def test_definition_location_list(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        locs = await lsp.definition(workspace / "good.vhd", 0, 2)
+        assert len(locs) == 1
+        assert locs[0].start_line == 5
+    finally:
+        await lsp.shutdown()
+
+
+async def test_definition_location_link_list(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        locs = await lsp.definition(workspace / "good.vhd", 0, 3)
+        assert len(locs) == 1
+        # LocationLink: targetSelectionRange wins over targetRange.
+        assert locs[0].start_line == 9
+        assert locs[0].start_char == 2
+    finally:
+        await lsp.shutdown()
+
+
+async def test_definition_null_result(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert await lsp.definition(workspace / "good.vhd", 0, 0) == ()
+    finally:
+        await lsp.shutdown()
+
+
+async def test_references_include_and_exclude_declaration(
+    nav_fake_server: Path, workspace: Path
+):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert lsp.supports_references
+        with_decl = await lsp.references(workspace / "good.vhd", 0, 0)
+        assert len(with_decl) == 2
+        without_decl = await lsp.references(
+            workspace / "good.vhd", 0, 0, include_declaration=False
+        )
+        assert len(without_decl) == 1
+    finally:
+        await lsp.shutdown()
+
+
+async def test_hover_plain_string(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert lsp.supports_hover
+        assert await lsp.hover(workspace / "good.vhd", 0, 1) == "plain hover text"
+    finally:
+        await lsp.shutdown()
+
+
+async def test_hover_markup_content(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert await lsp.hover(workspace / "good.vhd", 0, 2) == "**bold** hover"
+    finally:
+        await lsp.shutdown()
+
+
+async def test_hover_list_contents_joined(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        text = await lsp.hover(workspace / "good.vhd", 0, 3)
+        assert text is not None
+        assert "signal x : std_logic;" in text
+        assert "a second part" in text
+    finally:
+        await lsp.shutdown()
+
+
+async def test_hover_none_result(nav_fake_server: Path, workspace: Path):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert await lsp.hover(workspace / "good.vhd", 0, 0) is None
+    finally:
+        await lsp.shutdown()
+
+
+async def test_workspace_symbol_match_and_no_match(
+    nav_fake_server: Path, workspace: Path
+):
+    lsp = VhdlLsp(str(nav_fake_server), workspace)
+    try:
+        await lsp.start()
+        assert lsp.supports_workspace_symbol
+        syms = await lsp.workspace_symbol("fifo")
+        assert len(syms) == 1
+        assert isinstance(syms[0], WorkspaceSymbolInfo)
+        assert syms[0].name == "fifo"
+        assert syms[0].kind == 2
+        assert await lsp.workspace_symbol("nomatch") == ()
+    finally:
+        await lsp.shutdown()
 
 
 # -- vhdl_ls_hook ------------------------------------------------------------

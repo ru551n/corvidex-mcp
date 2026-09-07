@@ -68,6 +68,10 @@ from .indexing import IndexPipeline
 from .logging_setup import setup_logging
 from .lsp import AnalyzerStatus, build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
+from .navigation import find_definition as _find_definition
+from .navigation import find_references as _find_references
+from .navigation import find_symbol as _find_symbol
+from .navigation import hover_info as _hover_info
 from .retrieval import RetrievalError, RetrievalService
 from .selfcheck import SelfCheckResult, run_self_check
 from .standards import sync_coding_standards
@@ -98,7 +102,13 @@ INSTRUCTIONS = (
     "similarity only), or 'lexical' (full-text match only). Use "
     "get_source for the full text of a known file (exact "
     "lines, exact commit). Every result carries source attribution "
-    "(repository, file, line range, commit, language). Use "
+    "(repository, file, line range, commit, language). For exact, "
+    "compiler-backed navigation (not similarity search) once a symbol's "
+    "location is already known, use find_definition, find_references, "
+    "and hover_info (LSP go-to-definition/find-references/hover, backed "
+    "by vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog; "
+    "positions are 0-based) and find_symbol (exact workspace "
+    "symbol-name search, unlike search_hdl's semantic matching). Use "
     "repository_status to see what is indexed and whether a sync failed; "
     "it also reports the HDL analyzer status (vhdl_ls / Veridian). "
     "sync_repositories to force an update, reindex_repository to rebuild "
@@ -744,6 +754,74 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         if truncated:
             out += f"\n… (capped at {limit}; refine the pattern for more)"
         return out
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def find_definition(
+        repository: str, file: str, line: int, character: int
+    ) -> str:
+        """Exact, LSP/compiler-backed go-to-definition (not similarity
+        search) — use when a symbol's exact location is already known
+        (e.g. from a search_hdl result or an earlier find_references
+        call) and its precise declaration site is wanted; use search_hdl
+        instead for conceptual/natural-language queries. Backed by
+        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
+        `line`/`character` are 0-based (LSP convention, as in most
+        editor APIs); results are rendered as 1-based `path:line:col`.
+        Cross-file resolution opens the repository's other same-language
+        files (capped for responsiveness), so it usually works across
+        files, but not always for a very large repository."""
+        return await _find_definition(app, repository, file, line, character)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def find_references(
+        repository: str,
+        file: str,
+        line: int,
+        character: int,
+        include_declaration: bool = True,
+    ) -> str:
+        """Exact, LSP/compiler-backed find-references (not similarity
+        search) — use when a symbol's exact location is already known
+        and every use site is wanted; use search_hdl with `symbols`
+        instead for a fuzzy/semantic cross-reference search. Backed by
+        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
+        `line`/`character` are 0-based (LSP convention); results are
+        rendered as 1-based `path:line:col`. `include_declaration`
+        controls whether the declaration site itself is included among
+        the references."""
+        return await _find_references(
+            app, repository, file, line, character, include_declaration
+        )
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def hover_info(repository: str, file: str, line: int, character: int) -> str:
+        """Exact, LSP/compiler-backed hover (not similarity search) — the
+        analyzer's own signature/type/doc-comment text for the symbol at
+        an exact position, as an IDE would show it; use search_hdl
+        instead for conceptual/natural-language queries. Backed by
+        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
+        `line`/`character` are 0-based (LSP convention)."""
+        return await _hover_info(app, repository, file, line, character)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    @_handle_errors
+    async def find_symbol(
+        query: str, repository: str | None = None, limit: int = DEFAULT_LIMIT
+    ) -> str:
+        """Exact, LSP/compiler-backed workspace symbol search (not
+        similarity search) — the language server's own name-based lookup
+        (`workspace/symbol`), for when the approximate name of a
+        design unit/signal/function is known and its exact declaration
+        site is wanted; use search_hdl instead for conceptual/
+        natural-language queries. Backed by vhdl_ls for VHDL and
+        Veridian for Verilog/SystemVerilog. `repository` restricts the
+        search to one repository (as in search_hdl); omit it to search
+        every configured HDL repository. Results are rendered as
+        1-based `path:line:col`."""
+        return await _find_symbol(app, repository, query, limit)
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors

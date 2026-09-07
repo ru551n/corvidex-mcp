@@ -1,6 +1,6 @@
 ---
 name: corvidex-mcp
-description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the corvidex-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), or when a question spans docs, RTL, and test/simulation code.
+description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the corvidex-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files), plus exact LSP-backed navigation (find_definition, find_references, hover_info, find_symbol). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), resolving a symbol's exact declaration/use sites, or when a question spans docs, RTL, and test/simulation code.
 ---
 
 # corvidex-mcp — RTL-centric RAG and indexing MCP
@@ -87,6 +87,16 @@ cross-referencing key between domains.
    content, `last error` with a git hint): a repo whose ref moved or
    whose sync errored shows it there; `sync_repositories` (or
    `reindex_repository` for one repo) fixes it.
+7. **Need an exact answer, not a similarity match?** Once a search
+   result (or an earlier navigation call) gives an exact `file:line`,
+   switch to the LSP-backed navigation tools (`vhdl_ls` for VHDL,
+   Veridian for Verilog/SystemVerilog) instead of guessing from search
+   text: `find_definition(repository, file, line, character)` for the
+   declaration site, `find_references(...)` for every use site,
+   `hover_info(...)` for the analyzer's own signature/type text, and
+   `find_symbol(query, repository?)` for an exact name-based lookup
+   across one or every repository. `line`/`character` are 0-based (LSP
+   convention); results render as 1-based `path:line:col`.
 
 ## Query patterns that work well
 
@@ -98,6 +108,9 @@ cross-referencing key between domains.
 - Trace an identifier: `search_knowledge("fifo write pointer", symbols=["wr_ptr"])`
 - Pin to one repo: `search_hdl("AXI handshake", repository="common-ip")`
 - VHDL-only: `search_vhdl("architecture with clocked process")`
+- Exact declaration from a known position: `find_definition("common-ip", "rtl/fifo.vhd", 41, 12)`
+- Every use site of a known symbol: `find_references("common-ip", "rtl/fifo.vhd", 12, 6)`
+- Exact name lookup: `find_symbol("wr_ptr", repository="common-ip")`
 
 ## Notes and limits
 
