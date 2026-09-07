@@ -160,8 +160,8 @@ or `index_cwd = false` in the config file, and run with an empty index
 until you configure `[[repositories]]` explicitly. Need more than the
 current directory — multiple repositories, a remote Git URL, a
 coding-standards file, tuned embedding settings? See
-**[docs/configuration.md](docs/configuration.md)**; add a config file
-at `~/.config/corvidex/config.toml` (or point `--config`/
+**[docs/configuration.md](docs/configuration.md)**; add a `.corvidex`
+config file in the project's root (or point `--config`/
 `CORVIDEX_MCP_CONFIG` elsewhere) and any `[[repositories]]` you
 configure there take over from the zero-config default.
 

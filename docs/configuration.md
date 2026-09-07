@@ -10,9 +10,12 @@ semantics (local checkouts, submodules, hooks, etc.).
 
 ## Config file
 
-Location: `~/.config/corvidex/config.toml` (created with a commented
-template on first run if absent). Select another file with the
-`CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag.
+Location: a project-local `.corvidex` file in the directory the server is
+started in (created with a commented template on first run if absent) —
+there is no global config location; every project configures itself,
+right next to the code it describes. Select another file with the
+`CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag;
+either always wins over `.corvidex`.
 The top-level scalar options also have command-line overrides
 (`--data-dir`, `--sync-interval`, `--local-sync-interval`,
 `--vhdl-ls-path`, `--veridian-path`, `--log-level`, `--no-index-cwd`,
@@ -138,14 +141,15 @@ filesystem = true
   entry is configured, the shared store is always used (so
   `search_knowledge` can search across all configured repositories from
   one index).
-- **Config file selection**: the default location is
-  `~/.config/corvidex/config.toml` (a commented template is written
-  there on first run). Select another file with the `CORVIDEX_MCP_CONFIG`
-  environment variable or the `--config PATH` flag. The top-level scalar
-  options also have command-line overrides (`--data-dir`,
-  `--sync-interval`, `--local-sync-interval`, `--vhdl-ls-path`,
-  `--veridian-path`, `--log-level`, `--no-index-cwd`); the command line
-  wins.
+- **Config file selection**: the default (and only on-disk) location is
+  a project-local `.corvidex` file in the directory the server is started
+  in (a commented template is written there on first run if absent) —
+  there is no global config file. Select another file with the
+  `CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag
+  — either wins over `.corvidex`. The top-level scalar options also have
+  command-line overrides (`--data-dir`, `--sync-interval`,
+  `--local-sync-interval`, `--vhdl-ls-path`, `--veridian-path`,
+  `--log-level`, `--no-index-cwd`); the command line wins.
 - **`url` or `path`** (exactly one): `url` is a remote Git repository,
   cloned and kept in sync by the server under `data_dir/repos`.
   `path` is a **local working repository** — your own checkout, indexed

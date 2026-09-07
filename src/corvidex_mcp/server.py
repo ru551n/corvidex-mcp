@@ -952,7 +952,7 @@ async def _main_async(app: VhdlRagApp, mcp: MCPServer) -> None:
             "no repositories and no coding_standards file configured: the "
             "index stays empty. Add [[repositories]] entries (or a "
             "coding_standards file) to the config file "
-            "($CORVIDEX_MCP_CONFIG or ~/.config/corvidex/config.toml) and "
+            "($CORVIDEX_MCP_CONFIG or the project-local .corvidex) and "
             "restart, or call sync_repositories after updating it."
         )
     logger.info(
@@ -975,8 +975,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "config file (default: $CORVIDEX_MCP_CONFIG or "
-            "~/.config/corvidex/config.toml)"
+            "config file (default: $CORVIDEX_MCP_CONFIG, else the "
+            "project-local .corvidex in the current directory)"
         ),
     )
     parser.add_argument(
@@ -1036,10 +1036,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def config_from_args(argv: list[str] | None = None) -> AppConfig:
     """Parse CLI arguments and load the config with overrides applied.
 
-    The config file is selected by ``--config`` or
-    ``CORVIDEX_MCP_CONFIG``; ``--data-dir``/``--sync-interval``/
-    ``--vhdl-ls-path``/``--veridian-path``/``--log-level``/
-    ``--num-threads`` override the file's values.
+    The config file is selected by ``--config``, else ``CORVIDEX_MCP_CONFIG``,
+    else the project-local ``.corvidex`` in the current directory (see
+    :func:`corvidex_mcp.config.load_config`); ``--data-dir``/
+    ``--sync-interval``/``--vhdl-ls-path``/``--veridian-path``/
+    ``--log-level``/``--num-threads`` override the file's values.
     """
     args = _parse_args(argv)
     config = load_config(
