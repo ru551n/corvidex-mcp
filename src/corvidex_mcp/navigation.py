@@ -35,6 +35,7 @@ below call this out at each boundary.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -230,8 +231,21 @@ async def _navigate[T](
     return result, lsp, repo_dir
 
 
+#: A URI path component shaped like ``/C:/...`` — the POSIX-style
+#: leading slash ``Path.as_uri()``/LSP servers put in front of a
+#: Windows drive letter. No genuine POSIX path is ever shaped this
+#: way, so stripping it is safe on every platform (this makes the
+#: fix testable on non-Windows CI too, rather than needing an
+#: ``os.name`` check that only exercises on Windows runners).
+_WINDOWS_DRIVE_URI_PATH = re.compile(r"^/([A-Za-z]:)(/.*)?$")
+
+
 def _uri_to_path(uri: str) -> Path:
-    return Path(unquote(urlparse(uri).path))
+    raw = unquote(urlparse(uri).path)
+    match = _WINDOWS_DRIVE_URI_PATH.match(raw)
+    if match:
+        raw = match.group(1) + (match.group(2) or "")
+    return Path(raw)
 
 
 def _relative_path(path: Path, repo_dir: Path) -> str:

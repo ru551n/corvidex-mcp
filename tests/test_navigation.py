@@ -26,6 +26,7 @@ from corvidex_mcp.git_manager import GitManager
 from corvidex_mcp.indexing.pipeline import IndexPipeline
 from corvidex_mcp.lsp import build_analyzer_statuses
 from corvidex_mcp.navigation import (
+    _uri_to_path,
     find_definition,
     find_references,
     find_symbol,
@@ -428,3 +429,20 @@ async def test_find_symbol_empty_query_rejected(app) -> None:
     await _sync_all(pipeline, config)
     with pytest.raises(RetrievalError, match="must not be empty"):
         await find_symbol(fake_app, "hdl", "   ")
+
+
+def test_uri_to_path_windows_drive_letter() -> None:
+    # ``file:///C:/repo/rtl/fifo.vhd`` is what Path.as_uri() (and every
+    # LSP server) emits for a Windows path — the POSIX-style leading
+    # slash in front of the drive letter must be stripped, or
+    # relative_to() against a real Windows repo_dir never matches (the
+    # bug this regression test covers: it doesn't depend on running on
+    # Windows, since the URI shape itself is platform-independent).
+    assert _uri_to_path("file:///C:/repo/rtl/fifo.vhd") == Path("C:/repo/rtl/fifo.vhd")
+    assert _uri_to_path("file:///c:/a%20b/x.vhd") == Path("c:/a b/x.vhd")
+
+
+def test_uri_to_path_posix_unchanged() -> None:
+    assert _uri_to_path("file:///home/user/repo/fifo.vhd") == Path(
+        "/home/user/repo/fifo.vhd"
+    )
