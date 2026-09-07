@@ -18,8 +18,9 @@ cross-referencing key between domains.
 
 ## Setup (once, per machine)
 
-1. Config at `~/.config/corvidex/config.toml` (or the
-   `CORVIDEX_MCP_CONFIG` env var / `--config` flag) — one
+1. Config at a project-local `.corvidex` file in the directory the
+   server is started in (or the `CORVIDEX_MCP_CONFIG` env var / `--config`
+   flag) — one
    `[[repositories]]` entry per repository with `name` and exactly one
    of `url` (remote, cloned by the server) or `path` (your own local
    working checkout, indexed in place and never modified). For `url`

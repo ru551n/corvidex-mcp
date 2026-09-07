@@ -131,6 +131,52 @@ def test_default_template_written(tmp_path: Path) -> None:
     ]
 
 
+def test_project_local_corvidex_file_is_discovered(tmp_path: Path) -> None:
+    """With no ``path``/env var, ``.corvidex`` in ``cwd`` is used."""
+    (tmp_path / ".corvidex").write_text(
+        'data_dir = "~/project-data"\n', encoding="utf-8"
+    )
+    cfg = load_config(write_default=False, cwd=tmp_path)
+    assert cfg.data_dir == Path("~/project-data").expanduser()
+
+
+def test_no_project_local_file_falls_back_to_defaults(tmp_path: Path) -> None:
+    """No ``.corvidex`` in ``cwd``: built-in defaults, no global fallback."""
+    cfg = load_config(
+        write_default=False, cwd=tmp_path, inject_default_repository=False
+    )
+    assert cfg.data_dir == AppConfig().data_dir
+
+
+def test_default_template_written_to_project_local_path(tmp_path: Path) -> None:
+    """With no explicit ``path`` and no ``.corvidex`` in ``cwd``, the
+    template is written to ``.corvidex`` there (not a global location)."""
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    load_config(cwd=workdir)
+    assert (workdir / ".corvidex").exists()
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_explicit_path_wins_over_project_local_file(tmp_path: Path) -> None:
+    (tmp_path / ".corvidex").write_text('data_dir = "~/local-data"\n', encoding="utf-8")
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text('data_dir = "~/explicit-data"\n', encoding="utf-8")
+    cfg = load_config(explicit, write_default=False, cwd=tmp_path)
+    assert cfg.data_dir == Path("~/explicit-data").expanduser()
+
+
+def test_env_var_wins_over_project_local_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".corvidex").write_text('data_dir = "~/local-data"\n', encoding="utf-8")
+    env_path = tmp_path / "env.toml"
+    env_path.write_text('data_dir = "~/env-data"\n', encoding="utf-8")
+    monkeypatch.setenv("CORVIDEX_MCP_CONFIG", str(env_path))
+    cfg = load_config(write_default=False, cwd=tmp_path)
+    assert cfg.data_dir == Path("~/env-data").expanduser()
+
+
 def test_index_cwd_disabled(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("index_cwd = false\n", encoding="utf-8")

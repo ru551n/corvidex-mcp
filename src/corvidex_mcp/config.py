@@ -1,12 +1,13 @@
 """Typed TOML configuration for corvidex-mcp.
 
-The configuration lives at ``~/.config/corvidex/config.toml`` by
-default; the ``CORVIDEX_MCP_CONFIG`` environment variable or the
-``--config`` command-line flag select an alternate file. On first start
-a commented default template is written to the default location if no
-file exists. All validation happens at load time; callers receive
-either a valid :class:`AppConfig` or a :class:`ConfigError` with an
-actionable message.
+The configuration lives at ``.corvidex`` in the directory the server is
+started in by default — project-local, not a machine-wide file — the
+``CORVIDEX_MCP_CONFIG`` environment variable or the ``--config``
+command-line flag select an alternate file. On first start a commented
+default template is written to the project-local path if no file
+exists. All validation happens at load time; callers receive either a
+valid :class:`AppConfig` or a :class:`ConfigError` with an actionable
+message.
 """
 
 from __future__ import annotations
@@ -666,8 +667,16 @@ class AppConfig(BaseModel):
         return tuple(names)
 
 
-def default_config_path() -> Path:
-    return Path.home() / ".config" / "corvidex" / "config.toml"
+def project_config_path(cwd: Path | None = None) -> Path:
+    """The config file: ``.corvidex`` in the directory the server is
+    started in (a coding agent's workspace root).
+
+    Project-local and discoverable — sitting right next to the code it
+    describes — rather than one global file shared (and easy to lose
+    track of) across every project on the machine. See
+    :func:`load_config` for the full resolution order.
+    """
+    return (cwd or Path.cwd()) / ".corvidex"
 
 
 def _sanitize_repo_name(raw: str) -> str:
@@ -895,9 +904,19 @@ def load_config(
 ) -> AppConfig:
     """Load and validate the configuration from ``path``.
 
-    When the file does not exist and ``write_default`` is set, a commented
-    default template is written and the built-in defaults are returned.
-    Raises :class:`ConfigError` on unreadable or invalid configuration.
+    When ``path`` is not given, the file is found in this order:
+
+    1. ``CORVIDEX_MCP_CONFIG`` (or the deprecated ``VHDL_RAG_MCP_CONFIG``)
+       environment variable, if set.
+    2. The project-local ``.corvidex`` file in ``cwd`` (see
+       :func:`project_config_path`) — the only on-disk config location;
+       there is no global fallback, so configuration always lives next
+       to the project it describes.
+
+    When neither is set/found and ``write_default`` is set, a commented
+    default template is written to the project-local ``.corvidex`` path
+    and the built-in defaults are returned. Raises :class:`ConfigError` on
+    unreadable or invalid configuration.
 
     When the resulting configuration has no ``[[repositories]]`` at all —
     which includes the common case of no config file — the directory the
@@ -916,7 +935,7 @@ def load_config(
             "VHDL_RAG_MCP_CONFIG"
         )
         path = Path(env_path) if env_path else None
-    config_path = (path or default_config_path()).expanduser()
+    config_path = (path or project_config_path(cwd)).expanduser()
     if not config_path.exists():
         if write_default:
             config_path.parent.mkdir(parents=True, exist_ok=True)
