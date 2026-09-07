@@ -177,6 +177,10 @@ configure there take over from the zero-config default.
 | `search_code(...)` | Same over general code units (functions/classes). |
 | `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
 | `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
+| `find_definition(repository, file, line, character)` | Exact, LSP-backed go-to-definition (`vhdl_ls`/Veridian), not similarity search. `line`/`character` are 0-based; results render as 1-based `path:line:col`. |
+| `find_references(repository, file, line, character, include_declaration)` | Exact, LSP-backed find-references for a symbol at a known position. |
+| `hover_info(repository, file, line, character)` | Exact, LSP-backed hover: the analyzer's own signature/type/doc text for the symbol at a position. |
+| `find_symbol(query, repository?, limit)` | Exact, LSP-backed `workspace/symbol` name lookup, across one or every configured repository. |
 | `repository_status()` | Per repository: ref, priority, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode) and the per-collection embedding-model state. |
 | `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
 | `reindex_repository(repository)` | Drop and rebuild one repository's index. |

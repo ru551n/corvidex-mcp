@@ -88,6 +88,41 @@ class DiagnosticInfo:
     end_line: int
 
 
+@dataclass(frozen=True)
+class Location:
+    """One LSP location: a document URI plus a (0-based) range.
+
+    Used for ``textDocument/definition`` and ``textDocument/references``
+    results. The LSP spec allows a plain ``Location`` (``uri`` +
+    ``range``) or a ``LocationLink`` (``targetUri`` + ``targetRange``/
+    ``targetSelectionRange``); :func:`_parse_location` normalizes both
+    into this shape.
+    """
+
+    uri: str
+    start_line: int
+    start_char: int
+    end_line: int
+    end_char: int
+
+
+@dataclass(frozen=True)
+class WorkspaceSymbolInfo:
+    """One flat ``workspace/symbol`` result (a ``SymbolInformation``).
+
+    Structurally different from :class:`SymbolInfo`'s hierarchical
+    ``documentSymbol`` tree: ``workspace/symbol`` always returns a flat
+    list, each item carrying its own ``location`` (uri + range) rather
+    than nesting under a parent document.
+    """
+
+    name: str
+    kind: int
+    uri: str
+    start_line: int
+    start_char: int
+
+
 def default_libraries_dir(binary: str) -> Path | None:
     """Locate the ``vhdl_libraries`` directory shipped next to the binary.
 
@@ -158,6 +193,99 @@ def _parse_symbols(items: Any) -> tuple[SymbolInfo, ...]:
     return tuple(out)
 
 
+def _parse_location(item: Any) -> Location | None:
+    """One ``Location`` or ``LocationLink`` item, or None if malformed."""
+    if not isinstance(item, dict):
+        return None
+    uri = item.get("uri")
+    rng = item.get("range")
+    if not isinstance(uri, str) or not isinstance(rng, dict):
+        # LocationLink: the target is nested under target*.
+        uri = item.get("targetUri")
+        rng = item.get("targetSelectionRange") or item.get("targetRange")
+    if not isinstance(uri, str) or not isinstance(rng, dict):
+        return None
+    try:
+        return Location(
+            uri=uri,
+            start_line=int(rng["start"]["line"]),
+            start_char=int(rng["start"]["character"]),
+            end_line=int(rng["end"]["line"]),
+            end_char=int(rng["end"]["character"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parse_locations(result: Any) -> tuple[Location, ...]:
+    """Normalize a ``definition``/``references`` result to a tuple.
+
+    Per the LSP spec the result can be ``null``, a single ``Location``,
+    a ``Location[]``, or a ``LocationLink[]``.
+    """
+    if result is None:
+        return ()
+    items = result if isinstance(result, list) else [result]
+    out: list[Location] = []
+    for item in items:
+        loc = _parse_location(item)
+        if loc is not None:
+            out.append(loc)
+    return tuple(out)
+
+
+def _parse_workspace_symbols(items: Any) -> tuple[WorkspaceSymbolInfo, ...]:
+    if not isinstance(items, list):
+        return ()
+    out: list[WorkspaceSymbolInfo] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("location")
+        if not isinstance(loc, dict):
+            continue
+        uri = loc.get("uri")
+        rng = loc.get("range")
+        if not isinstance(uri, str) or not isinstance(rng, dict):
+            continue
+        try:
+            out.append(
+                WorkspaceSymbolInfo(
+                    name=str(item.get("name", "")),
+                    kind=int(item.get("kind", 0)),
+                    uri=uri,
+                    start_line=int(rng["start"]["line"]),
+                    start_char=int(rng["start"]["character"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def _parse_hover_contents(contents: Any) -> str | None:
+    """Normalize a Hover's ``contents`` to one plain string, or None.
+
+    ``contents`` may be a plain string, a ``MarkupContent`` dict
+    (``{'kind': ..., 'value': str}``), a ``MarkedString`` dict
+    (``{'language': ..., 'value': str}``), or a list of any of those
+    (list items are joined with a blank line).
+    """
+    if contents is None:
+        return None
+    if isinstance(contents, str):
+        text = contents
+    elif isinstance(contents, dict):
+        text = str(contents.get("value", ""))
+    elif isinstance(contents, list):
+        parts = [p for p in (_parse_hover_contents(c) for c in contents) if p]
+        text = "\n\n".join(parts)
+    else:
+        return None
+    text = text.strip()
+    return text or None
+
+
 def path_to_uri(path: Path) -> str:
     """The ``file://`` URI for ``path`` (one stable URI per path).
 
@@ -200,6 +328,10 @@ class LspClient:
         self._diagnostics: dict[str, list[DiagnosticInfo]] = {}
         self._quiet_event = asyncio.Event()
         self._supports_document_symbol = False
+        self._supports_definition = False
+        self._supports_references = False
+        self._supports_hover = False
+        self._supports_workspace_symbol = False
         self._owns_workspace_config = False
         self._stream_closed = False
 
@@ -246,8 +378,12 @@ class LspClient:
                         "textDocument": {
                             "documentSymbol": {
                                 "hierarchicalDocumentSymbolSupport": True
-                            }
-                        }
+                            },
+                            "definition": {},
+                            "references": {},
+                            "hover": {},
+                        },
+                        "workspace": {"symbol": {}},
                     },
                     "workspaceFolders": [
                         {
@@ -259,9 +395,12 @@ class LspClient:
                 timeout=INITIALIZE_TIMEOUT,
             )
             caps = result.get("capabilities") if isinstance(result, dict) else None
-            self._supports_document_symbol = bool(
-                (caps or {}).get("documentSymbolProvider")
-            )
+            caps = caps or {}
+            self._supports_document_symbol = bool(caps.get("documentSymbolProvider"))
+            self._supports_definition = bool(caps.get("definitionProvider"))
+            self._supports_references = bool(caps.get("referencesProvider"))
+            self._supports_hover = bool(caps.get("hoverProvider"))
+            self._supports_workspace_symbol = bool(caps.get("workspaceSymbolProvider"))
             await self._notify("initialized", {})
             logger.info(
                 "language server %s started for %s", self._binary, self._workspace
@@ -438,6 +577,22 @@ class LspClient:
         return self._supports_document_symbol
 
     @property
+    def supports_definition(self) -> bool:
+        return self._supports_definition
+
+    @property
+    def supports_references(self) -> bool:
+        return self._supports_references
+
+    @property
+    def supports_hover(self) -> bool:
+        return self._supports_hover
+
+    @property
+    def supports_workspace_symbol(self) -> bool:
+        return self._supports_workspace_symbol
+
+    @property
     def server_alive(self) -> bool:
         """False once the server's stdout stream has closed."""
         return not self._stream_closed
@@ -455,6 +610,100 @@ class LspClient:
             logger.warning("documentSymbol failed for %s: %s", path, exc)
             return ()
         return _parse_symbols(result)
+
+    async def definition(
+        self, path: Path, line: int, character: int
+    ) -> tuple[Location, ...]:
+        """Go-to-definition for the symbol at a (0-based) position.
+
+        () when the server does not advertise ``definitionProvider``,
+        the request fails, or there is no definition.
+        """
+        if not self._supports_definition:
+            return ()
+        try:
+            result = await self._request(
+                "textDocument/definition",
+                {
+                    "textDocument": {"uri": path_to_uri(path)},
+                    "position": {"line": line, "character": character},
+                },
+            )
+        except LspError as exc:
+            logger.warning(
+                "definition failed for %s:%d:%d: %s", path, line, character, exc
+            )
+            return ()
+        return _parse_locations(result)
+
+    async def references(
+        self,
+        path: Path,
+        line: int,
+        character: int,
+        include_declaration: bool = True,
+    ) -> tuple[Location, ...]:
+        """Every reference to the symbol at a (0-based) position.
+
+        () when the server does not advertise ``referencesProvider``,
+        the request fails, or there are no references.
+        """
+        if not self._supports_references:
+            return ()
+        try:
+            result = await self._request(
+                "textDocument/references",
+                {
+                    "textDocument": {"uri": path_to_uri(path)},
+                    "position": {"line": line, "character": character},
+                    "context": {"includeDeclaration": include_declaration},
+                },
+            )
+        except LspError as exc:
+            logger.warning(
+                "references failed for %s:%d:%d: %s", path, line, character, exc
+            )
+            return ()
+        return _parse_locations(result)
+
+    async def hover(self, path: Path, line: int, character: int) -> str | None:
+        """Hover text for the symbol at a (0-based) position, or None.
+
+        None when the server does not advertise ``hoverProvider``, the
+        request fails, or the server has nothing to show.
+        """
+        if not self._supports_hover:
+            return None
+        try:
+            result = await self._request(
+                "textDocument/hover",
+                {
+                    "textDocument": {"uri": path_to_uri(path)},
+                    "position": {"line": line, "character": character},
+                },
+            )
+        except LspError as exc:
+            logger.warning("hover failed for %s:%d:%d: %s", path, line, character, exc)
+            return None
+        if not isinstance(result, dict):
+            return None
+        return _parse_hover_contents(result.get("contents"))
+
+    async def workspace_symbol(self, query: str) -> tuple[WorkspaceSymbolInfo, ...]:
+        """Workspace-wide symbol search (flat ``SymbolInformation[]``).
+
+        () when the server does not advertise
+        ``workspaceSymbolProvider``, the request fails, or there are no
+        matches.
+        """
+        if not self._supports_workspace_symbol:
+            return ()
+        try:
+            result = await self._request("workspace/symbol", {"query": query})
+        except LspError as exc:
+            logger.warning("workspace/symbol failed for %r: %s", query, exc)
+            return ()
+        return _parse_workspace_symbols(result)
 
     # -- transport --------------------------------------------------------------
 
