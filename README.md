@@ -178,19 +178,38 @@ configure there take over from the zero-config default.
 
 | Tool | What it does |
 | --- | --- |
-| `search_hdl(query, limit, repository, symbols, language, mode)` | Search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language. |
-| `search_vhdl(query, limit, repository, symbols)` | `search_hdl` restricted to VHDL (back-compat name). |
+| `search_hdl(query, limit, repository, symbols, language, mode)` | Search over HDL source (VHDL, Verilog, SystemVerilog): design units (entities/modules), architectures, processes/always blocks, packages, functions, tasks. `language` filters by HDL language (`"vhdl"` for VHDL only). |
 | `search_docs(...)` | Same over documentation sections. |
 | `search_code(...)` | Same over general code units (functions/classes). |
 | `search_knowledge(query, limit, ...)` | All three domains at once, RRF-fused. |
 | `get_source(repository, file, start_line, end_line)` | Exact current file content (or a slice) with commit attribution. |
 | `find_definition(repository, file, line, character)` | Exact, LSP-backed go-to-definition (`vhdl_ls`/Veridian), not similarity search. `line`/`character` are 0-based; results render as 1-based `path:line:col`. |
-| `find_references(repository, file, line, character, include_declaration)` | Exact, LSP-backed find-references for a symbol at a known position. |
+| `find_references(repository, file, line, character, include_declaration, limit)` | Exact, LSP-backed find-references for a symbol at a known position. Capped at `limit` (default 20) with a note giving the true total; `include_declaration=False` drops the declaration even when the language server ignores the LSP flag (vhdl_ls does). |
 | `hover_info(repository, file, line, character)` | Exact, LSP-backed hover: the analyzer's own signature/type/doc text for the symbol at a position. |
 | `find_symbol(query, repository?, limit)` | Exact, LSP-backed `workspace/symbol` name lookup, across one or every configured repository. |
-| `repository_status()` | Per repository: ref, priority, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode) and the per-collection embedding-model state. |
+| `repository_status()` | Per repository: sync state (`IN PROGRESS` / `FAILED` / `pending` / `idle`), ref, priority, domains, last indexed commit, last sync, last error — plus the HDL analyzer status (`vhdl_ls`, Veridian: available, version, `lsp`/`fallback` mode) and the per-collection embedding-model state. |
 | `sync_repositories(repositories?)` | Incremental sync (default: all). Failures contained per repository. |
 | `reindex_repository(repository)` | Drop and rebuild one repository's index. |
+
+#### Which tool?
+
+Cheapest and most exact first — a search costs one to two orders of
+magnitude more tokens than a navigation call, because every hit returns
+a whole indexed construct:
+
+| You have | Use |
+| --- | --- |
+| An exact identifier, want its declaration | `find_symbol` |
+| A `file:line:character`, want the declaration / uses / type | `find_definition`, `find_references`, `hover_info` |
+| A concept, a question, or no name at all | `search_hdl` / `search_docs` / `search_code` |
+| A question spanning docs + RTL + tests | `search_knowledge` |
+| A known file, want its text | `get_source` (never a search) |
+| No path | `repository_files` (never guess) |
+
+Never search for an identifier you already know, and reach for
+corvidex over `grep`/reading the working tree when the answer may live
+in another repository, when the question is conceptual, or when the
+coding standards are the answer.
 
 All search tools take an optional `repository` (name) filter plus
 `symbols: list[str]` — restrict results to chunks referencing any of

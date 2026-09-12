@@ -1,6 +1,6 @@
 ---
 name: corvidex-mcp
-description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the corvidex-mcp MCP server (search_hdl, search_vhdl, search_docs, search_code, search_knowledge, get_source, repository_files), plus exact LSP-backed navigation (find_definition, find_references, hover_info, find_symbol). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), resolving a symbol's exact declaration/use sites, or when a question spans docs, RTL, and test/simulation code.
+description: Semantic search over the organization's VHDL code, coding standards, VHDL-related documentation, and general source code via the corvidex-mcp MCP server (search_hdl, search_docs, search_code, search_knowledge, get_source, repository_files), plus exact LSP-backed navigation (find_definition, find_references, hover_info, find_symbol). Use when implementing or modifying HDL, looking up or enforcing design standards/conventions (the coding-standards file is the golden source), finding reference implementations (FIFOs, resets, FSMs, AXI), resolving a symbol's exact declaration/use sites, or when a question spans docs, RTL, and test/simulation code.
 ---
 
 # corvidex-mcp — RTL-centric RAG and indexing MCP
@@ -42,6 +42,27 @@ cross-referencing key between domains.
 5. Verify: call `repository_status` — each repo should show an indexed
    commit and no `last error` (a misconfigured url/ref shows an
    actionable hint there). If empty or stale, call `sync_repositories`.
+
+## Choosing a tool
+
+Cheapest and most exact first. A `search_*` hit returns a whole indexed
+construct, so a search typically costs one to two orders of magnitude
+more tokens than a navigation call and answers less precisely — never
+search for an identifier you already know.
+
+| You have | Use |
+| --- | --- |
+| An exact identifier, want its declaration | `find_symbol` |
+| A `file:line:character` | `find_definition` / `find_references` / `hover_info` |
+| A concept, a question, or no name | `search_hdl` / `search_docs` / `search_code` |
+| A question spanning docs + RTL + tests | `search_knowledge` |
+| A known file, want its text | `get_source` |
+| No path | `repository_files` |
+
+Prefer corvidex over grepping or reading the working tree when the
+answer may be in another repository, when the question is conceptual,
+or when the coding standards are the answer. Plain `grep`/`Read` is
+still better for a literal string in a file you already have open.
 
 ## Workflow
 
@@ -117,7 +138,7 @@ cross-referencing key between domains.
 - Find a reference implementation: `search_knowledge("synchronous FIFO with gray pointer")`
 - Trace an identifier: `search_knowledge("fifo write pointer", symbols=["wr_ptr"])`
 - Pin to one repo: `search_hdl("AXI handshake", repository="common-ip")`
-- VHDL-only: `search_vhdl("architecture with clocked process")`
+- VHDL-only: `search_hdl("architecture with clocked process", language="vhdl")`
 - Exact declaration from a known position: `find_definition("common-ip", "rtl/fifo.vhd", 41, 12)`
 - Every use site of a known symbol: `find_references("common-ip", "rtl/fifo.vhd", 12, 6)`
 - Exact name lookup: `find_symbol("wr_ptr", repository="common-ip")`
@@ -150,3 +171,12 @@ cross-referencing key between domains.
 - `search_*` `limit` defaults to 8 (10 for `search_knowledge`).
 - Search modes: `lexical` never loads the embedding model (works when
   the model is unavailable); `semantic`/`hybrid` need it.
+- `find_references` renders at most 20 locations (`limit`) and says how
+  many were found when it truncates; `include_declaration=False`
+  really does drop the declaration, even though `vhdl_ls` ignores the
+  LSP flag.
+- `repository_status` prints a `sync:` line per repository —
+  `IN PROGRESS` (wait and retry), `FAILED` (fix the cause under `last
+  error`; it is retried forever either way), `pending`, or `idle`. In
+  zero-config mode the repository name carries a hash suffix (e.g.
+  `vhdl-ai-test-582e8509`): read it there, never guess it.
