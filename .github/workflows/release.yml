@@ -3,10 +3,11 @@ name: Release
 # Builds both distribution artifacts, publishes the slim ones to PyPI,
 # and attaches everything to a draft GitHub Release.
 #
-#   dist/         slim wheel + sdist  -> published to PyPI
-#   dist-offline/ all-models bundle   -> Release asset only; its wheel is
-#                                       versioned <version>+offline, which
-#                                       PyPI refuses outright
+#   dist/         slim wheel + sdist  -> what a maintainer uploads to PyPI
+#   dist-offline/ all-models wheel +  -> Release assets only; that wheel
+#                 one dependency         is versioned <version>+offline,
+#                 wheelhouse per         which PyPI refuses outright
+#                 supported target
 #
 # Publishing uses PyPI Trusted Publishing (OIDC): the publish job mints a
 # short-lived token from GitHub's identity provider, so no PyPI API token
@@ -44,16 +45,19 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: Build slim artifacts + offline bundle
+    name: Build slim artifacts + offline matrix
     # Gated too, not just the publish job: a red suite should not leave a
     # draft Release full of assets sitting there looking releasable.
     # Serialising costs a few minutes on a rare operation and buys "if
     # anything is red, nothing exists".
     needs: test
     runs-on: ubuntu-latest
-    # The offline bundle downloads ~0.9 GB of model weights and packs a
-    # ~0.6 GB archive, so it is slower than a normal build job.
-    timeout-minutes: 60
+    # The offline side downloads ~0.9 GB of model weights once, packs a
+    # 537 MB wheel, and then cross-downloads a ~55-wheel dependency
+    # wheelhouse for each of the twelve targets (~0.9 GB of wheels on a
+    # cold cache), so it is slower than a normal build job. Both caches
+    # below turn a re-run into a few minutes.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.1.0
@@ -70,7 +74,23 @@ jobs:
           key: corvidex-release-models-v1
           restore-keys: corvidex-release-models-v1
 
-      - name: Build both artifacts
+      - name: Cache the cross-downloaded dependency wheels
+        uses: actions/cache@v6
+        with:
+          # pip's HTTP cache, shared by all twelve `pip download` runs.
+          # Keyed on the lockfile: the wheel set only changes when the
+          # resolved dependencies do.
+          path: ~/.cache/pip
+          key: corvidex-release-wheelhouse-${{ hashFiles('uv.lock') }}
+          restore-keys: corvidex-release-wheelhouse-
+
+      - name: Build the slim artifacts and the full offline matrix
+        # Every target in tools/build_release.py's matrix. Each wheelhouse
+        # is cross-downloaded from this one Linux runner
+        # (`pip download --platform ... --python-version ...`), so no
+        # macOS or Windows runner is involved, and each one is verified
+        # before it is packed: the download must resolve completely and
+        # every wheel in it must carry a tag that target asked for.
         run: |
           uv run --no-sync python tools/build_release.py --all \
             --model-source ~/.cache/corvidex-models
@@ -84,9 +104,18 @@ jobs:
       - name: Refuse to release an offline wheel without its local version
         # The one mistake that would matter: an all-models wheel that
         # looks like the public release and could be uploaded to PyPI.
+        # Also asserts the offline set is complete, so a target that
+        # silently stopped being packed cannot ship as a short release.
         run: |
           set -e
-          ls dist-offline/*.tar.gz >/dev/null
+          ls dist-offline/*-offline-wheel.tar >/dev/null
+          expected=$(uv run --no-sync python tools/build_release.py \
+            --target-ids | wc -l)
+          found=$(ls dist-offline/*-wheelhouse-*.tar.gz | wc -l)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::expected $expected wheelhouse archives, found $found"
+            exit 1
+          fi
           if ls dist/* | grep -q '+offline'; then
             echo "::error::an +offline artifact leaked into dist/ (the PyPI directory)"
             exit 1
@@ -131,14 +160,36 @@ jobs:
 
           ## Air-gapped hosts
 
-          Download the `*-offline-*.tar.gz` asset below: it embeds every
-          model in the wheel and ships a dependency wheelhouse, so the
-          target host downloads nothing at install or at run time. Unpack
-          it, run `./install.sh <venv>`, then verify with
-          `<venv>/bin/python -m corvidex_mcp.verify_offline`.
+          An offline install needs **two** assets below, and the host
+          then downloads nothing at install or at run time:
 
-          That bundle is **not on PyPI** and cannot be: PyPI's 100 MB
-          per-file limit is not raised for bundled model weights. Its
+          1. `*-offline-wheel.tar` — the package with all three models
+             embedded. Platform-independent: the same file for every
+             machine and every Python version.
+          2. `*-wheelhouse-<os>-<arch>-cp<py>.tar.gz` — the compiled
+             dependency wheels for **your** platform and CPython
+             version. Pick exactly one, e.g.
+             `...-wheelhouse-linux-x86_64-cp312.tar.gz`.
+
+          ```console
+          tar xf corvidex-mcp-<version>-offline-wheel.tar
+          tar xzf corvidex-mcp-<version>-wheelhouse-<target>.tar.gz
+          cd corvidex-mcp-<version>-wheelhouse-<target>
+          ./install.sh /opt/corvidex-venv      # install.ps1 on Windows
+          /opt/corvidex-venv/bin/python -m corvidex_mcp.verify_offline
+          ```
+
+          The installer refuses a wheelhouse that does not match the
+          interpreter it is pointed at, so a mismatched pair fails with
+          a message rather than a broken venv. Targets: Linux
+          x86_64/aarch64 (glibc 2.34+) and Windows x86-64 on CPython
+          3.12/3.13/3.14, macOS 14+ on Apple Silicon on CPython
+          3.12/3.13/3.14. Intel macOS is not covered (onnxruntime
+          publishes no x86_64 macOS wheels), and neither is
+          free-threaded CPython.
+
+          Those assets are **not on PyPI** and cannot be: PyPI's 100 MB
+          per-file limit is not raised for bundled model weights. The
           wheel is versioned `+offline` (a PEP 440 local version), which
           PyPI rejects outright.
           NOTES
@@ -146,7 +197,9 @@ jobs:
             --draft \
             --title "$TAG" \
             --notes-file release-notes.md \
-            dist/*.whl dist/*.tar.gz dist-offline/*.tar.gz
+            dist/*.whl dist/*.tar.gz \
+            dist-offline/*-offline-wheel.tar \
+            dist-offline/*-wheelhouse-*.tar.gz
 
   publish-pypi:
     name: Publish to PyPI

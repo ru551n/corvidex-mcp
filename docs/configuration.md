@@ -365,39 +365,120 @@ Platform note: on Apple Silicon, **Python 3.14 requires macOS 14+** —
 every `onnxruntime` wheel for CPython 3.14 is tagged
 `macosx_14_0_arm64`, and unlike 3.12/3.13 there is no older cp314 build
 to fall back to. On 3.12/3.13 the resolver backtracks to an
-onnxruntime with a macOS 13-compatible wheel.
+onnxruntime with a macOS 13-compatible wheel. That backtracking is a
+property of resolving against a live index: the offline wheelhouses
+below are cut from the pinned lockfile, so *every* Apple Silicon
+wheelhouse needs macOS 14+, on 3.12 and 3.13 too.
 
 ### Air-gapped installation (offline bundle)
 
-The offline bundle carries **every** model inside the wheel, so an
-air-gapped host downloads nothing at install time or at run time. It is
-one archive:
+The offline build carries **every** model inside the wheel, so an
+air-gapped host downloads nothing at install time or at run time. It
+takes **two** release assets:
 
 ```
-corvidex-mcp-<version>-offline-<platform>-<abi>.tar.gz
-├── corvidex_mcp-<version>+offline-py3-none-any.whl   the package, models embedded
-├── wheelhouse/                                       every runtime dependency
-├── install.sh                                        venv + pip install --no-index
-└── README.md                                         install and verification
+corvidex-mcp-<version>-offline-wheel.tar               537.4 MB, one per release
+└── corvidex_mcp-<version>+offline-py3-none-any.whl    the package, models embedded
+
+corvidex-mcp-<version>-wheelhouse-<target>.tar.gz      52-71 MB, one per target
+└── corvidex-mcp-<version>-wheelhouse-<target>/
+    ├── wheelhouse/         every runtime dependency, as wheels
+    ├── install.sh          venv + pip install --no-index  (install.ps1 on Windows)
+    ├── target.json         the target's metadata, machine-readable
+    └── README.md           install and verification, for this target
 ```
 
-Measured for 0.1.0 on `manylinux2014_x86_64` / CPython 3.12:
+They are separate because the package is pure Python: the all-models
+wheel is `py3-none-any` and byte-identical everywhere, while the
+compiled dependencies (onnxruntime, tokenizers, sqlite-vec,
+pydantic-core, ...) publish a wheel per platform *and* per CPython
+version. One self-contained bundle per combination would republish the
+same 537 MB of weights twelve times — about 7.2 GB per release — to
+vary 60-odd MB of dependency wheels.
 
-| Artifact | Size |
-| --- | --- |
-| slim wheel (PyPI) | 1.3 MB |
-| sdist (PyPI) | 1.4 MB |
-| embedded ONNX weights, uncompressed | 862.3 MB |
-| all-models wheel | 537.4 MB |
-| dependency wheelhouse (55 wheels) | 71.5 MB |
-| **offline bundle archive** | **607.6 MB** |
+The wheel is wrapped in an (uncompressed) `.tar` rather than attached
+raw because GitHub rewrites non-alphanumeric characters in release
+asset names, and the `+` in `<version>+offline` has to survive verbatim
+or `pip` will not install the file.
 
-**This bundle is not on PyPI and cannot be.** PyPI enforces a 100 MB
+#### Which wheelhouse do I need?
+
+One per (platform, CPython version); the archive name says which:
+
+| Target | Asset suffix | Size | Wheels |
+| --- | --- | --- | --- |
+| Linux x86_64, glibc 2.34+ | `linux-x86_64-cp312` | 70.8 MB | 55 |
+| | `linux-x86_64-cp313` | 70.8 MB | 55 |
+| | `linux-x86_64-cp314` | 70.8 MB | 55 |
+| Linux aarch64, glibc 2.34+ | `linux-aarch64-cp312` | 66.2 MB | 55 |
+| | `linux-aarch64-cp313` | 66.2 MB | 55 |
+| | `linux-aarch64-cp314` | 66.2 MB | 55 |
+| macOS 14+, Apple Silicon | `macos-arm64-cp312` | 52.5 MB | 55 |
+| | `macos-arm64-cp313` | 52.5 MB | 55 |
+| | `macos-arm64-cp314` | 52.6 MB | 55 |
+| Windows x86-64 | `windows-x86_64-cp312` | 61.3 MB | 58 |
+| | `windows-x86_64-cp313` | 61.3 MB | 58 |
+| | `windows-x86_64-cp314` | 61.9 MB | 58 |
+
+Measured for 0.1.0. `cp312` means CPython 3.12, and so on; the Windows
+wheelhouses are three wheels larger because `pywin32`, `colorama` and
+`win32-setctime` only apply there.
+
+You do not have to get this right by hand. `install.sh` (and
+`install.ps1`) probes the interpreter it is about to use and refuses to
+install a wheelhouse that does not match it — wrong Python version,
+wrong OS, wrong CPU, a free-threaded build, or macOS older than 14 —
+naming the archive you should have downloaded instead:
+
+```console
+$ PYTHON=/usr/bin/python3.14 ./install.sh /opt/corvidex-venv
+error: this wheelhouse does not match '/usr/bin/python3.14'.
+
+  wheelhouse:  linux-x86_64-cp312 (CPython 3.12)
+               Linux x86_64 (glibc 2.34+)
+  interpreter: CPython 3.14, gil build
+               on linux/x86_64
+
+  Download corvidex-mcp-0.1.0-wheelhouse-linux-x86_64-cp314.tar.gz instead,
+  or retry with PYTHON=python3.12.
+```
+
+**Not covered**, and why:
+
+- **Intel macOS** — `onnxruntime` publishes no x86_64 macOS wheels at
+  all for the pinned version, at any CPython version.
+- **Apple Silicon below macOS 14** — `onnxruntime`'s arm64 macOS wheels
+  are tagged `macosx_14_0_arm64` only. (A *PyPI* install on macOS 13
+  can still resolve on CPython 3.12/3.13 by backtracking to an older
+  onnxruntime; a wheelhouse cut from the pinned lockfile cannot.)
+- **Free-threaded CPython** (`cp313t`/`cp314t`) — the dependency set is
+  not fully published for it, and on Windows it can never be:
+  `pywin32`, a dependency of `mcp`, ships no free-threaded wheels. The
+  installers reject a free-threaded interpreter rather than install
+  GIL-build wheels into it.
+
+For anything else, build a wheelhouse yourself — see
+[Building it](#building-it-on-a-connected-machine) below.
+
+#### Sizes
+
+Measured for 0.1.0:
+
+| Artifact | Size | Per release |
+| --- | --- | --- |
+| slim wheel (PyPI) | 1.3 MB | 1 |
+| sdist (PyPI) | 1.4 MB | 1 |
+| embedded ONNX weights, uncompressed | 862.3 MB | — |
+| all-models wheel (`py3-none-any`) | 537.4 MB | 1 |
+| dependency wheelhouse | 52.5-70.8 MB | 12 |
+| **all Release assets together** | **1290.5 MB** | |
+
+**These assets are not on PyPI and cannot be.** PyPI enforces a 100 MB
 per-file limit plus a per-project quota, and limit increases are not
 granted for bundled model weights. Splitting the weights across several
 sub-100 MB wheels to get under the cap was considered and rejected: it
 abuses a shared, donated index to host ~0.9 GB of third-party model
-binaries. The bundle is published as a **GitHub Release asset** on
+binaries. They are published as **GitHub Release assets** on
 <https://github.com/ru551n/corvidex-mcp/releases> instead.
 
 The embedded wheel's version is `<version>+offline` — a PEP 440 local
@@ -410,24 +491,46 @@ variant is installed.
 #### Building it (on a connected machine)
 
 ```console
+$ uv run --no-sync python tools/build_release.py --list-targets
 $ uv run --no-sync python tools/build_release.py --all
 ```
 
-That produces both artifacts: `dist/` gets the slim wheel + sdist
-(nothing else ever lands there, so `twine check dist/*` is always
-safe), and `dist-offline/` gets the bundle archive. Useful flags:
+That produces everything: `dist/` gets the slim wheel + sdist (nothing
+else ever lands there, so `twine check dist/*` is always safe), and
+`dist-offline/` gets the all-models wheel plus one wheelhouse archive
+per target. Every wheelhouse is cross-downloaded from whatever machine
+runs the build (`pip download --platform ... --python-version ...
+--abi ... --only-binary=:all:`), so building the macOS and Windows
+targets needs no macOS or Windows machine.
+
+Each one is verified before it is packed, and a target that no longer
+resolves fails the build instead of producing an unusable archive: the
+download must resolve completely, every requirement must be present,
+and every wheel must carry a tag that target actually asked for.
+
+Useful flags:
 
 - `--model-source ~/.local/share/corvidex/embed-cache` provisions the
   embedded models by copying an existing fastembed/HF cache instead of
   re-downloading them; add `--models-offline` to make a model missing
   from that cache an error rather than a silent fetch.
-- `--python-version` / `--platform` target the wheelhouse at the
-  air-gapped host's interpreter and platform (defaults: CPython 3.12,
-  the x86_64 manylinux tag set). pip matches `--platform` literally, so
-  the default asks for several manylinux variants; the resulting floor
-  is the strictest tag actually chosen (today glibc 2.34 — RHEL 9 /
-  Ubuntu 22.04 and newer).
-- `--slim` / `--offline` build just one of the two.
+- `--target <id>` (repeatable) builds a subset: a full id
+  (`linux-x86_64-cp312`), a family (`linux-x86_64` — every CPython
+  version of it), or `all`. `--list-targets` prints the matrix and what
+  is deliberately left out, with the reason; `--target-ids` prints the
+  ids one per line, for scripts.
+- `--python-version X.Y` with `--platform <tag>` (repeatable) builds a
+  single ad-hoc target instead of the matrix — for a host the matrix
+  does not cover (musl, an older glibc, `win_arm64`). pip matches
+  `--platform` literally for manylinux, so pass every variant a
+  dependency may publish (`manylinux2014_x86_64`,
+  `manylinux_2_17_x86_64`, `manylinux_2_28_x86_64`,
+  `manylinux_2_34_x86_64`); the resulting floor is the strictest tag
+  actually chosen. macOS is the exception — pip expands a macOS request
+  downwards, so `macosx_14_0_arm64` alone also accepts `macosx_11_0`
+  and `universal2` wheels.
+- `--slim` / `--offline` build just the PyPI side or just the offline
+  side.
 
 To provision the models into a working checkout without building
 anything (e.g. to develop against the bundled-asset code path):
@@ -447,11 +550,29 @@ weights are gitignored; the small JSON files are committed.
 
 #### Installing it (on the air-gapped host)
 
+Copy both assets across, unpack them side by side, and run the
+installer from inside the wheelhouse directory:
+
 ```console
-$ tar xzf corvidex-mcp-0.1.0-offline-manylinux2014-x86-64-cp312.tar.gz
-$ cd corvidex-mcp-0.1.0-offline-manylinux2014-x86-64-cp312
+$ tar xf  corvidex-mcp-0.1.0-offline-wheel.tar
+$ tar xzf corvidex-mcp-0.1.0-wheelhouse-linux-x86_64-cp312.tar.gz
+$ cd corvidex-mcp-0.1.0-wheelhouse-linux-x86_64-cp312
 $ ./install.sh /opt/corvidex-venv          # PYTHON=... to pick an interpreter
 $ claude mcp add corvidex-mcp -- /opt/corvidex-venv/bin/corvidex-mcp
+```
+
+The installer finds the wheel next to the wheelhouse directory (where
+the first command unpacks it), then inside it, then in the current
+directory; `--wheel /path/to/corvidex_mcp-0.1.0+offline-py3-none-any.whl`
+points at it anywhere else, as does `CORVIDEX_WHEEL`.
+
+On Windows, from PowerShell:
+
+```console
+> tar.exe xf  corvidex-mcp-0.1.0-offline-wheel.tar
+> tar.exe xzf corvidex-mcp-0.1.0-wheelhouse-windows-x86_64-cp312.tar.gz
+> cd corvidex-mcp-0.1.0-wheelhouse-windows-x86_64-cp312
+> .\install.ps1 -VenvDir C:\corvidex-venv     # -Python to pick an interpreter
 ```
 
 #### Verifying it

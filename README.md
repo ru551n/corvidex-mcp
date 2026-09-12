@@ -173,12 +173,15 @@ registration is identical.
 
 The PyPI wheel is **slim** (1.3 MB): it downloads the embedding and
 reranker models (~0.86 GB) into its data directory on first run. For a
-host with no network at all there is a separate **offline bundle** —
-one 607.6 MB archive with all three models embedded in the wheel, a
-dependency wheelhouse, an installer, and a self-verification command.
-It is **not on PyPI**: PyPI's 100 MB per-file limit is not raised for
-bundled model weights, so the bundle is published as a
-[GitHub Release](https://github.com/ru551n/corvidex-mcp/releases) asset
+host with no network at all there is a separate **offline install** —
+two downloads, a 537.4 MB wheel with all three models embedded (the
+same file for every platform) plus a ~52-71 MB dependency wheelhouse
+for your platform and Python version, with an installer and a
+self-verification command. Linux x86_64/aarch64, macOS on Apple
+Silicon and Windows x86-64 are covered, each on CPython 3.12, 3.13 and
+3.14. It is **not on PyPI**: PyPI's 100 MB per-file limit is not raised
+for bundled model weights, so those assets are published on a
+[GitHub Release](https://github.com/ru551n/corvidex-mcp/releases)
 instead. See
 [Air-gapped installation](docs/configuration.md#air-gapped-installation-offline-bundle).
 
@@ -377,14 +380,14 @@ $ uv run --no-sync --with twine twine check dist/*        # PyPI readiness
 ```
 
 `dist/` holds the slim wheel + sdist that go to PyPI; `dist-offline/`
-holds the all-models bundle archive, which must never be uploaded there
-(its wheel is versioned `<version>+offline`, which PyPI rejects
-outright).
+holds the all-models wheel and one dependency wheelhouse per supported
+target, which must never be uploaded there (that wheel is versioned
+`<version>+offline`, which PyPI rejects outright).
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which first
 runs the **entire CI suite** against the tagged commit — lint,
 type-check, quality gate and the full OS/Python matrix, by reusing
-`ci.yml` rather than copying it — and only then builds both artifacts,
+`ci.yml` rather than copying it — and only then builds every artifact,
 **publishes `dist/` to PyPI**, and attaches everything to a *draft*
 GitHub Release for a human to review and publish. A single red check
 means nothing is built, drafted or uploaded at all. So tagging is the
@@ -406,3 +409,13 @@ trust to this repository *and this workflow's filename*, so renaming
 `release.yml` breaks publishing until the publisher is updated on PyPI.
 See
 [docs/configuration.md](docs/configuration.md#air-gapped-installation-offline-bundle).
+
+The offline side is a matrix — Linux x86_64/aarch64, macOS on Apple
+Silicon and Windows x86-64, each on CPython 3.12/3.13/3.14 — but only
+the wheelhouses vary: the 537 MB all-models wheel is `py3-none-any` and
+is built once per release. Every wheelhouse is cross-downloaded from
+one Linux runner (`pip download --platform ... --python-version ...`),
+so no macOS or Windows runner is involved, and each is verified before
+it is packed. `--list-targets` prints the matrix (and what is
+deliberately left out, with the reason); `--target <id>` builds a
+subset.
