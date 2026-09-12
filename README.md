@@ -12,8 +12,8 @@ Verilog, SystemVerilog), HDL-related documentation, and general source
 code (C/C++, Python, ...) — all cross-referenced, all with exact
 source attribution.
 
-Runs as an MCP server over stdio (installed from this Git
-repository with `uvx`, see [Quick start](#quick-start)). No external
+Runs as an MCP server over stdio (`pip install corvidex-mcp`, see
+[Quick start](#quick-start)). No external
 services required: the vector store (SQLite + the sqlite-vec
 extension) runs embedded and the embedding models run locally (ONNX
 via FastEmbed). **Zero configuration required**: point your MCP client
@@ -125,9 +125,8 @@ is, not a stale snapshot.
 
 ## Quick start
 
-Requirements: [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥
-3.12, and Git. `vhdl_ls`/Veridian are optional (VHDL/Verilog files
-fall back to structural parsing without them). See
+Requirements: Python ≥ 3.12 and Git. `vhdl_ls`/Veridian are optional
+(VHDL/Verilog files fall back to structural parsing without them). See
 [docs/configuration.md](docs/configuration.md#requirements) for the
 full platform matrix, and
 [Installation](docs/configuration.md#installation) for the PyPI and
@@ -137,20 +136,17 @@ On Apple Silicon, Python 3.14 needs macOS 14+ (every `onnxruntime`
 wheel for CPython 3.14 is tagged `macosx_14_0_arm64`); 3.12 and 3.13
 resolve to an older onnxruntime that still supports macOS 13.
 
-Register the server with your MCP client — no config file needed.
-
-Claude Code, from PyPI:
+Install it, then register it with your MCP client — no config file
+needed.
 
 ```console
-$ claude mcp add corvidex-mcp -- uvx corvidex-mcp
-# or install it into the current environment:
 $ pip install corvidex-mcp
 ```
 
-…or straight from this repository:
+Claude Code:
 
 ```console
-$ claude mcp add corvidex-mcp -- uvx --from git+ssh://git@github.com/ru551n/corvidex-mcp.git corvidex-mcp
+$ claude mcp add corvidex-mcp -- corvidex-mcp
 ```
 
 Maki (TOML config — verify the exact table names against your Maki
@@ -158,10 +154,22 @@ version's docs):
 
 ```toml
 [mcp_servers.corvidex_mcp]
-command = "uvx"
-args = ["corvidex-mcp"]
-# ...or from git: ["--from", "git+ssh://git@github.com/ru551n/corvidex-mcp.git", "corvidex-mcp"]
+command = "corvidex-mcp"
 ```
+
+Both assume the `corvidex-mcp` entry point is on your `PATH`, which is
+the case after a `pip install --user` or an install into an active
+environment. If you install into a virtualenv instead, give the
+absolute path to its entry point — your MCP client spawns the server
+itself and will not have that virtualenv activated:
+
+```console
+$ claude mcp add corvidex-mcp -- /path/to/.venv/bin/corvidex-mcp
+```
+
+To track this repository rather than a release, swap the install for
+`pip install git+ssh://git@github.com/ru551n/corvidex-mcp.git`; the
+registration is identical.
 
 The PyPI wheel is **slim** (1.3 MB): it downloads the embedding and
 reranker models (~0.86 GB) into its data directory on first run. For a
@@ -181,8 +189,8 @@ enough — a Git checkout is indexed as its working tree (HEAD plus
 uncommitted and untracked changes), a plain directory as a bag of
 files. Confirm what got indexed with the `repository_status` tool.
 
-If you run the server from a local checkout rather than `uvx`, use
-`uv --project /path/to/corvidex-mcp run corvidex-mcp` and **not**
+If you run the server from a local checkout rather than an installed
+package, use `uv --project /path/to/corvidex-mcp run corvidex-mcp` and **not**
 `uv --directory ...`: `--directory` changes the working directory, so
 corvidex ends up indexing its own source tree instead of your code. Set
 `CORVIDEX_MCP_PROJECT_DIR` to your workspace root if a launcher gets
@@ -368,10 +376,33 @@ $ uv run --no-sync python tools/build_release.py --all    # both artifacts
 $ uv run --no-sync --with twine twine check dist/*        # PyPI readiness
 ```
 
-`dist/` holds the slim wheel + sdist meant for `twine upload`;
-`dist-offline/` holds the all-models bundle archive, which must never
-be uploaded to PyPI (its wheel is versioned `<version>+offline`, which
-PyPI rejects outright). Tagging `v*` runs
-`.github/workflows/release.yml`, which builds both and attaches them to
-a draft GitHub Release; publishing to PyPI stays a manual step. See
+`dist/` holds the slim wheel + sdist that go to PyPI; `dist-offline/`
+holds the all-models bundle archive, which must never be uploaded there
+(its wheel is versioned `<version>+offline`, which PyPI rejects
+outright).
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which first
+runs the **entire CI suite** against the tagged commit — lint,
+type-check, quality gate and the full OS/Python matrix, by reusing
+`ci.yml` rather than copying it — and only then builds both artifacts,
+**publishes `dist/` to PyPI**, and attaches everything to a *draft*
+GitHub Release for a human to review and publish. A single red check
+means nothing is built, drafted or uploaded at all. So tagging is the
+irreversible step, not the Release:
+
+```console
+$ git tag v0.1.0 && git push origin v0.1.0
+```
+
+PyPI never re-issues a version number, even after a delete, so a bad
+tag costs a version. To rehearse without spending one, run the workflow
+manually (`workflow_dispatch`): it builds and drafts the Release but
+skips publishing entirely.
+
+Upload needs no API token — the publish job authenticates by [Trusted
+Publishing](https://docs.pypi.org/trusted-publishers/), exchanging
+GitHub's OIDC identity for a short-lived credential. PyPI ties that
+trust to this repository *and this workflow's filename*, so renaming
+`release.yml` breaks publishing until the publisher is updated on PyPI.
+See
 [docs/configuration.md](docs/configuration.md#air-gapped-installation-offline-bundle).

@@ -1640,7 +1640,7 @@ def _warn_if_indexing_itself(config: AppConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the MCP server over stdio (uvx entry point)."""
+    """Run the MCP server over stdio (the ``corvidex-mcp`` entry point)."""
     if _parse_args(argv).init_config:
         raise SystemExit(_init_config())
     try:
