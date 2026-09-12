@@ -368,10 +368,29 @@ $ uv run --no-sync python tools/build_release.py --all    # both artifacts
 $ uv run --no-sync --with twine twine check dist/*        # PyPI readiness
 ```
 
-`dist/` holds the slim wheel + sdist meant for `twine upload`;
-`dist-offline/` holds the all-models bundle archive, which must never
-be uploaded to PyPI (its wheel is versioned `<version>+offline`, which
-PyPI rejects outright). Tagging `v*` runs
-`.github/workflows/release.yml`, which builds both and attaches them to
-a draft GitHub Release; publishing to PyPI stays a manual step. See
+`dist/` holds the slim wheel + sdist that go to PyPI; `dist-offline/`
+holds the all-models bundle archive, which must never be uploaded there
+(its wheel is versioned `<version>+offline`, which PyPI rejects
+outright).
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
+both artifacts, **publishes `dist/` to PyPI**, and attaches everything
+to a *draft* GitHub Release for a human to review and publish. So
+tagging is the irreversible step, not the Release:
+
+```console
+$ git tag v0.1.0 && git push origin v0.1.0
+```
+
+PyPI never re-issues a version number, even after a delete, so a bad
+tag costs a version. To rehearse without spending one, run the workflow
+manually (`workflow_dispatch`): it builds and drafts the Release but
+skips publishing entirely.
+
+Upload needs no API token — the publish job authenticates by [Trusted
+Publishing](https://docs.pypi.org/trusted-publishers/), exchanging
+GitHub's OIDC identity for a short-lived credential. PyPI ties that
+trust to this repository *and this workflow's filename*, so renaming
+`release.yml` breaks publishing until the publisher is updated on PyPI.
+See
 [docs/configuration.md](docs/configuration.md#air-gapped-installation-offline-bundle).

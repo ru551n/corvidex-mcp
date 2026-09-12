@@ -1,14 +1,23 @@
 name: Release
 
-# Builds both distribution artifacts and attaches them to a GitHub
-# Release. It deliberately does NOT publish to PyPI: uploading is a
-# manual `twine upload dist/*` by a maintainer, and no PyPI credential
-# is configured for, or reachable from, this workflow.
+# Builds both distribution artifacts, publishes the slim ones to PyPI,
+# and attaches everything to a draft GitHub Release.
 #
-#   dist/         slim wheel + sdist  -> what a maintainer uploads to PyPI
+#   dist/         slim wheel + sdist  -> published to PyPI
 #   dist-offline/ all-models bundle   -> Release asset only; its wheel is
 #                                       versioned <version>+offline, which
 #                                       PyPI refuses outright
+#
+# Publishing uses PyPI Trusted Publishing (OIDC): the publish job mints a
+# short-lived token from GitHub's identity provider, so no PyPI API token
+# is stored, rotated, or reachable from any other job here. PyPI binds
+# that trust to this exact repository and workflow *filename* — renaming
+# this file breaks publishing until the publisher is updated on PyPI.
+#
+# Only a tag push publishes. A workflow_dispatch run builds the artifacts
+# and drafts a Release so they can be inspected, but never uploads: a
+# version number is burned permanently on upload, and PyPI will not let
+# the same one be re-used even after a delete.
 on:
   push:
     tags: ["v*"]
@@ -66,6 +75,15 @@ jobs:
             exit 1
           fi
 
+      - name: Keep the PyPI artifacts for the publish job
+        # Only dist/ — the offline bundle is a Release asset and must
+        # never reach the job that talks to PyPI.
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pypi-dist
+          path: dist/
+          if-no-files-found: error
+
       - name: Summarize the artifact sizes
         run: |
           {
@@ -79,8 +97,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create the GitHub Release (draft)
-        # Always a draft: a human checks the assets and publishes, and
-        # uploading to PyPI is a separate, manual `twine upload dist/*`.
+        # Always a draft: a human checks the assets and publishes it.
         # `gh` is preinstalled on the runner, so no third-party action
         # and no extra credential is involved.
         env:
@@ -113,3 +130,47 @@ jobs:
             --title "$TAG" \
             --notes-file release-notes.md \
             dist/*.whl dist/*.tar.gz dist-offline/*.tar.gz
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    # Tag pushes only. A workflow_dispatch run is for inspecting the
+    # artifacts, and must not spend a version number.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Overrides the workflow-level `contents: write`: this job needs no
+    # repository write access, only the OIDC token PyPI verifies.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Fetch the PyPI artifacts built above
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: pypi-dist
+          path: dist
+
+      - name: Refuse to publish anything but the slim artifacts
+        # The build job already checks this, but that check cannot
+        # protect what this job actually uploads. An all-models wheel
+        # reaching PyPI is the one unrecoverable mistake here, so it is
+        # re-checked against the exact directory being published.
+        run: |
+          set -e
+          ls dist/*.whl dist/*.tar.gz >/dev/null
+          if ls dist/* | grep -q '+offline'; then
+            echo "::error::an +offline artifact reached the publish job"
+            exit 1
+          fi
+
+      - name: Publish
+        # Trusted Publishing: no token, no secret. Authenticates with the
+        # OIDC identity granted by `id-token: write` above.
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          # Fail loudly rather than silently skipping a version that is
+          # already on PyPI — a re-run of a tag should not look like a
+          # success when nothing was uploaded.
+          skip-existing: false
+          print-hash: true
