@@ -129,11 +129,25 @@ Requirements: [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥
 3.12, and Git. `vhdl_ls`/Veridian are optional (VHDL/Verilog files
 fall back to structural parsing without them). See
 [docs/configuration.md](docs/configuration.md#requirements) for the
-full platform matrix and air-gapped installs.
+full platform matrix, and
+[Installation](docs/configuration.md#installation) for the PyPI and
+air-gapped paths in full.
+
+On Apple Silicon, Python 3.14 needs macOS 14+ (every `onnxruntime`
+wheel for CPython 3.14 is tagged `macosx_14_0_arm64`); 3.12 and 3.13
+resolve to an older onnxruntime that still supports macOS 13.
 
 Register the server with your MCP client — no config file needed.
 
-Claude Code:
+Claude Code, from PyPI:
+
+```console
+$ claude mcp add corvidex-mcp -- uvx corvidex-mcp
+# or install it into the current environment:
+$ pip install corvidex-mcp
+```
+
+…or straight from this repository:
 
 ```console
 $ claude mcp add corvidex-mcp -- uvx --from git+ssh://git@github.com/ru551n/corvidex-mcp.git corvidex-mcp
@@ -145,8 +159,20 @@ version's docs):
 ```toml
 [mcp_servers.corvidex_mcp]
 command = "uvx"
-args = ["--from", "git+ssh://git@github.com/ru551n/corvidex-mcp.git", "corvidex-mcp"]
+args = ["corvidex-mcp"]
+# ...or from git: ["--from", "git+ssh://git@github.com/ru551n/corvidex-mcp.git", "corvidex-mcp"]
 ```
+
+The PyPI wheel is **slim** (1.3 MB): it downloads the embedding and
+reranker models (~0.86 GB) into its data directory on first run. For a
+host with no network at all there is a separate **offline bundle** —
+one 607.6 MB archive with all three models embedded in the wheel, a
+dependency wheelhouse, an installer, and a self-verification command.
+It is **not on PyPI**: PyPI's 100 MB per-file limit is not raised for
+bundled model weights, so the bundle is published as a
+[GitHub Release](https://github.com/ru551n/corvidex-mcp/releases) asset
+instead. See
+[Air-gapped installation](docs/configuration.md#air-gapped-installation-offline-bundle).
 
 That's it: **the server indexes the directory it is started in.**
 Since your MCP client normally spawns it with your project as the
@@ -331,4 +357,21 @@ src/corvidex_mcp/
                    code (tree-sitter), pipeline (incremental sync driver)
   retrieval.py     search service: fusion, language filter, source access
   server.py        FastMCP tools + startup + periodic sync + lock
+  verify_offline.py  `python -m corvidex_mcp.verify_offline`: index +
+                   search with every socket refused (offline bundles)
 ```
+
+### Releasing
+
+```console
+$ uv run --no-sync python tools/build_release.py --all    # both artifacts
+$ uv run --no-sync --with twine twine check dist/*        # PyPI readiness
+```
+
+`dist/` holds the slim wheel + sdist meant for `twine upload`;
+`dist-offline/` holds the all-models bundle archive, which must never
+be uploaded to PyPI (its wheel is versioned `<version>+offline`, which
+PyPI rejects outright). Tagging `v*` runs
+`.github/workflows/release.yml`, which builds both and attaches them to
+a draft GitHub Release; publishing to PyPI stays a manual step. See
+[docs/configuration.md](docs/configuration.md#air-gapped-installation-offline-bundle).

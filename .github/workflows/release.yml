@@ -1,0 +1,115 @@
+name: Release
+
+# Builds both distribution artifacts and attaches them to a GitHub
+# Release. It deliberately does NOT publish to PyPI: uploading is a
+# manual `twine upload dist/*` by a maintainer, and no PyPI credential
+# is configured for, or reachable from, this workflow.
+#
+#   dist/         slim wheel + sdist  -> what a maintainer uploads to PyPI
+#   dist-offline/ all-models bundle   -> Release asset only; its wheel is
+#                                       versioned <version>+offline, which
+#                                       PyPI refuses outright
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build slim artifacts + offline bundle
+    runs-on: ubuntu-latest
+    # The offline bundle downloads ~0.9 GB of model weights and packs a
+    # ~0.6 GB archive, so it is slower than a normal build job.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.1.0
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Cache the model weights between runs
+        uses: actions/cache@v6
+        with:
+          # tools/bundle_model.py's default download cache. Bump the key
+          # when the default models (config defaults) change.
+          path: ~/.cache/corvidex-models
+          key: corvidex-release-models-v1
+          restore-keys: corvidex-release-models-v1
+
+      - name: Build both artifacts
+        run: |
+          uv run --no-sync python tools/build_release.py --all \
+            --model-source ~/.cache/corvidex-models
+
+      - name: Check the PyPI artifacts
+        # dist/ holds only the slim wheel + sdist; the offline bundle is
+        # in dist-offline/, so this glob can never hand twine an archive
+        # it cannot parse.
+        run: uv run --no-sync --with twine twine check dist/*
+
+      - name: Refuse to release an offline wheel without its local version
+        # The one mistake that would matter: an all-models wheel that
+        # looks like the public release and could be uploaded to PyPI.
+        run: |
+          set -e
+          ls dist-offline/*.tar.gz >/dev/null
+          if ls dist/* | grep -q '+offline'; then
+            echo "::error::an +offline artifact leaked into dist/ (the PyPI directory)"
+            exit 1
+          fi
+
+      - name: Summarize the artifact sizes
+        run: |
+          {
+            echo "### Artifacts"
+            echo
+            echo '| Artifact | Size |'
+            echo '| --- | --- |'
+            for f in dist/* dist-offline/*; do
+              printf '| `%s` | %s |\n' "$f" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub Release (draft)
+        # Always a draft: a human checks the assets and publishes, and
+        # uploading to PyPI is a separate, manual `twine upload dist/*`.
+        # `gh` is preinstalled on the runner, so no third-party action
+        # and no extra credential is involved.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('untagged-{0}', github.run_id) }}
+        run: |
+          set -e
+          cat > release-notes.md <<'NOTES'
+          ## Install
+
+          ```console
+          pip install corvidex-mcp        # or: uvx corvidex-mcp
+          ```
+
+          ## Air-gapped hosts
+
+          Download the `*-offline-*.tar.gz` asset below: it embeds every
+          model in the wheel and ships a dependency wheelhouse, so the
+          target host downloads nothing at install or at run time. Unpack
+          it, run `./install.sh <venv>`, then verify with
+          `<venv>/bin/python -m corvidex_mcp.verify_offline`.
+
+          That bundle is **not on PyPI** and cannot be: PyPI's 100 MB
+          per-file limit is not raised for bundled model weights. Its
+          wheel is versioned `+offline` (a PEP 440 local version), which
+          PyPI rejects outright.
+          NOTES
+          gh release create "$TAG" \
+            --draft \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            dist/*.whl dist/*.tar.gz dist-offline/*.tar.gz

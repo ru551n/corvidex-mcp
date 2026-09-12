@@ -90,6 +90,7 @@ class EmbeddingProviders:
                 eb.rerank_model,
                 cache_dir=self._config.embed_cache_dir,
                 threads=eb.dense_threads,
+                offline_model_dir=bundled_model_dir(eb.rerank_model),
             )
         return self._reranker
 
