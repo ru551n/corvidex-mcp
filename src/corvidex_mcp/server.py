@@ -1102,6 +1102,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override veridian_path",
     )
     parser.add_argument(
+        "--vhdl-ls-libraries-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "override vhdl_ls_libraries_dir: the VHDL standard-library "
+            "sources vhdl_ls needs. A property of the vhdl_ls install rather "
+            "than of any one project (a 'cargo install'ed binary ships "
+            "without them and panics on every invocation), so it usually "
+            "belongs on the launcher command line, where it applies to every "
+            "workspace, rather than in a per-project .corvidex"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -1132,8 +1145,9 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
     The config file is selected by ``--config``, else ``CORVIDEX_MCP_CONFIG``,
     else the project-local ``.corvidex`` in the current directory (see
     :func:`corvidex_mcp.config.load_config`); ``--data-dir``/
-    ``--sync-interval``/``--vhdl-ls-path``/``--veridian-path``/
-    ``--log-level``/``--num-threads`` override the file's values.
+    ``--sync-interval``/``--vhdl-ls-path``/``--vhdl-ls-libraries-dir``/
+    ``--veridian-path``/``--log-level``/``--num-threads`` override the
+    file's values.
     """
     args = _parse_args(argv)
     config = load_config(
@@ -1166,6 +1180,7 @@ _CLI_SCALAR_OVERRIDES = (
     "sync_interval",
     "local_sync_interval",
     "vhdl_ls_path",
+    "vhdl_ls_libraries_dir",
     "veridian_path",
     "log_level",
 )

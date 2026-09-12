@@ -18,6 +18,14 @@ the project directory is indexed. Run `corvidex-mcp --init-config` to
 write a commented template when you want one. Select another file with
 the `CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH`
 flag; either always wins over `.corvidex`.
+The top-level scalar options also have command-line overrides
+(`--data-dir`, `--sync-interval`, `--local-sync-interval`,
+`--vhdl-ls-path`, `--vhdl-ls-libraries-dir`, `--veridian-path`,
+`--log-level`, `--no-index-cwd`, `--num-threads`); the command line
+wins. `--vhdl-ls-libraries-dir` in particular describes the *vhdl_ls
+install* rather than any one project (a `cargo install`ed vhdl_ls ships
+without its standard libraries and panics without them), so it belongs
+on the launcher command line, where it applies to every workspace.
 
 ### Project directory
 
@@ -42,10 +50,8 @@ leaves the cwd alone:
 When a launcher cannot be fixed, set `CORVIDEX_MCP_PROJECT_DIR` to the
 workspace root and it wins over the working directory. The server logs a
 warning if it ever auto-indexes its own source tree.
-The top-level scalar options also have command-line overrides
-(`--data-dir`, `--sync-interval`, `--local-sync-interval`,
-`--vhdl-ls-path`, `--veridian-path`, `--log-level`, `--no-index-cwd`,
-`--num-threads`); the command line wins.
+
+## Full example
 
 ```toml
 # data_dir = "~/.local/share/corvidex"  # one shared store for every project;
@@ -175,8 +181,9 @@ filesystem = true
   `CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag
   — either wins over `.corvidex`. The top-level scalar options also have
   command-line overrides (`--data-dir`, `--sync-interval`,
-  `--local-sync-interval`, `--vhdl-ls-path`, `--veridian-path`,
-  `--log-level`, `--no-index-cwd`); the command line wins.
+  `--local-sync-interval`, `--vhdl-ls-path`,
+  `--vhdl-ls-libraries-dir`, `--veridian-path`, `--log-level`,
+  `--no-index-cwd`); the command line wins.
 - **`url` or `path`** (exactly one): `url` is a remote Git repository,
   cloned and kept in sync by the server under `data_dir/repos`.
   `path` is a **local working repository** — your own checkout, indexed

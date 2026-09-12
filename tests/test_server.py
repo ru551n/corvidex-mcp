@@ -804,6 +804,19 @@ async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:
     assert cfg.repositories == []
 
 
+async def test_cli_vhdl_ls_libraries_dir_override(tmp_path: Path) -> None:
+    """The vhdl_ls standard-library path is a property of the vhdl_ls
+    install, not of a project, so it has to be settable on the launcher
+    command line — a per-project .corvidex cannot carry it to every
+    workspace."""
+    path = tmp_path / "config.toml"
+    path.write_text('vhdl_ls_libraries_dir = "/from/file"\n', encoding="utf-8")
+    cfg = config_from_args(
+        ["--config", str(path), "--vhdl-ls-libraries-dir", "/from/cli"]
+    )
+    assert cfg.vhdl_ls_libraries_dir == Path("/from/cli")
+
+
 async def test_init_config_writes_template_and_never_clobbers(
     tmp_path: Path, monkeypatch
 ) -> None:
