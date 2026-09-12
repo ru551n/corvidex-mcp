@@ -26,7 +26,10 @@ from corvidex_mcp.git_manager import GitManager
 from corvidex_mcp.indexing.pipeline import IndexPipeline
 from corvidex_mcp.lsp import build_analyzer_statuses
 from corvidex_mcp.navigation import (
+    _no_result_message,
+    _selected_name_at,
     _uri_to_path,
+    _validate_position,
     find_definition,
     find_references,
     find_symbol,
@@ -312,6 +315,93 @@ async def _sync_all(pipeline: IndexPipeline, config: AppConfig) -> None:
         await pipeline.sync_repository(cfg)
 
 
+# -- position validation and empty-result diagnosis (pure functions) ---------
+
+_CONV_CORE = [
+    "  bias_requant_inst : entity cnn_accel.cnn_accel_bias_requant",
+    "",
+    "  fifo_inst : entity work.asynchronous_fifo",
+]
+
+
+def test_validate_position_accepts_every_real_position() -> None:
+    _validate_position("a.vhd", _CONV_CORE, 0, 0)
+    _validate_position("a.vhd", _CONV_CORE, 0, len(_CONV_CORE[0]))  # end of line
+    _validate_position("a.vhd", _CONV_CORE, 1, 0)  # a blank line
+    _validate_position("a.vhd", _CONV_CORE, 2, 5)
+
+
+def test_validate_position_names_the_files_real_extent() -> None:
+    with pytest.raises(RetrievalError) as excinfo:
+        _validate_position("a.vhd", _CONV_CORE, 99999, 0)
+    message = str(excinfo.value)
+    assert "past the end of 'a.vhd'" in message
+    assert "3 lines" in message
+    assert "last addressable line is 2" in message
+
+
+def test_validate_position_rejects_negative_and_overlong_positions() -> None:
+    with pytest.raises(RetrievalError, match="must not be negative"):
+        _validate_position("a.vhd", _CONV_CORE, -1, 0)
+    with pytest.raises(RetrievalError, match="must not be negative"):
+        _validate_position("a.vhd", _CONV_CORE, 0, -1)
+    with pytest.raises(RetrievalError) as excinfo:
+        _validate_position("a.vhd", _CONV_CORE, 0, 500)
+    assert "past the end of line 0" in str(excinfo.value)
+    assert f"{len(_CONV_CORE[0])} characters long" in str(excinfo.value)
+    with pytest.raises(RetrievalError, match="is empty"):
+        _validate_position("a.vhd", [], 0, 0)
+
+
+def test_selected_name_at_picks_up_the_whole_dotted_name() -> None:
+    # Anywhere inside 'cnn_accel.cnn_accel_bias_requant' yields all of it.
+    assert _selected_name_at(_CONV_CORE, 0, 30) == "cnn_accel.cnn_accel_bias_requant"
+    assert _selected_name_at(_CONV_CORE, 0, 45) == "cnn_accel.cnn_accel_bias_requant"
+    assert _selected_name_at(_CONV_CORE, 0, 2) == "bias_requant_inst"
+    assert _selected_name_at(_CONV_CORE, 0, 0) == ""  # leading whitespace
+    assert _selected_name_at(_CONV_CORE, 1, 0) == ""  # blank line
+    assert _selected_name_at(_CONV_CORE, 99, 0) == ""
+
+
+def test_no_result_message_blames_the_library_for_a_qualified_name() -> None:
+    """The dominant real failure: a library-qualified instantiation that
+    no configured library can resolve. Saying only "No definition found"
+    makes a caller conclude the entity does not exist."""
+    out = _no_result_message("definition", _CONV_CORE, 0, 30)
+    assert out.startswith("No definition found at that position.")
+    assert "'cnn_accel.cnn_accel_bias_requant'" in out
+    assert "library-qualified" in out
+    assert "'cnn_accel'" in out
+    assert "vhdl_ls.toml" in out
+    assert "not a 'not declared' one" in out
+
+
+def test_no_result_message_treats_work_as_the_files_own_library() -> None:
+    out = _no_result_message("definition", _CONV_CORE, 2, 25)
+    assert "work.asynchronous_fifo" in out
+    # 'work' always resolves, so pointing at library config would mislead.
+    assert "library-qualified" not in out
+    assert "vhdl_ls.toml" not in out
+
+
+def test_no_result_message_calls_out_a_blank_line() -> None:
+    out = _no_result_message("hover information", _CONV_CORE, 1, 0)
+    assert out.startswith("No hover information found at that position.")
+    assert "Line 1 is blank" in out
+    assert "line 2 in an editor" in out
+
+
+def test_no_result_message_calls_out_a_position_off_any_identifier() -> None:
+    out = _no_result_message("references", _CONV_CORE, 0, 0)
+    assert "is not part of an identifier" in out
+
+
+def test_no_result_message_for_a_plain_unresolved_identifier() -> None:
+    out = _no_result_message("definition", _CONV_CORE, 0, 2)
+    assert "'bias_requant_inst'" in out
+    assert "vhdl_ls configuration does not declare" in out
+
+
 # -- error paths that never need a session -----------------------------------
 
 
@@ -375,7 +465,36 @@ async def test_find_definition_no_result(app) -> None:
     fake_app, pipeline, config = app
     await _sync_all(pipeline, config)
     out = await find_definition(fake_app, "hdl", "rtl/fifo.vhd", 0, 0)
-    assert out == "No definition found at that position."
+    assert out.startswith("No definition found at that position.")
+    # Not just the flat sentence: it names the symbol it looked at, so
+    # the caller can tell "not declared" from "wrong position".
+    assert "'entity'" in out
+
+
+async def test_find_definition_rejects_a_position_past_the_end_of_the_file(
+    app,
+) -> None:
+    """A position past EOF used to come back as the same flat "No
+    definition found at that position." as a genuinely undefined
+    symbol, so a caller concluded the symbol did not exist."""
+    fake_app, pipeline, config = app
+    await _sync_all(pipeline, config)
+    with pytest.raises(RetrievalError, match="past the end of"):
+        await find_definition(fake_app, "hdl", "rtl/fifo.vhd", 99999, 0)
+
+
+async def test_find_references_rejects_a_negative_position(app) -> None:
+    fake_app, pipeline, config = app
+    await _sync_all(pipeline, config)
+    with pytest.raises(RetrievalError, match="must not be negative"):
+        await find_references(fake_app, "hdl", "rtl/fifo.vhd", -1, 0)
+
+
+async def test_hover_info_rejects_a_character_past_the_end_of_the_line(app) -> None:
+    fake_app, pipeline, config = app
+    await _sync_all(pipeline, config)
+    with pytest.raises(RetrievalError, match="past the end of line 0"):
+        await hover_info(fake_app, "hdl", "rtl/fifo.vhd", 0, 500)
 
 
 async def test_find_references_include_and_exclude_declaration(app) -> None:
@@ -395,7 +514,7 @@ async def test_hover_info_plain_and_markup_and_none(app) -> None:
     assert await hover_info(fake_app, "hdl", "rtl/fifo.vhd", 0, 1) == "plain hover text"
     assert await hover_info(fake_app, "hdl", "rtl/fifo.vhd", 0, 2) == "**bold**"
     out = await hover_info(fake_app, "hdl", "rtl/fifo.vhd", 0, 0)
-    assert out == "No hover information at that position."
+    assert out.startswith("No hover information found at that position.")
 
 
 async def test_find_symbol_within_one_repository(app) -> None:
