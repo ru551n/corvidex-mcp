@@ -202,6 +202,42 @@ full-text, RRF-fused), `semantic` (embedding similarity only), or
 rendered as markdown with source attribution, score, language, and
 referenced identifiers; HDL content is fenced by language.
 
+#### What a result looks like
+
+Each hit quotes the matched chunk with a **1-based line-number gutter**
+(the same numbering `get_source` uses), capped at **40 lines**. When the
+chunk is longer, the last body line is the exact follow-up call for the
+rest — nothing has to be reconstructed by hand:
+
+```vhdl
+  595 | architecture rtl of fifo is
+  596 |   signal wr_ptr : unsigned(ADDR_W-1 downto 0);
+…
+… 158 more lines — get_source("common-ip", "rtl/fifo.vhd", 635, 792) for the full text
+```
+
+The displayed numbers are 1-based; `find_definition`, `find_references`
+and `hover_info` take **0-based** lines, so a line displayed as `N` is
+passed to them as `N - 1`.
+
+Two more things the response tells you:
+
+- `score` is the cross-encoder reranker's relevance in `0..1` when
+  reranking is available (comparable across queries) — otherwise the
+  store's rank-fused score, which is only comparable within one
+  response. When the best reranked hit scores below ~0.05 the response
+  opens with a line saying so and points at `find_symbol` (exact names)
+  or a rephrased query, instead of silently handing back eight junk
+  hits.
+- A "more matches exist beyond `limit`" note is appended only when
+  further candidates really were found — never merely because the page
+  is full.
+
+Results nested inside a better-ranked result of the same file (a
+process inside the architecture that contains it) are dropped, so one
+response never quotes the same lines twice and the freed slot goes to a
+different file.
+
 Example agent flow:
 
 1. `search_knowledge("asynchronous reset conventions")` → a docs

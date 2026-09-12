@@ -74,7 +74,13 @@ cross-referencing key between domains.
    identifier across docs ↔ RTL ↔ testbench (code snippets in standard
    sections export their identifiers too).
 5. **Read the exact source before copying.** A search result is a
-   chunk (a construct/section/function), not the whole file. Use
+   chunk (a construct/section/function), not the whole file, and it is
+   quoted at most 40 lines deep with a 1-based line-number gutter. When
+   a chunk was longer, the last body line is the exact call for the
+   rest — e.g.
+   `… 158 more lines — get_source("common-ip", "rtl/fifo.vhd", 635, 792) for the full text`
+   — run it verbatim rather than re-deriving the arguments. Otherwise
+   use
 `get_source(repository, file, start_line, end_line)` with the
     result's source line to fetch the full construct or file, exactly as
     indexed at the result's commit. For the standards file,
@@ -96,7 +102,11 @@ cross-referencing key between domains.
    `hover_info(...)` for the analyzer's own signature/type text, and
    `find_symbol(query, repository?)` for an exact name-based lookup
    across one or every repository. `line`/`character` are 0-based (LSP
-   convention); results render as 1-based `path:line:col`.
+   convention); results render as 1-based `path:line:col`. Search
+   results and `get_source` print 1-based line numbers in their gutter,
+   so a line displayed as `N` is passed to these tools as `N - 1` — read
+   the number off the gutter instead of counting from the `source:`
+   range.
 
 ## Query patterns that work well
 
@@ -115,12 +125,26 @@ cross-referencing key between domains.
 ## Notes and limits
 
 - Results are chunks, not whole files: `content` is the
-  construct/section itself, self-contained by design; line numbers
-  refer to the repository file at the shown commit.
-- The `score` line is the hybrid RRF relevance; repository priority
-  (and the high coding-standards priority) adds a small bounded bonus
-  that reorders within a relevance tier but never promotes a weak
-  chunk above strong matches.
+  construct/section itself, self-contained by design; the gutter's
+  1-based line numbers refer to the repository file at the shown
+  commit. Only the first 40 lines of a chunk are quoted — the head,
+  where entity headers, port lists and process declarations live — and
+  an elided body ends with the `get_source` call for the remainder.
+- A chunk nested inside a better-ranked chunk of the same file (a
+  process inside its architecture) is dropped from the response, so
+  the same lines are never quoted twice.
+- The `score` line is the cross-encoder reranker's relevance in `0..1`
+  when reranking is available (comparable across queries), otherwise
+  the hybrid RRF/cosine score, which is only comparable within one
+  response; repository priority (and the high coding-standards
+  priority) adds a small bounded bonus that reorders within a relevance
+  tier but never promotes a weak chunk above strong matches. A
+  `Note: no strong match` first line means the best reranked hit scored
+  below ~0.05 — take it at face value: use `find_symbol` for an exact
+  name, or rephrase, instead of mining the listed hits.
+- A "more matches exist beyond `limit`" note is appended only when
+  further candidates really existed; no note means the response is
+  everything the index has for that query.
 - The index updates automatically (default every 300 s; local working
   repos every 10 s); you normally never need to sync manually.
 - `search_*` `limit` defaults to 8 (10 for `search_knowledge`).
