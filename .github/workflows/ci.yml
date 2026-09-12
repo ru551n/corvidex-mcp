@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Callable so the release workflow can gate publishing on this exact
+  # suite rather than a copy of it that could drift out of step with it.
+  workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Not shared with the caller's group: a release run must never cancel,
+  # or be cancelled by, the CI run for the same ref.
+  group: ci-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:

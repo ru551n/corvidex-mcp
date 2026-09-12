@@ -14,6 +14,10 @@ name: Release
 # that trust to this exact repository and workflow *filename* — renaming
 # this file breaks publishing until the publisher is updated on PyPI.
 #
+# Nothing is built, drafted, or published unless the full CI suite passes
+# on the tagged commit. ci.yml is reused via workflow_call rather than
+# copied, so the gate cannot drift away from the tests it claims to run.
+#
 # Only a tag push publishes. A workflow_dispatch run builds the artifacts
 # and drafts a Release so they can be inspected, but never uploads: a
 # version number is burned permanently on upload, and PyPI will not let
@@ -31,8 +35,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    # The full CI suite — lint, type-check, quality gate, and the whole
+    # OS/Python matrix — run against the tagged commit. ci.yml itself is
+    # reused rather than copied: a duplicated matrix drifts, and a
+    # release gated on a stale copy of the tests is worse than no gate.
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build slim artifacts + offline bundle
+    # Gated too, not just the publish job: a red suite should not leave a
+    # draft Release full of assets sitting there looking releasable.
+    # Serialising costs a few minutes on a rare operation and buys "if
+    # anything is red, nothing exists".
+    needs: test
     runs-on: ubuntu-latest
     # The offline bundle downloads ~0.9 GB of model weights and packs a
     # ~0.6 GB archive, so it is slower than a normal build job.
@@ -133,10 +150,13 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: build
+    # Both gates. `needs` alone is not enough: GitHub skips a job whose
+    # dependency failed, but an `if:` re-enables it, so the success()
+    # check below keeps this job from ever running on a red suite.
+    needs: [test, build]
     # Tag pushes only. A workflow_dispatch run is for inspecting the
     # artifacts, and must not spend a version number.
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && success()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Overrides the workflow-level `contents: write`: this job needs no

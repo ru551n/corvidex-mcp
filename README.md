@@ -373,10 +373,14 @@ holds the all-models bundle archive, which must never be uploaded there
 (its wheel is versioned `<version>+offline`, which PyPI rejects
 outright).
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
-both artifacts, **publishes `dist/` to PyPI**, and attaches everything
-to a *draft* GitHub Release for a human to review and publish. So
-tagging is the irreversible step, not the Release:
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which first
+runs the **entire CI suite** against the tagged commit — lint,
+type-check, quality gate and the full OS/Python matrix, by reusing
+`ci.yml` rather than copying it — and only then builds both artifacts,
+**publishes `dist/` to PyPI**, and attaches everything to a *draft*
+GitHub Release for a human to review and publish. A single red check
+means nothing is built, drafted or uploaded at all. So tagging is the
+irreversible step, not the Release:
 
 ```console
 $ git tag v0.1.0 && git push origin v0.1.0
