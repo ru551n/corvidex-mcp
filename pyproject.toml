@@ -86,6 +86,10 @@ corvidex_mcp = [
 [dependency-groups]
 dev = [
     "mypy",
+    # tools/build_release.py resolves the exported requirements'
+    # environment markers per offline target itself (pip only ever
+    # evaluates them for the interpreter it is running on).
+    "packaging",
     "pytest",
     "pytest-asyncio",
     "ruff",
