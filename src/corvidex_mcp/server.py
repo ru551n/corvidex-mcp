@@ -1,18 +1,31 @@
 """MCP server: RTL-centric RAG and indexing over configured Git repositories.
 
-Exposes ten tools to coding agents:
+Exposes thirteen tools to coding agents, in two families.
 
-- ``search_hdl`` / ``search_vhdl`` / ``search_docs`` / ``search_code`` —
-  hybrid
+Fuzzy retrieval (expensive, answers "I don't know the name"):
+
+- ``search_hdl`` / ``search_docs`` / ``search_code`` — hybrid
   (dense + full-text) semantic search in one domain, with optional
-  repository/category filters and identifier cross-references;
+  repository/language filters and identifier cross-references;
 - ``search_knowledge`` — the same search fused across all three
-  domains (RRF over the per-domain rank lists);
+  domains (RRF over the per-domain rank lists).
+
+Exact lookup (cheap, answers "I know the name or the position" — see
+:mod:`corvidex_mcp.navigation`):
+
+- ``find_symbol`` — the language server's own workspace symbol lookup
+  by name (the cheapest way to locate a known identifier);
+- ``find_definition`` / ``find_references`` / ``hover_info`` — LSP
+  go-to-definition / find-references / hover at a known position.
+
+Plus exact reads and maintenance:
+
 - ``get_source`` — exact file content (or a line range) from the
   synced working tree, with repository/commit attribution;
 - ``repository_files`` — list the indexed files of a repository
   (glob-filterable), i.e. the candidate paths for ``get_source``;
-- ``repository_status`` — what is indexed and any sync errors;
+- ``repository_status`` — what is indexed, what is syncing, and any
+  sync errors;
 - ``sync_repositories`` / ``reindex_repository`` — maintenance
   (incremental sync of selected repos, full reindex of one).
 
@@ -38,7 +51,7 @@ import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 try:
     import fcntl
@@ -52,7 +65,7 @@ except ModuleNotFoundError:  # pragma: no cover - POSIX
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from .config import (
     CODING_STANDARDS_REPO,
@@ -71,6 +84,7 @@ from .indexing import IndexPipeline
 from .logging_setup import setup_logging
 from .lsp import AnalyzerStatus, build_analyzer_statuses
 from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResults
+from .navigation import REFERENCE_LIMIT
 from .navigation import find_definition as _find_definition
 from .navigation import find_references as _find_references
 from .navigation import find_symbol as _find_symbol
@@ -89,49 +103,55 @@ _LOCK_HANDLE: object | None = None
 MCP_NAME = "corvidex_mcp"
 
 INSTRUCTIONS = (
-    "Semantic search over an organization's HDL code (VHDL, Verilog, "
-    "SystemVerilog), HDL-related documentation, and general source code "
-    "(C/C++, Python, ...). Use search_hdl for reference HDL "
-    "implementations (entities/modules, architectures, processes/always "
-    "blocks, packages, functions, tasks, reset/clock/FSM patterns) with "
-    "an optional language filter ('vhdl' | 'verilog' | "
-    "'systemverilog'); search_vhdl is the VHDL-only form of search_hdl. "
-    "search_docs for standards and design documentation, search_code for "
-    "general C/C++/Python code, and search_knowledge when the answer may "
-    "span any of them. Pass `symbols` to find every chunk that references "
-    "specific identifiers (cross-referencing; works across HDL "
-    "languages). Every search tool takes a `mode` strategy: 'hybrid' "
-    "(default; semantic + full-text, RRF-fused), 'semantic' (embedding "
-    "similarity only), or 'lexical' (full-text match only). Use "
-    "get_source for the full text of a known file (exact "
-    "lines, exact commit). Every result carries source attribution "
-    "(repository, file, line range, commit, language) and quotes at "
-    "most 40 lines of the matched chunk; when more were elided the "
-    "last body line is the exact get_source call that returns them. "
-    "Quoted lines carry a 1-based line-number gutter (same numbering "
-    "get_source uses), while find_definition/find_references/hover_info "
-    "take 0-based lines — pass N-1 for a line displayed as N. `score` "
-    "is the cross-encoder reranker's relevance in 0-1 when reranking is "
-    "available (comparable across queries; below ~0.05 means no real "
-    "match and the search says so), otherwise the store's rank-fused "
-    "score, which is only comparable within one response. For exact, "
-    "compiler-backed navigation (not similarity search) once a symbol's "
-    "location is already known, use find_definition, find_references, "
-    "and hover_info (LSP go-to-definition/find-references/hover, backed "
-    "by vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog; "
-    "positions are 0-based) and find_symbol (exact workspace "
-    "symbol-name search, unlike search_hdl's semantic matching). Use "
-    "repository_status to see what is indexed and whether a sync failed; "
-    "it also reports the HDL analyzer status (vhdl_ls / Veridian). "
-    "sync_repositories to force an update, reindex_repository to rebuild "
-    "one repository's index. When a coding-standards file is "
-    "configured it is indexed as the 'coding-standards' "
-    "pseudo-repository with a high retrieval priority: search with "
-    "repository='coding-standards' to restrict to it. A search result "
-    "may start with a 'Note: ... still indexing' line when a repository "
-    "has not finished its initial sync yet (or is being resynced): "
-    "results may be thin or empty in that case — wait a few seconds and "
-    "retry rather than concluding nothing exists."
+    "WHAT THIS IS. An index of the organization's HDL (VHDL, Verilog, "
+    "SystemVerilog), design documentation and coding standards, and "
+    "general source code (C/C++, Python, ...) — including repositories "
+    "outside the working tree, every result attributed to a repository, "
+    "file, line range and commit. Prefer it over reading/grepping the "
+    "working tree when the answer may live in another repository, when "
+    "the question is conceptual rather than a literal string, or when "
+    "convention is the answer (a configured coding-standards file is "
+    "indexed as the 'coding-standards' pseudo-repository at high "
+    "priority). grep/Read stay better for a literal string in a file "
+    "you already have open.\n"
+    "ROUTING, cheapest and most exact first. (1) Exact identifier, want "
+    "its declaration: find_symbol. (2) Known file:line:character, want "
+    "the declaration, the use sites or the type: find_definition, "
+    "find_references, hover_info (LSP-backed; positions 0-based, "
+    "results rendered 1-based as path:line:col). Those four are exact "
+    "and cost ~100-400 tokens. (3) A concept, a natural-language "
+    "question, or no name at all: search_hdl / search_docs / "
+    "search_code, or search_knowledge when the question spans docs + "
+    "RTL + tests. Every search hit returns a whole indexed construct, "
+    "so a search commonly costs one to two orders of magnitude more "
+    "than a navigation call and answers less precisely — never search "
+    "for an identifier you already know. (4) Known file, want its text: "
+    "get_source, not a search. (5) Unknown path: repository_files — "
+    "don't guess.\n"
+    "RESULTS. A search hit quotes at most 40 lines of the matched "
+    "chunk; when more were elided the last body line is the exact "
+    "get_source call that returns them. Quoted lines carry a 1-based "
+    "line-number gutter (the same numbering get_source uses), while "
+    "find_definition/find_references/hover_info take 0-based lines — "
+    "pass N-1 for a line displayed as N. `score` is the cross-encoder "
+    "reranker's relevance in 0-1 when reranking is available "
+    "(comparable across queries; below ~0.05 means no real match and "
+    "the search says so), otherwise the store's rank-fused score, "
+    "which is only comparable within one response.\n"
+    "CAVEATS. `symbols` restricts a search to chunks referencing given "
+    "identifiers: the key for tracing one name across docs, RTL and "
+    "testbenches, and it works across HDL languages. `mode` is 'hybrid' "
+    "(default), 'semantic', or 'lexical' (full-text only; the only mode "
+    "needing no embedding model). repository_status is the source of "
+    "truth for repository names, for whether a sync is in progress or "
+    "has failed, and for analyzer (vhdl_ls / Veridian) status; a "
+    "zero-config repository name carries a hash suffix (e.g. "
+    "'vhdl-ai-test-582e8509'), so read it there rather than guessing. A "
+    "search result may open with a 'Note:' line naming repositories "
+    "'currently syncing' or 'not yet indexed': results stay thin until "
+    "that finishes, so retry instead of concluding nothing exists. "
+    "sync_repositories and reindex_repository exist for repair; the "
+    "index syncs itself."
 )
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True)
@@ -139,6 +159,148 @@ _READ_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
 
 DEFAULT_LIMIT = 8
 KNOWLEDGE_LIMIT = 10
+
+# -- parameter descriptions ----------------------------------------------------
+#
+# ``tools/list`` shows a parameter as a bare name and type unless the
+# annotation carries a pydantic Field description, so everything an
+# agent can learn about an argument without calling the tool has to live
+# here (the docstring alone is prose it cannot map onto arguments).
+# Shared across tools where the meaning is genuinely identical.
+
+QueryArg = Annotated[
+    str,
+    Field(
+        description=(
+            "What to search for, in the words the code or docs would use "
+            "('handshake on a full FIFO', 'asynchronous reset "
+            "convention'). Natural language and identifier fragments both "
+            "work. If you already know the exact identifier, call "
+            "find_symbol instead — it is exact and far cheaper."
+        )
+    ),
+]
+
+LimitArg = Annotated[
+    int,
+    Field(
+        description=(
+            "Maximum number of results (default 8; search_knowledge "
+            "defaults to 10). Each result is a whole construct or "
+            "section, so raising this costs real tokens — raise it only "
+            "after a truncation note says more matches exist."
+        )
+    ),
+]
+
+KnowledgeLimitArg = Annotated[
+    int,
+    Field(
+        description=(
+            "Maximum number of results (default 10 here, 8 for the "
+            "single-domain search tools) shared across all three domains "
+            "after the RRF fusion."
+        )
+    ),
+]
+
+RepositoryFilterArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Restrict the search to one repository by its exact name "
+            "(default: every configured repository). Names come from "
+            "repository_status — in zero-config mode a name carries a "
+            "hash suffix (e.g. 'vhdl-ai-test-582e8509'), so never guess "
+            "one. 'coding-standards' restricts to the configured "
+            "coding-standards file."
+        )
+    ),
+]
+
+SymbolsArg = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Restrict results to chunks that reference these exact "
+            "identifiers, e.g. ['FIFO_DEPTH'] (default: no identifier "
+            "restriction). This is the cross-domain tracing key: the same "
+            "name matches in RTL, testbenches, docs and C code, and "
+            "across HDL languages. Use it to follow one signal/generic/"
+            "constant through the system; drop it for conceptual queries."
+        )
+    ),
+]
+
+ModeArg = Annotated[
+    str,
+    Field(
+        description=(
+            "Search strategy. 'hybrid' (default) fuses embedding "
+            "similarity with full-text match and is right for almost "
+            "everything. 'semantic' is embeddings only — for a paraphrase "
+            "that shares no vocabulary with the code. 'lexical' is "
+            "full-text only — exact words, spellings and error strings, "
+            "and the only mode that needs no embedding model (so it still "
+            "works when repository_status reports one unavailable)."
+        )
+    ),
+]
+
+LanguageArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Restrict to one HDL language: 'vhdl', 'verilog' or "
+            "'systemverilog' (default: all three, which share one index). "
+            "Use it only when the other languages would be noise — a "
+            "mixed-language design is usually best searched whole."
+        )
+    ),
+]
+
+RepositoryArg = Annotated[
+    str,
+    Field(
+        description=(
+            "Repository name, exactly as repository_status reports it "
+            "(zero-config names carry a hash suffix, e.g. "
+            "'vhdl-ai-test-582e8509')."
+        )
+    ),
+]
+
+FileArg = Annotated[
+    str,
+    Field(
+        description=(
+            "Repository-relative path, as printed on a search result's "
+            "source line or by repository_files. Never an absolute path, "
+            "and never guessed — call repository_files if unsure."
+        )
+    ),
+]
+
+LineArg = Annotated[
+    int,
+    Field(
+        description=(
+            "0-BASED line of the symbol (LSP convention): the first line "
+            "of a file is 0, and a line displayed as N in a 1-based "
+            "listing is passed here as N-1."
+        )
+    ),
+]
+
+CharacterArg = Annotated[
+    int,
+    Field(
+        description=(
+            "0-BASED column of the symbol on that line: point at the "
+            "identifier itself, not at the start of the line."
+        )
+    ),
+]
 
 
 def _local_poll_done(task: asyncio.Task[None], name: str, in_flight: set[str]) -> None:
@@ -323,9 +485,7 @@ class VhdlRagApp:
         if self.config.coding_standards is not None and (
             wanted is None or CODING_STANDARDS_REPO in wanted
         ):
-            report = await sync_coding_standards(
-                self.config, self.providers, self.store, self.states
-            )
+            report = await self._tracked_standards_sync()
             if report is not None:
                 reports.append(report)
         return reports
@@ -335,9 +495,7 @@ class VhdlRagApp:
         if repository == CODING_STANDARDS_REPO:
             if self.config.coding_standards is None:
                 raise RetrievalError("no coding_standards file is configured")
-            report = await sync_coding_standards(
-                self.config, self.providers, self.store, self.states
-            )
+            report = await self._tracked_standards_sync()
             if report is None:  # only when unconfigured; guarded above
                 raise RetrievalError("no coding_standards file is configured")
             return report
@@ -361,6 +519,20 @@ class VhdlRagApp:
             await self.pipeline.sync_repository(cfg)
         finally:
             self._syncing.discard(cfg.name)
+
+    async def _tracked_standards_sync(self) -> dict[str, str] | None:
+        """Run ``sync_coding_standards`` while marking the
+        coding-standards pseudo-repository as currently syncing, so
+        ``indexing_note``/``sync_state`` report it like any other
+        repository (it fails permanently when the configured file is
+        missing, which must not read as an in-progress index)."""
+        self._syncing.add(CODING_STANDARDS_REPO)
+        try:
+            return await sync_coding_standards(
+                self.config, self.providers, self.store, self.states
+            )
+        finally:
+            self._syncing.discard(CODING_STANDARDS_REPO)
 
     async def _tracked_reindex(self, cfg: RepositoryConfig) -> None:
         """Run ``pipeline.reindex_repository`` while marking ``cfg.name`` as
@@ -418,6 +590,48 @@ class VhdlRagApp:
             "Note: " + "; ".join(parts) + ". Results may be thin or "
             "incomplete; try again shortly."
         )
+
+    def sync_state(
+        self, repository: str, indexed_commit: str | None, last_sync_error: str | None
+    ) -> str:
+        """One line saying whether ``repository`` is syncing *right now*,
+        has permanently failed, or is idle — for ``repository_status``.
+
+        Without it an initial index (minutes, for a large repository)
+        looks exactly like a broken one: "indexed: never, synced: never,
+        files: 0", with chunk counts quietly growing between calls and
+        nothing anywhere saying "in progress". And a repository whose
+        sync fails every cycle for a permanent reason (a missing
+        coding-standards file, a ref that does not resolve) looks the
+        same again, because a retry is scheduled forever. The caller
+        needs to tell "wait and retry" from "fix something".
+        """
+        if repository in self._syncing:
+            if indexed_commit is None:
+                return (
+                    "IN PROGRESS — initial index running; the counts below "
+                    "grow as it proceeds and searches stay thin until it "
+                    "finishes. Retry in a few seconds."
+                )
+            return (
+                "IN PROGRESS — resync running; the previously indexed "
+                "commit below stays queryable meanwhile"
+            )
+        retry = f"retried every {self.config.sync_interval}s"
+        if last_sync_error is not None:
+            if indexed_commit is None:
+                return (
+                    f"FAILED — nothing has ever been indexed, and the {retry} "
+                    "retry will keep failing until the cause under 'last "
+                    "error' is fixed (this is not an in-progress sync)"
+                )
+            return (
+                f"FAILED — serving the last good index below; {retry} (see "
+                "'last error')"
+            )
+        if indexed_commit is None:
+            return "pending — queued for the next sync cycle, nothing indexed yet"
+        return "idle — up to date"
 
     def drop_unconfigured_repositories(self) -> list[str]:
         """Drop index chunks and state for repos removed from the config
@@ -601,32 +815,32 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def search_hdl(
-        query: str,
-        limit: int = DEFAULT_LIMIT,
-        repository: str | None = None,
-        symbols: list[str] | None = None,
-        language: str | None = None,
-        mode: str = "hybrid",
+        query: QueryArg,
+        limit: LimitArg = DEFAULT_LIMIT,
+        repository: RepositoryFilterArg = None,
+        symbols: SymbolsArg = None,
+        language: LanguageArg = None,
+        mode: ModeArg = "hybrid",
     ) -> str:
-        """Search HDL source — VHDL, Verilog, and SystemVerilog share one
-        index: entities/modules (design units), architectures, processes
-        and always blocks, packages, functions, tasks. Semantic +
-        exact-identifier hybrid search. `language` restricts results to
-        one language ('vhdl' | 'verilog' | 'systemverilog'); omit it to
-        search all HDL. `symbols` restricts to chunks referencing the
-        given identifiers (e.g. ["FIFO_DEPTH"]) — cross-referencing
-        works across HDL languages. `repository` restricts to one
-        repository name. `mode` selects the search strategy: 'hybrid'
-        (default; semantic + full-text), 'semantic' (embedding
-        similarity only), or 'lexical' (full-text match only). Each hit quotes at
-        most 40 lines of the matched chunk, with a 1-based line-number
-        gutter; an elided body ends with the exact get_source call for
-        the rest. The navigation tools take 0-based lines, so pass N-1
-        for a line displayed as N. `score` is the reranker's
-        cross-encoder relevance in 0-1 when reranking is available (a
-        top score below ~0.05 is reported as no real match), else the
-        store's rank-fused score, comparable only within one
-        response."""
+        """Concept-level search of indexed HDL (VHDL, Verilog and
+        SystemVerilog share one index: entities/modules, architectures,
+        processes and always blocks, packages, functions, tasks).
+
+        Use it when you do NOT know the name — "how is X done here",
+        "find an example of Y" — or when the answer may be in a
+        repository that is not in the working tree. If you DO know the
+        identifier, call find_symbol instead: it is exact and typically
+        two orders of magnitude cheaper, because each hit here returns a
+        whole indexed construct. If you already know the file, call
+        get_source, not this.
+
+        Each hit quotes at most 40 lines of the matched chunk with a
+        1-based line-number gutter, ending in the exact get_source call
+        for anything elided; the navigation tools take 0-based lines, so
+        pass N-1 for a line displayed as N. `score` is cross-encoder
+        relevance in 0-1 when reranking is available (a top score below
+        ~0.05 is reported as no real match), else a rank-fused score
+        comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
                 CollectionName.HDL,
@@ -644,59 +858,29 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
-    async def search_vhdl(
-        query: str,
-        limit: int = DEFAULT_LIMIT,
-        repository: str | None = None,
-        symbols: list[str] | None = None,
-        mode: str = "hybrid",
-    ) -> str:
-        """Back-compat alias for search_hdl(language="vhdl"). Prefer
-        search_hdl directly — it covers VHDL plus Verilog/SystemVerilog and
-        takes the same `query`/`limit`/`repository`/`symbols`/`mode`
-        parameters (see its docstring for full parameter docs); this form
-        is kept only for backward compatibility and has no advantage over
-        it. Result shape is
-        search_hdl's: at most 40 quoted lines per hit with a 1-based
-        line-number gutter (the navigation tools take 0-based lines:
-        pass N-1 for a displayed N), an exact get_source call for
-        anything elided, and a `score` that is cross-encoder relevance
-        in 0-1 when reranking is available, else a rank-fused score
-        comparable only within one response."""
-        return await _search(
-            lambda: retrieval.search(
-                CollectionName.HDL,
-                query,
-                limit,
-                repository,
-                tuple(symbols) if symbols else None,
-                "vhdl",
-                mode=mode,
-            ),
-            "No VHDL results. Try a broader query, or check repository_status.",
-            repository,
-        )
-
-    @mcp.tool(annotations=_READ_ONLY)
-    @_handle_errors
     async def search_docs(
-        query: str,
-        limit: int = DEFAULT_LIMIT,
-        repository: str | None = None,
-        symbols: list[str] | None = None,
-        mode: str = "hybrid",
+        query: QueryArg,
+        limit: LimitArg = DEFAULT_LIMIT,
+        repository: RepositoryFilterArg = None,
+        symbols: SymbolsArg = None,
+        mode: ModeArg = "hybrid",
     ) -> str:
-        """Search VHDL-related documentation: coding standards, design
-        guides, conventions (one result per section). `symbols` matches
-        identifiers referenced in the section's code snippets. `mode`
-        selects the search strategy: 'hybrid' (default; semantic +
-        full-text), 'semantic' (embedding similarity only), or 'lexical'
-        (full-text match only). Result shape is
-        search_hdl's: at most 40 quoted lines per hit with a 1-based
-        line-number gutter (the navigation tools take 0-based lines:
-        pass N-1 for a displayed N), an exact get_source call for
-        anything elided, and a `score` that is cross-encoder relevance
-        in 0-1 when reranking is available, else a rank-fused score
+        """Concept-level search of design documentation and coding
+        standards, one result per section.
+
+        Use it for "what is our convention for X", "what does the
+        standard say about Y" — the configured coding-standards file is
+        indexed here at high priority, and repository='coding-standards'
+        restricts to it. Use search_hdl when the answer is RTL and
+        search_knowledge when a requirement in the docs has to be
+        followed into RTL and tests.
+
+        Each hit quotes at most 40 lines of the matched chunk with a
+        1-based line-number gutter, ending in the exact get_source call
+        for anything elided; the navigation tools take 0-based lines, so
+        pass N-1 for a line displayed as N. `score` is cross-encoder
+        relevance in 0-1 when reranking is available (a top score below
+        ~0.05 is reported as no real match), else a rank-fused score
         comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
@@ -715,23 +899,28 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def search_code(
-        query: str,
-        limit: int = DEFAULT_LIMIT,
-        repository: str | None = None,
-        symbols: list[str] | None = None,
-        mode: str = "hybrid",
+        query: QueryArg,
+        limit: LimitArg = DEFAULT_LIMIT,
+        repository: RepositoryFilterArg = None,
+        symbols: SymbolsArg = None,
+        mode: ModeArg = "hybrid",
     ) -> str:
-        """Search general source code (C/C++, Python, ...): one result per
-        function/class. `symbols` matches identifiers referenced in the
-        unit (cross-reference to VHDL signal/port names, etc.). `mode`
-        selects the search strategy: 'hybrid' (default; semantic +
-        full-text), 'semantic' (embedding similarity only), or 'lexical'
-        (full-text match only). Result shape is
-        search_hdl's: at most 40 quoted lines per hit with a 1-based
-        line-number gutter (the navigation tools take 0-based lines:
-        pass N-1 for a displayed N), an exact get_source call for
-        anything elided, and a `score` that is cross-encoder relevance
-        in 0-1 when reranking is available, else a rank-fused score
+        """Concept-level search of general, non-HDL source (C/C++,
+        Python, ...), one result per function/class.
+
+        Use it for the software side of a design — drivers, models,
+        build and test scripts — or to follow an HDL identifier (a
+        register name, a generic) into the software that drives it, via
+        `symbols`. Use search_hdl for RTL, search_docs for specs, and
+        plain grep/Read when the file is in the working tree and you
+        want a literal string.
+
+        Each hit quotes at most 40 lines of the matched chunk with a
+        1-based line-number gutter, ending in the exact get_source call
+        for anything elided; the navigation tools take 0-based lines, so
+        pass N-1 for a line displayed as N. `score` is cross-encoder
+        relevance in 0-1 when reranking is available (a top score below
+        ~0.05 is reported as no real match), else a rank-fused score
         comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
@@ -749,24 +938,27 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def search_knowledge(
-        query: str,
-        limit: int = KNOWLEDGE_LIMIT,
-        repository: str | None = None,
-        symbols: list[str] | None = None,
-        mode: str = "hybrid",
+        query: QueryArg,
+        limit: KnowledgeLimitArg = KNOWLEDGE_LIMIT,
+        repository: RepositoryFilterArg = None,
+        symbols: SymbolsArg = None,
+        mode: ModeArg = "hybrid",
     ) -> str:
-        """Search ALL domains (VHDL, documentation, code) at once, fused
-        with RRF so the domains interleave fairly. Use when the question
-        may span domains (e.g. a design requirement in the docs
-        implemented in VHDL and tested in C). `mode` selects the search
-        strategy: 'hybrid' (default; semantic + full-text), 'semantic'
-        (embedding similarity only), or 'lexical' (full-text match
-        only). Result shape is
-        search_hdl's: at most 40 quoted lines per hit with a 1-based
-        line-number gutter (the navigation tools take 0-based lines:
-        pass N-1 for a displayed N), an exact get_source call for
-        anything elided, and a `score` that is cross-encoder relevance
-        in 0-1 when reranking is available, else a rank-fused score
+        """Cross-domain search: HDL, documentation and general code at
+        once, RRF-fused so the domains interleave fairly.
+
+        Use it when the question spans them — a requirement stated in the
+        docs, implemented in RTL and exercised by a testbench or C model
+        — or when you cannot tell which domain holds the answer. When the
+        domain is obvious, the single-domain tool is cheaper and
+        sharper. `limit` defaults to 10 here (8 elsewhere).
+
+        Each hit quotes at most 40 lines of the matched chunk with a
+        1-based line-number gutter, ending in the exact get_source call
+        for anything elided; the navigation tools take 0-based lines, so
+        pass N-1 for a line displayed as N. `score` is cross-encoder
+        relevance in 0-1 when reranking is available (a top score below
+        ~0.05 is reported as no real match), else a rank-fused score
         comparable only within one response."""
         return await _search(
             lambda: retrieval.search_knowledge(
@@ -784,33 +976,79 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def get_source(
-        repository: str,
-        file: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
+        repository: RepositoryArg,
+        file: FileArg,
+        start_line: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "First line to return, 1-BASED and inclusive "
+                    "(default: the start of the file). Use a search "
+                    "result's or navigation hit's line range to read just "
+                    "the construct instead of the whole file."
+                )
+            ),
+        ] = None,
+        end_line: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Last line to return, 1-BASED and inclusive "
+                    "(default: the end of the file)."
+                )
+            ),
+        ] = None,
     ) -> str:
-        """Read the exact current content of an indexed file (or a line
-        range) from the synced repository, with commit attribution.
-        `file` is the repository-relative path from any search result's
-        source line; call it with the `start_line`/`end_line` a search
-        result's elision marker names to get the lines it did not quote.
+        """Exact text of a known indexed file, or a line range of it, at
+        the indexed commit and with repository/commit attribution.
+
+        Use it whenever you already know the file — from a search
+        result's source line, a navigation hit, or repository_files. Do
+        not search for a file you can name: this is exact, returns only
+        the lines asked for, and cannot drift from the index. If you do
+        not know the path, call repository_files first rather than
+        guessing one.
+
         Output carries the same 1-based line-number gutter search
-        results use — find_definition/find_references/hover_info take
-        0-based lines, so pass N-1 for a line displayed as N."""
+        results use; call it with the start_line/end_line a search
+        result's elision marker names to get the lines it did not
+        quote."""
         return retrieval.get_source(repository, file, start_line, end_line)
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def repository_files(
-        repository: str,
-        pattern: str | None = None,
-        limit: int = 200,
+        repository: RepositoryArg,
+        pattern: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Glob matched against the repository-relative path, "
+                    "where '*' crosses '/' — e.g. 'modules/counter/*' or "
+                    "'*.vhd' (default: every indexed file). Narrow it "
+                    "whenever you can: an unfiltered listing of a large "
+                    "repository is mostly noise."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Field(
+                description=(
+                    "Maximum number of paths to list (default 200 — much "
+                    "higher than the search tools', since a path costs "
+                    "almost nothing). A truncation note is appended when "
+                    "more match; refine `pattern` rather than raising it."
+                )
+            ),
+        ] = 200,
     ) -> str:
-        """List the files known to the index for a repository — the
-        candidate paths to pass to get_source (no guessing). `pattern` is
-        a glob matched against the repository-relative path ('*' crosses
-        '/'), e.g. 'modules/counter/*' or '*.vhd'. Results are capped at
-        `limit`; a truncation note is appended when more exist."""
+        """List the indexed file paths of a repository — the candidate
+        paths for get_source and the navigation tools.
+
+        Use it whenever you are unsure of a path: it is far cheaper than
+        searching for the file, and it removes the guessing that makes
+        get_source fail. `pattern` narrows by glob."""
         files, truncated = retrieval.list_files(repository, pattern, limit)
         if not files:
             return (
@@ -826,82 +1064,149 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def find_definition(
-        repository: str, file: str, line: int, character: int
+        repository: RepositoryArg,
+        file: FileArg,
+        line: LineArg,
+        character: CharacterArg,
     ) -> str:
-        """Exact, LSP/compiler-backed go-to-definition (not similarity
-        search) — use when a symbol's exact location is already known
-        (e.g. from a search_hdl result or an earlier find_references
-        call) and its precise declaration site is wanted; use search_hdl
-        instead for conceptual/natural-language queries. Backed by
-        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
-        `line`/`character` are 0-based (LSP convention, as in most
-        editor APIs); results are rendered as 1-based `path:line:col`.
-        Cross-file resolution opens the repository's other same-language
-        files (capped for responsiveness), so it usually works across
-        files, but not always for a very large repository."""
+        """Exact, compiler-backed go-to-definition for the symbol at a
+        known position (vhdl_ls for VHDL, Veridian for
+        Verilog/SystemVerilog).
+
+        The cheapest accurate answer to "where is this declared" once you
+        have a position — exact, and a fraction of a search. Know the
+        name but not a position? Use find_symbol. Don't know the name at
+        all? Use search_hdl. Positions are 0-based; results render as
+        1-based `path:line:col` with source context. Cross-file
+        resolution opens the repository's other same-language files
+        (capped for responsiveness), so it usually works across files,
+        but not always in a very large repository."""
         return await _find_definition(app, repository, file, line, character)
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def find_references(
-        repository: str,
-        file: str,
-        line: int,
-        character: int,
-        include_declaration: bool = True,
+        repository: RepositoryArg,
+        file: FileArg,
+        line: LineArg,
+        character: CharacterArg,
+        include_declaration: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Whether the declaration site itself is listed among "
+                    "the references (default true). Set it false when you "
+                    "want only the uses — the declaration is filtered out "
+                    "here even when the language server ignores the LSP "
+                    "flag, as vhdl_ls does."
+                )
+            ),
+        ] = True,
+        limit: Annotated[
+            int,
+            Field(
+                description=(
+                    f"Maximum number of locations to render (default "
+                    f"{REFERENCE_LIMIT}). Each one costs about five lines "
+                    "of source context, so a common signal name would "
+                    "otherwise return an unbounded response; a note says "
+                    "how many were found when the list is truncated."
+                )
+            ),
+        ] = REFERENCE_LIMIT,
     ) -> str:
-        """Exact, LSP/compiler-backed find-references (not similarity
-        search) — use when a symbol's exact location is already known
-        and every use site is wanted; use search_hdl with `symbols`
-        instead for a fuzzy/semantic cross-reference search. Backed by
-        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
-        `line`/`character` are 0-based (LSP convention); results are
-        rendered as 1-based `path:line:col`. `include_declaration`
-        controls whether the declaration site itself is included among
-        the references."""
+        """Exact, compiler-backed find-references: every use site of the
+        symbol at a known position (vhdl_ls for VHDL, Veridian for
+        Verilog/SystemVerilog).
+
+        Use it instead of grepping a name: it is scope-aware, so it will
+        not match a same-named signal in another entity, and it costs a
+        fraction of a search. Use search_hdl with `symbols` only for a
+        fuzzy sweep that should also reach docs and testbenches.
+        Positions are 0-based; results render as 1-based
+        `path:line:col` with source context, capped at `limit`."""
         return await _find_references(
-            app, repository, file, line, character, include_declaration
+            app, repository, file, line, character, include_declaration, limit
         )
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
-    async def hover_info(repository: str, file: str, line: int, character: int) -> str:
-        """Exact, LSP/compiler-backed hover (not similarity search) — the
-        analyzer's own signature/type/doc-comment text for the symbol at
-        an exact position, as an IDE would show it; use search_hdl
-        instead for conceptual/natural-language queries. Backed by
-        vhdl_ls for VHDL and Veridian for Verilog/SystemVerilog.
-        `line`/`character` are 0-based (LSP convention)."""
+    async def hover_info(
+        repository: RepositoryArg,
+        file: FileArg,
+        line: LineArg,
+        character: CharacterArg,
+    ) -> str:
+        """Exact, compiler-backed hover: the analyzer's own
+        declaration/type/doc-comment text for the symbol at a known
+        position, as an IDE would show it (vhdl_ls for VHDL, Veridian
+        for Verilog/SystemVerilog).
+
+        The cheapest way to answer "what type, width or signature does
+        this have" without reading the file at all. It needs an exact
+        position: use find_symbol to turn a name into one, or search_hdl
+        when the name itself is unknown. Positions are 0-based."""
         return await _hover_info(app, repository, file, line, character)
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def find_symbol(
-        query: str, repository: str | None = None, limit: int = DEFAULT_LIMIT
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "The identifier to look up, e.g. 'axi_lite_pkg' or "
+                    "'fifo_wr_ptr'. Matched by the language server's own "
+                    "name matching (substring/fuzzy on the NAME), never "
+                    "semantically — a natural-language phrase belongs in "
+                    "search_hdl instead."
+                )
+            ),
+        ],
+        repository: RepositoryFilterArg = None,
+        limit: Annotated[
+            int,
+            Field(
+                description=(
+                    "Maximum number of declarations to return (default "
+                    "8). Repositories are searched in configured order "
+                    "until this many hits are collected."
+                )
+            ),
+        ] = DEFAULT_LIMIT,
     ) -> str:
-        """Exact, LSP/compiler-backed workspace symbol search (not
-        similarity search) — the language server's own name-based lookup
-        (`workspace/symbol`), for when the approximate name of a
-        design unit/signal/function is known and its exact declaration
-        site is wanted; use search_hdl instead for conceptual/
-        natural-language queries. Backed by vhdl_ls for VHDL and
-        Veridian for Verilog/SystemVerilog. `repository` restricts the
-        search to one repository (as in search_hdl); omit it to search
-        every configured HDL repository. Results are rendered as
-        1-based `path:line:col`."""
+        """Exact, compiler-backed workspace symbol lookup: where a named
+        entity/module/package/function/signal is declared (vhdl_ls for
+        VHDL, Veridian for Verilog/SystemVerilog).
+
+        Try this FIRST whenever you know the identifier. It is the
+        cheapest tool here and it is exact, while search_hdl answers the
+        same question with whole constructs, for one to two orders of
+        magnitude more tokens and less precisely. Matching is on the
+        name, not the meaning: for a concept or a natural-language
+        question use search_hdl. Results render as 1-based
+        `path:line:col` with source context — feed one straight into
+        find_references or hover_info."""
         return await _find_symbol(app, repository, query, limit)
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
     async def repository_status() -> str:
-        """Show every configured repository: ref, enabled domains, last
-        indexed commit, chunk and file counts, last sync time, and any
-        sync error. When a coding-standards file is configured it is
-        shown as the 'coding-standards' pseudo-repository (its content
-        hash in place of a commit). Also reports the HDL analyzers
-        (vhdl_ls for VHDL, Veridian for Verilog/SystemVerilog):
-        availability, version, and whether semantic (lsp) or fallback
-        parsing is in effect."""
+        """What is indexed, what is syncing right now, what failed, and
+        the exact repository names every other tool expects.
+
+        Call it when you need a repository name (in zero-config mode the
+        name carries a hash suffix, e.g. 'vhdl-ai-test-582e8509' — never
+        guess it), when a search comes back thin or empty (a sync may
+        still be running, and the 'sync:' line says so), or when
+        navigation reports an analyzer problem. Reports per repository:
+        sync state (in progress / failed / pending / idle), last indexed
+        commit, chunk and file counts, last sync time and last error;
+        then the HDL analyzers (vhdl_ls, Veridian) with availability,
+        version, and whether semantic (lsp) or fallback parsing is in
+        effect. A configured coding-standards file appears as the
+        'coding-standards' pseudo-repository (content hash in place of a
+        commit)."""
         lines: list[str] = []
         for status in retrieval.repository_status():
             domains = ", ".join(status.domains)
@@ -922,9 +1227,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 count = app.store.count_repository(status.name, CollectionName(domain))
                 per_domain.append(f"{count} {domain}")
             total = app.store.count_repository(status.name)
+            sync_state = app.sync_state(
+                status.name, status.indexed_commit, status.last_sync_error
+            )
             lines.append(
                 f"- {status.name} ({source}, priority {status.priority}, "
                 f"domains: {domains})\n"
+                f"  sync: {sync_state}\n"
                 f"  indexed: {commit}, synced: {synced}\n"
                 f"  chunks: {' + '.join(per_domain)} ({total} total), "
                 f"files: {status.file_count}{error}"
@@ -940,9 +1249,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
                 else ""
             )
             chunks = app.store.count_repository(CODING_STANDARDS_REPO)
+            standards_state = app.sync_state(
+                CODING_STANDARDS_REPO, state.indexed_commit, state.last_sync_error
+            )
             standards_line = (
                 f"- {CODING_STANDARDS_REPO} (file {app.config.coding_standards}, "
                 f"priority {app.config.coding_standards_priority})\n"
+                f"  sync: {standards_state}\n"
                 f"  indexed: {commit}, synced: {synced}\n"
                 f"  chunks: {chunks} docs{error}"
             )
@@ -970,18 +1283,50 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
 
     @mcp.tool(annotations=_READ_WRITE)
     @_handle_errors
-    async def sync_repositories(repositories: list[str] | None = None) -> str:
-        """Incrementally sync repositories (default: all): fetch the ref,
-        chunk changed files, update the index. Safe to call any time;
-        failures are contained per repository and reported."""
+    async def sync_repositories(
+        repositories: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Repository names to sync (default: every configured "
+                    "repository, which is slower). An unknown name is "
+                    "rejected up front."
+                )
+            ),
+        ] = None,
+    ) -> str:
+        """Incrementally sync repositories: fetch the ref, chunk changed
+        files, update the index.
+
+        You normally never need this — the index syncs itself on a timer,
+        and local working repositories within seconds of an edit. Use it
+        when repository_status shows a sync failed and you have fixed the
+        cause, or when a just-made change must be indexed immediately.
+        Safe to call any time; failures are contained per repository and
+        reported."""
         reports = await app.sync_all(repositories)
         return _render_report(reports)
 
     @mcp.tool(annotations=_READ_WRITE)
     @_handle_errors
-    async def reindex_repository(repository: str) -> str:
-        """Fully reindex one repository (drops and rebuilds all of its
-        chunks). Use after config changes or to repair a drifted index."""
+    async def reindex_repository(
+        repository: Annotated[
+            str,
+            Field(
+                description=(
+                    "The repository to rebuild from scratch, by its exact "
+                    "name from repository_status ('coding-standards' for "
+                    "the configured standards file)."
+                )
+            ),
+        ],
+    ) -> str:
+        """Fully reindex one repository: drop and rebuild all of its
+        chunks.
+
+        Much more expensive than sync_repositories, and rarely the right
+        tool: use it after a config change that alters what gets indexed,
+        or to repair an index you have reason to believe has drifted."""
         report = await app.reindex(repository)
         return _render_report([report])
 

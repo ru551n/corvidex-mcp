@@ -26,6 +26,7 @@ from corvidex_mcp.git_manager import GitManager
 from corvidex_mcp.indexing.pipeline import IndexPipeline
 from corvidex_mcp.lsp import build_analyzer_statuses
 from corvidex_mcp.navigation import (
+    REFERENCE_LIMIT,
     _no_result_message,
     _selected_name_at,
     _uri_to_path,
@@ -192,6 +193,109 @@ while True:
                     "location": {"uri": uri, "range": pos_range(0, 0)},
                 }
             ]
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif method == "exit":
+        sys.exit(0)
+"""
+
+# A server that behaves the way vhdl_ls actually does for references:
+# it advertises referencesProvider, then ignores the request's
+# `includeDeclaration: false` and returns the declaration anyway. The
+# number of non-declaration hits is the request's `character`, so one
+# fake covers both the declaration-filtering and the output-cap tests.
+# textDocument/definition always answers with the declaration (line 0),
+# which is how the declaration is identified for filtering.
+FAKE_STUBBORN_REF_LSP = r"""#!/usr/bin/env python3
+import json
+import sys
+
+if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+    print("fake-stubborn-lsp 1.0.0")
+    sys.exit(0)
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        key, _, value = line.partition(b":")
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers.get(b"content-length", b"0"))
+    return json.loads(sys.stdin.buffer.read(length))
+
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    frame = b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    sys.stdout.buffer.write(frame + body)
+    sys.stdout.buffer.flush()
+
+
+def pos_range(line, char):
+    return {
+        "start": {"line": line, "character": char},
+        "end": {"line": line, "character": char + 3},
+    }
+
+
+read_message()  # initialize
+send(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "capabilities": {
+                "documentSymbolProvider": True,
+                "definitionProvider": True,
+                "referencesProvider": True,
+            }
+        },
+    }
+)
+msg = read_message()  # initialized
+assert msg is not None and msg.get("method") == "initialized", msg
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "textDocument/didOpen":
+        uri = msg["params"]["textDocument"]["uri"]
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {"uri": uri, "diagnostics": []},
+            }
+        )
+    elif method == "textDocument/documentSymbol":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif method == "textDocument/definition":
+        uri = msg["params"]["textDocument"]["uri"]
+        # The declaration, on a different column than the reference
+        # list reports it (a real server does this too).
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "result": {"uri": uri, "range": pos_range(0, 7)},
+            }
+        )
+    elif method == "textDocument/references":
+        uri = msg["params"]["textDocument"]["uri"]
+        count = max(1, msg["params"]["position"]["character"])
+        # includeDeclaration is deliberately ignored.
+        result = [{"uri": uri, "range": pos_range(0, 0)}]
+        result += [
+            {"uri": uri, "range": pos_range(i, 0)} for i in range(1, count + 1)
+        ]
         send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     elif method == "shutdown":
         send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
@@ -508,6 +612,68 @@ async def test_find_references_include_and_exclude_declaration(app) -> None:
     assert without_decl.count("hdl:rtl/fifo.vhd:") == 1
 
 
+@pytest.fixture
+def stubborn_app(app, tmp_path: Path):
+    """The same app, but talking to a server that ignores
+    ``includeDeclaration`` (as vhdl_ls does) and can return an arbitrary
+    number of references."""
+    fake_app, pipeline, config = app
+    binary = executable_lsp_script(tmp_path, "fake_stubborn_lsp", FAKE_STUBBORN_REF_LSP)
+    fake_app.config = config.model_copy(update={"vhdl_ls_path": str(binary)})
+    fake_app._analyzer_statuses = None
+    return fake_app, pipeline, config
+
+
+async def test_find_references_filters_declaration_the_server_keeps(
+    stubborn_app,
+) -> None:
+    """``include_declaration=False`` used to be a no-op: vhdl_ls ignores
+    the LSP flag and returns the declaration regardless, so the two
+    responses were byte-identical. The declaration is now filtered out
+    here instead."""
+    fake_app, pipeline, config = stubborn_app
+    await _sync_all(pipeline, config)
+    with_decl = await find_references(fake_app, "hdl", "rtl/fifo.vhd", 0, 1)
+    assert with_decl.count("hdl:rtl/fifo.vhd:") == 2
+    assert "hdl:rtl/fifo.vhd:1:1" in with_decl  # the declaration (LSP line 0)
+
+    without_decl = await find_references(
+        fake_app, "hdl", "rtl/fifo.vhd", 0, 1, include_declaration=False
+    )
+    assert without_decl != with_decl
+    assert without_decl.count("hdl:rtl/fifo.vhd:") == 1
+    assert "hdl:rtl/fifo.vhd:1:1" not in without_decl
+    assert "hdl:rtl/fifo.vhd:2:1" in without_decl
+
+
+async def test_find_references_caps_output_and_says_so(stubborn_app) -> None:
+    """A common signal name has unboundedly many references, each
+    rendered with ~5 lines of context, so the output is capped and the
+    true total reported."""
+    fake_app, pipeline, config = stubborn_app
+    await _sync_all(pipeline, config)
+    # 30 references + the declaration.
+    out = await find_references(fake_app, "hdl", "rtl/fifo.vhd", 0, 30, limit=5)
+    assert out.count("hdl:rtl/fifo.vhd:") == 5
+    assert "31 references found; showing the first 5" in out
+
+    # The default cap applies without an explicit limit.
+    out = await find_references(fake_app, "hdl", "rtl/fifo.vhd", 0, 30)
+    assert out.count("hdl:rtl/fifo.vhd:") == REFERENCE_LIMIT
+    assert f"showing the first {REFERENCE_LIMIT}" in out
+
+    # Under the cap: no note at all.
+    out = await find_references(fake_app, "hdl", "rtl/fifo.vhd", 0, 1, limit=5)
+    assert "references found; showing" not in out
+
+
+async def test_find_references_rejects_a_zero_limit(stubborn_app) -> None:
+    fake_app, pipeline, config = stubborn_app
+    await _sync_all(pipeline, config)
+    with pytest.raises(RetrievalError, match="limit must be at least 1"):
+        await find_references(fake_app, "hdl", "rtl/fifo.vhd", 0, 1, limit=0)
+
+
 async def test_hover_info_plain_and_markup_and_none(app) -> None:
     fake_app, pipeline, config = app
     await _sync_all(pipeline, config)
@@ -541,6 +707,18 @@ async def test_find_symbol_across_all_repositories_when_unset(app) -> None:
     # session both answer, so both repositories should appear.
     assert "hdl:" in out
     assert "sv:" in out
+
+
+async def test_find_symbol_rejects_unknown_repository(app) -> None:
+    """Every other tool errors on an unknown repository name. find_symbol
+    used to swallow it in its per-repository error containment and answer
+    "No symbols matching ...", which reads as "the symbol does not
+    exist" rather than "you named a repository that is not
+    configured"."""
+    fake_app, pipeline, config = app
+    await _sync_all(pipeline, config)
+    with pytest.raises(RetrievalError, match="unknown repository"):
+        await find_symbol(fake_app, "no-such-repo", "fifo")
 
 
 async def test_find_symbol_empty_query_rejected(app) -> None:

@@ -70,6 +70,13 @@ MAX_SESSION_FILES = 200
 #: Lines of source context shown before/after each hit.
 CONTEXT_LINES = 2
 
+#: Default cap on the locations ``find_references`` renders. Every
+#: location costs a header plus ``2 * CONTEXT_LINES + 1`` lines of
+#: source, so an uncapped call on a common name (``clk``, ``rst_n``,
+#: ``valid``) returns an unbounded response; the reply says how many
+#: were found when it truncates, the way the search tools do.
+REFERENCE_LIMIT = 20
+
 #: Extensions handled by each analyzer (see :mod:`corvidex_mcp.routing`).
 _EXTENSIONS: dict[str, frozenset[str]] = {
     "vhdl_ls": VHDL_EXTENSIONS,
@@ -436,6 +443,31 @@ async def find_definition(
     return _format_locations(app, repository, repo_dir, locations)
 
 
+def _without_declaration(
+    locations: tuple[Location, ...], declarations: tuple[Location, ...]
+) -> tuple[Location, ...]:
+    """``locations`` minus the declaration site(s).
+
+    ``include_declaration=False`` is sent to the server as the LSP
+    ``context.includeDeclaration`` flag, but vhdl_ls ignores it and
+    returns the declaration anyway (verified: the two responses are
+    byte-identical), so the flag has to be honoured here as well. The
+    declaration is identified by asking the same session for
+    go-to-definition at the same position and dropping every reference
+    on a declaration's file and line — matching on the line rather than
+    the exact column because a server may report the declaration's name
+    range and its reference range with different start columns.
+    """
+    if not declarations:
+        return locations
+    declared = {(_uri_to_path(loc.uri), loc.start_line) for loc in declarations}
+    return tuple(
+        loc
+        for loc in locations
+        if (_uri_to_path(loc.uri), loc.start_line) not in declared
+    )
+
+
 async def find_references(
     app: VhdlRagApp,
     repository: str,
@@ -443,30 +475,54 @@ async def find_references(
     line: int,
     character: int,
     include_declaration: bool = True,
+    limit: int = REFERENCE_LIMIT,
 ) -> str:
     """Exact find-references (vhdl_ls/Veridian), not similarity search.
 
     ``line``/``character`` are 0-based (LSP convention); results are
-    rendered as 1-based ``path:line:col``. See the module docstring
-    for the cross-file resolution caveat.
+    rendered as 1-based ``path:line:col``, capped at ``limit`` with a
+    note naming the true total (see :data:`REFERENCE_LIMIT`). See the
+    module docstring for the cross-file resolution caveat.
     """
-    locations, lsp, repo_dir, lines = await _navigate(
-        app,
-        repository,
-        file,
-        lambda c, path: c.references(
+    if limit < 1:
+        raise RetrievalError("limit must be at least 1")
+
+    async def call(
+        c: LspClient, path: Path
+    ) -> tuple[
+        tuple[Location, ...],
+        tuple[Location, ...],
+    ]:
+        found = await c.references(
             path, line, character, include_declaration=include_declaration
-        ),
-        (line, character),
+        )
+        if include_declaration:
+            return found, ()
+        # Same session, same position: what the server calls the
+        # declaration, so it can be filtered out of the references it
+        # returned despite includeDeclaration=false.
+        return found, await c.definition(path, line, character)
+
+    (locations, declarations), lsp, repo_dir, lines = await _navigate(
+        app, repository, file, call, (line, character)
     )
     if not lsp.supports_references:
         return (
             "The language server for this file does not advertise "
             "find-references support."
         )
+    if not include_declaration:
+        locations = _without_declaration(locations, declarations)
     if not locations:
         return _no_result_message("references", lines, line, character)
-    return _format_locations(app, repository, repo_dir, locations)
+    shown = locations[:limit]
+    body = _format_locations(app, repository, repo_dir, shown)
+    if len(locations) > limit:
+        body += (
+            f"\n\nNote: {len(locations)} references found; showing the "
+            f"first {limit}. Increase `limit` to see the rest."
+        )
+    return body
 
 
 async def hover_info(
@@ -513,6 +569,13 @@ async def find_symbol(
     query = query.strip()
     if not query:
         raise RetrievalError("query must not be empty")
+    if repository is not None:
+        # Up front, like every other tool: the per-repository loop below
+        # swallows RetrievalError to keep one broken repository from
+        # failing a multi-repository search, which would otherwise turn
+        # a misspelled name into a plausible-looking "No symbols
+        # matching ..." instead of an error.
+        _resolve_repository(app, repository)
     repo_names = [repository] if repository is not None else _hdl_repository_names(app)
     if not repo_names:
         return "No HDL repositories configured."

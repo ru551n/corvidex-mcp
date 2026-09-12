@@ -167,7 +167,6 @@ async def test_tools_registered(env) -> None:
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == {
         "search_hdl",
-        "search_vhdl",
         "search_docs",
         "search_code",
         "search_knowledge",
@@ -181,6 +180,49 @@ async def test_tools_registered(env) -> None:
         "sync_repositories",
         "reindex_repository",
     }
+
+
+async def test_every_tool_parameter_carries_a_description(env) -> None:
+    """``tools/list`` is all an agent sees before it calls anything.
+
+    A parameter without a ``description`` in the JSON schema reaches the
+    model as a bare name and type ("limit: integer"), so everything it
+    could know about the argument — what it does, its default, when to
+    change it — has to be in the annotation, not buried in the
+    docstring prose.
+    """
+    _app, mcp, _up = env
+    missing: list[str] = []
+    for tool in await mcp.list_tools():
+        for name, schema in tool.input_schema.get("properties", {}).items():
+            if not schema.get("description", "").strip():
+                missing.append(f"{tool.name}.{name}")
+    assert missing == []
+
+
+async def test_tool_parameter_descriptions_state_defaults_and_basing(env) -> None:
+    """The descriptions carry the facts an agent otherwise has to guess:
+    the differing `limit` defaults and the 0-based navigation positions
+    (search results and get_source print 1-based lines)."""
+    _app, mcp, _up = env
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    def described(tool: str, param: str) -> str:
+        return tools[tool].input_schema["properties"][param]["description"]
+
+    assert "8" in described("search_hdl", "limit")
+    assert "10" in described("search_knowledge", "limit")
+    assert "200" in described("repository_files", "limit")
+    assert "8" in described("find_symbol", "limit")
+    for tool in ("find_definition", "find_references", "hover_info"):
+        assert "0-BASED" in described(tool, "line")
+        assert "0-BASED" in described(tool, "character")
+    # The modes are spelled out, including the one that works without an
+    # embedding model.
+    mode = described("search_hdl", "mode")
+    assert "'lexical'" in mode and "no embedding model" in mode
+    # `symbols` is the cross-domain tracing key, not an afterthought.
+    assert "cross-domain" in described("search_hdl", "symbols")
 
 
 async def test_search_tools_end_to_end(env) -> None:
@@ -200,8 +242,10 @@ async def test_search_tools_end_to_end(env) -> None:
     assert "## [code]" in knowledge
 
     # Empty domain: friendly message, not an exception.
-    result = await mcp.call_tool("search_vhdl", {"query": "entity fifo"})
-    assert "No VHDL results" in tool_text(result)
+    result = await mcp.call_tool(
+        "search_hdl", {"query": "entity fifo", "language": "vhdl"}
+    )
+    assert "No HDL results" in tool_text(result)
 
 
 async def test_search_hdl_tool_language_filter(env) -> None:
@@ -228,8 +272,10 @@ async def test_search_hdl_tool_language_filter(env) -> None:
     assert "repo:tb/fifo_tb.v" in verilog_text
     assert "repo:rtl/fifo.vhd" not in verilog_text
 
-    # search_vhdl is the VHDL-only form of search_hdl.
-    vhdl_text = tool_text(await mcp.call_tool("search_vhdl", {"query": "fifo"}))
+    # language='vhdl' is what the removed search_vhdl alias used to do.
+    vhdl_text = tool_text(
+        await mcp.call_tool("search_hdl", {"query": "fifo", "language": "vhdl"})
+    )
     assert "repo:rtl/fifo.vhd" in vhdl_text
     assert "repo:tb/fifo_tb.v" not in vhdl_text
 
@@ -509,12 +555,72 @@ async def test_repository_status_tool(
     broken_block = text.split("- broken (")[1]
     assert "chunks: 0 hdl + 0 docs + 0 code (0 total)" in broken_block
     assert "last error:" in broken_block
-    assert "never" in broken_block.split("\n")[1]
+    assert "indexed: never" in broken_block
     # The HDL analyzer section: both analyzers in fallback mode.
     assert "HDL analyzers:" in text
     assert "- vhdl_ls: fallback" in text
     assert "- veridian: fallback" in text
     assert "was not found" in text
+
+
+async def test_repository_status_reports_sync_state(env, tmp_path: Path) -> None:
+    """A 4-minute initial index used to be indistinguishable from a
+    broken repository: "indexed: never, synced: never, files: 0" with
+    chunk counts quietly growing and nothing saying "in progress". And a
+    permanently failing sync (a ref that does not resolve, a missing
+    coding-standards file) looks the same again, because it is retried
+    forever. Each repository therefore gets an explicit sync state."""
+    app, mcp, _up = env
+    text = tool_text(await mcp.call_tool("repository_status", {}))
+    # Synced and quiet.
+    assert "sync: idle — up to date" in text.split("- broken (")[0]
+    # "broken" never synced and its error is permanent, not in progress.
+    broken_block = text.split("- broken (")[1]
+    assert "sync: FAILED" in broken_block
+    assert "nothing has ever been indexed" in broken_block
+    assert f"retried every {app.config.sync_interval}s" in broken_block
+
+    # A sync in flight is reported as such, per repository.
+    app._syncing.add("broken")
+    try:
+        text = tool_text(await mcp.call_tool("repository_status", {}))
+    finally:
+        app._syncing.discard("broken")
+    broken_block = text.split("- broken (")[1]
+    assert "sync: IN PROGRESS" in broken_block
+    assert "initial index running" in broken_block
+    # An already-indexed repository resyncing keeps serving its index.
+    app._syncing.add("repo")
+    try:
+        text = tool_text(await mcp.call_tool("repository_status", {}))
+    finally:
+        app._syncing.discard("repo")
+    repo_block = text.split("- repo (")[1].split("- broken")[0]
+    assert "sync: IN PROGRESS — resync running" in repo_block
+
+
+async def test_repository_status_coding_standards_failure_is_not_in_progress(
+    env, tmp_path: Path
+) -> None:
+    """A missing coding-standards file is retried every sync_interval
+    forever; it must read as a permanent failure, not as an index that
+    has not finished yet."""
+    app, _mcp, _up = env
+    config = app.config.model_copy(
+        update={"coding_standards": tmp_path / "no-such-standard.md"}
+    )
+    app2 = VhdlRagApp(
+        config, providers=app.providers, store=app.store, states=app.states
+    )
+    mcp2 = create_mcp(app2)
+    try:
+        await app2.sync_all(repositories=["coding-standards"])
+        text = tool_text(await mcp2.call_tool("repository_status", {}))
+    finally:
+        app2.close()
+    standards_block = text.split("- coding-standards (")[1]
+    assert "sync: FAILED" in standards_block
+    assert "IN PROGRESS" not in standards_block
 
 
 async def test_repository_status_wraps_errors(
