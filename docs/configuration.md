@@ -10,12 +10,38 @@ semantics (local checkouts, submodules, hooks, etc.).
 
 ## Config file
 
-Location: a project-local `.corvidex` file in the directory the server is
-started in (created with a commented template on first run if absent) —
+Location: a project-local `.corvidex` file in the project directory —
 there is no global config location; every project configures itself,
-right next to the code it describes. Select another file with the
-`CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag;
-either always wins over `.corvidex`.
+right next to the code it describes. The file is optional and is never
+created implicitly: with no `.corvidex` the built-in defaults apply and
+the project directory is indexed. Run `corvidex-mcp --init-config` to
+write a commented template when you want one. Select another file with
+the `CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH`
+flag; either always wins over `.corvidex`.
+
+### Project directory
+
+The project directory — where `.corvidex` is looked for, and what gets
+indexed with no configuration — is the **working directory the server
+was started in**, since a stdio MCP server inherits its cwd from the
+agent that spawned it.
+
+A launcher can break that inheritance and make corvidex index *itself*
+instead of your code. The usual culprit is `uv --directory DIR run`,
+which changes the working directory to the corvidex checkout; use
+`uv --project DIR run` instead, which selects the same environment but
+leaves the cwd alone:
+
+```jsonc
+// wrong: indexes corvidex-mcp's own source tree
+"args": ["--directory", "/path/to/corvidex-mcp", "run", "corvidex-mcp"]
+// right: indexes the agent's workspace
+"args": ["--project", "/path/to/corvidex-mcp", "run", "corvidex-mcp"]
+```
+
+When a launcher cannot be fixed, set `CORVIDEX_MCP_PROJECT_DIR` to the
+workspace root and it wins over the working directory. The server logs a
+warning if it ever auto-indexes its own source tree.
 The top-level scalar options also have command-line overrides
 (`--data-dir`, `--sync-interval`, `--local-sync-interval`,
 `--vhdl-ls-path`, `--veridian-path`, `--log-level`, `--no-index-cwd`,
@@ -142,9 +168,10 @@ filesystem = true
   `search_knowledge` can search across all configured repositories from
   one index).
 - **Config file selection**: the default (and only on-disk) location is
-  a project-local `.corvidex` file in the directory the server is started
-  in (a commented template is written there on first run if absent) —
-  there is no global config file. Select another file with the
+  a project-local `.corvidex` file in the project directory, which is
+  optional and never written implicitly (`--init-config` writes a
+  commented template on request) — there is no global config file.
+  Select another file with the
   `CORVIDEX_MCP_CONFIG` environment variable or the `--config PATH` flag
   — either wins over `.corvidex`. The top-level scalar options also have
   command-line overrides (`--data-dir`, `--sync-interval`,

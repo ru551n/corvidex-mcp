@@ -1,13 +1,14 @@
 """Typed TOML configuration for corvidex-mcp.
 
-The configuration lives at ``.corvidex`` in the directory the server is
-started in by default — project-local, not a machine-wide file — the
+The configuration lives at ``.corvidex`` in the project directory (see
+:func:`project_dir`) — project-local, not a machine-wide file — and the
 ``CORVIDEX_MCP_CONFIG`` environment variable or the ``--config``
-command-line flag select an alternate file. On first start a commented
-default template is written to the project-local path if no file
-exists. All validation happens at load time; callers receive either a
-valid :class:`AppConfig` or a :class:`ConfigError` with an actionable
-message.
+command-line flag select an alternate file. No file is required and none
+is ever written implicitly: with no ``.corvidex`` the built-in defaults
+apply, which index the project directory itself (see
+:func:`default_repository_for_cwd`). All validation happens at load
+time; callers receive either a valid :class:`AppConfig` or a
+:class:`ConfigError` with an actionable message.
 """
 
 from __future__ import annotations
@@ -667,16 +668,40 @@ class AppConfig(BaseModel):
         return tuple(names)
 
 
+#: Overrides the project directory when the launcher cannot be made to
+#: start the server in the agent's workspace. Named to match the sibling
+#: servers' ``*_MCP_PROJECT_DIR`` variables.
+PROJECT_DIR_ENV = "CORVIDEX_MCP_PROJECT_DIR"
+
+
+def project_dir() -> Path:
+    """The project directory: the agent's workspace root, which is both
+    where ``.corvidex`` is looked for and what gets indexed with no
+    configuration at all.
+
+    This is the current working directory, because a stdio MCP server
+    inherits its cwd from the agent that spawned it. That inheritance is
+    easy for a launcher to break, though — ``uv --directory DIR run`` and
+    ``cd DIR &&`` both start the server in *its own* install/source tree,
+    so it indexes itself instead of the user's code (use ``uv --project
+    DIR run``, which leaves the cwd alone). Set
+    :data:`PROJECT_DIR_ENV` to state the workspace root outright when a
+    launcher cannot be fixed.
+    """
+    override = os.environ.get(PROJECT_DIR_ENV)
+    return Path(override).expanduser() if override else Path.cwd()
+
+
 def project_config_path(cwd: Path | None = None) -> Path:
-    """The config file: ``.corvidex`` in the directory the server is
-    started in (a coding agent's workspace root).
+    """The config file: ``.corvidex`` in the project directory (see
+    :func:`project_dir`).
 
     Project-local and discoverable — sitting right next to the code it
     describes — rather than one global file shared (and easy to lose
     track of) across every project on the machine. See
     :func:`load_config` for the full resolution order.
     """
-    return (cwd or Path.cwd()) / ".corvidex"
+    return (cwd or project_dir()) / ".corvidex"
 
 
 def _sanitize_repo_name(raw: str) -> str:
@@ -704,7 +729,7 @@ def project_identity_hash(resolved_path: Path) -> str:
 
 def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     """The repository indexed automatically when none are configured: the
-    directory the server is started in (a coding agent's workspace).
+    project directory (see :func:`project_dir`).
 
     A Git working tree is indexed as a local working repository (HEAD plus
     uncommitted and untracked changes, kept in sync by the fast local
@@ -724,7 +749,7 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     zero-config equivalent, since that name is never seen or chosen by
     the user. Use ``repository_status`` to see the exact name assigned.
     """
-    root = (cwd or Path.cwd()).resolve()
+    root = (cwd or project_dir()).resolve()
     name = f"{_sanitize_repo_name(root.name)}-{project_identity_hash(root)}"
     return RepositoryConfig(
         name=name,
@@ -734,7 +759,7 @@ def default_repository_for_cwd(cwd: Path | None = None) -> RepositoryConfig:
     )
 
 
-_DEFAULT_TEMPLATE = """\
+DEFAULT_TEMPLATE = """\
 # corvidex-mcp configuration.
 #
 # With no [[repositories]] below, the directory the server is started in
@@ -898,7 +923,6 @@ log_level = "INFO"
 
 def load_config(
     path: Path | None = None,
-    write_default: bool = True,
     cwd: Path | None = None,
     inject_default_repository: bool = True,
 ) -> AppConfig:
@@ -913,20 +937,21 @@ def load_config(
        there is no global fallback, so configuration always lives next
        to the project it describes.
 
-    When neither is set/found and ``write_default`` is set, a commented
-    default template is written to the project-local ``.corvidex`` path
-    and the built-in defaults are returned. Raises :class:`ConfigError` on
+    No config file is required, and none is ever written as a side effect
+    of loading: when nothing is found the built-in defaults apply, which
+    is the zero-config case below. ``corvidex-mcp --init-config`` writes
+    the commented template on request. Raises :class:`ConfigError` on
     unreadable or invalid configuration.
 
     When the resulting configuration has no ``[[repositories]]`` at all —
-    which includes the common case of no config file — the directory the
-    server is started in (``cwd``, defaulting to the actual current
-    working directory) is indexed automatically; see
-    :func:`default_repository_for_cwd`. Set ``index_cwd = false`` in the
-    config (or pass ``--no-index-cwd``) to disable this and run with an
-    empty index instead. Pass ``inject_default_repository=False`` to skip
-    this step here (e.g. to apply CLI overrides to ``index_cwd`` first)
-    and call :func:`apply_default_repository` explicitly afterwards.
+    which includes the common case of no config file — the project
+    directory (``cwd``, defaulting to :func:`project_dir`) is indexed
+    automatically; see :func:`default_repository_for_cwd`. Set
+    ``index_cwd = false`` in the config (or pass ``--no-index-cwd``) to
+    disable this and run with an empty index instead. Pass
+    ``inject_default_repository=False`` to skip this step here (e.g. to
+    apply CLI overrides to ``index_cwd`` first) and call
+    :func:`apply_default_repository` explicitly afterwards.
     """
     if path is None:
         # VHDL_RAG_MCP_CONFIG is the deprecated name (from the project's
@@ -937,9 +962,6 @@ def load_config(
         path = Path(env_path) if env_path else None
     config_path = (path or project_config_path(cwd)).expanduser()
     if not config_path.exists():
-        if write_default:
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(_DEFAULT_TEMPLATE, encoding="utf-8")
         config = AppConfig()
     else:
         try:
