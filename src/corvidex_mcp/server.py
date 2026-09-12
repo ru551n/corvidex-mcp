@@ -56,11 +56,14 @@ from pydantic import ValidationError
 
 from .config import (
     CODING_STANDARDS_REPO,
+    DEFAULT_TEMPLATE,
+    PROJECT_DIR_ENV,
     AppConfig,
     ConfigError,
     RepositoryConfig,
     apply_default_repository,
     load_config,
+    project_config_path,
 )
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitManager
@@ -1054,7 +1057,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help=(
             "config file (default: $CORVIDEX_MCP_CONFIG, else the "
-            "project-local .corvidex in the current directory)"
+            "project-local .corvidex in the project directory: "
+            "$CORVIDEX_MCP_PROJECT_DIR, else the current directory). "
+            "Running without any config file is supported and indexes "
+            "the project directory"
+        ),
+    )
+    parser.add_argument(
+        "--init-config",
+        action="store_true",
+        help=(
+            "write a commented .corvidex template to the project directory "
+            "and exit (never overwrites an existing file); no config file is "
+            "needed to run"
         ),
     )
     parser.add_argument(
@@ -1087,6 +1102,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override veridian_path",
     )
     parser.add_argument(
+        "--vhdl-ls-libraries-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "override vhdl_ls_libraries_dir: the VHDL standard-library "
+            "sources vhdl_ls needs. A property of the vhdl_ls install rather "
+            "than of any one project (a 'cargo install'ed binary ships "
+            "without them and panics on every invocation), so it usually "
+            "belongs on the launcher command line, where it applies to every "
+            "workspace, rather than in a per-project .corvidex"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -1117,8 +1145,9 @@ def config_from_args(argv: list[str] | None = None) -> AppConfig:
     The config file is selected by ``--config``, else ``CORVIDEX_MCP_CONFIG``,
     else the project-local ``.corvidex`` in the current directory (see
     :func:`corvidex_mcp.config.load_config`); ``--data-dir``/
-    ``--sync-interval``/``--vhdl-ls-path``/``--veridian-path``/
-    ``--log-level``/``--num-threads`` override the file's values.
+    ``--sync-interval``/``--vhdl-ls-path``/``--vhdl-ls-libraries-dir``/
+    ``--veridian-path``/``--log-level``/``--num-threads`` override the
+    file's values.
     """
     args = _parse_args(argv)
     config = load_config(
@@ -1151,19 +1180,66 @@ _CLI_SCALAR_OVERRIDES = (
     "sync_interval",
     "local_sync_interval",
     "vhdl_ls_path",
+    "vhdl_ls_libraries_dir",
     "veridian_path",
     "log_level",
 )
 
 
+def _init_config() -> int:
+    """Write the commented ``.corvidex`` template to the project directory
+    for ``--init-config``, refusing to overwrite an existing file."""
+    path = project_config_path()
+    if path.exists():
+        print(f"corvidex-mcp: {path} already exists, leaving it alone")
+        return 1
+    path.write_text(DEFAULT_TEMPLATE, encoding="utf-8")
+    print(f"corvidex-mcp: wrote {path}")
+    return 0
+
+
+def _own_source_tree() -> Path | None:
+    """The ``corvidex-mcp`` checkout this server is running from, or ``None``
+    when it runs from an installed wheel rather than a source tree."""
+    root = Path(__file__).resolve().parents[2]
+    return root if (root / "src" / "corvidex_mcp").is_dir() else None
+
+
+def _warn_if_indexing_itself(config: AppConfig) -> None:
+    """Warn when zero-config mode picked corvidex-mcp's own source tree.
+
+    Indexing corvidex-mcp itself is legitimate when its maintainer means
+    it, but far more often it means the launcher started the server in the
+    wrong directory and the user's actual code is not being indexed at
+    all — a silent, confusing failure worth one loud line.
+    """
+    own = _own_source_tree()
+    if own is None or not any(
+        repo.auto_indexed and repo.path == own for repo in config.repositories
+    ):
+        return
+    logger.warning(
+        "auto-indexing corvidex-mcp's own source tree (%s) because that is "
+        "the working directory. If this is not what you meant, the launcher "
+        "is starting the server in the wrong place: use 'uv --project DIR "
+        "run', not 'uv --directory DIR run' (which changes the working "
+        "directory), or set %s to your workspace root.",
+        own,
+        PROJECT_DIR_ENV,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the MCP server over stdio (uvx entry point)."""
+    if _parse_args(argv).init_config:
+        raise SystemExit(_init_config())
     try:
         config = config_from_args(argv)
     except (ConfigError, ValidationError) as exc:
         print(f"corvidex-mcp: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     setup_logging(config.log_level, config.log_file)
+    _warn_if_indexing_itself(config)
     logger.info(
         "corvidex-mcp starting (data_dir=%s, %d repositories)",
         config.resolved_data_dir,

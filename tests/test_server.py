@@ -20,7 +20,14 @@ import pytest
 from capability import sqlite_extensions_supported
 from pydantic import ValidationError
 
-from corvidex_mcp.config import AppConfig, RepositoryConfig
+from corvidex_mcp.config import (
+    DEFAULT_TEMPLATE,
+    PROJECT_DIR_ENV,
+    AppConfig,
+    RepositoryConfig,
+    default_repository_for_cwd,
+    load_config,
+)
 from corvidex_mcp.embeddings.provider import FastEmbedProvider
 from corvidex_mcp.embeddings.providers import EmbeddingProviders
 from corvidex_mcp.models import (
@@ -33,6 +40,7 @@ from corvidex_mcp.models import (
 from corvidex_mcp.server import (
     VhdlRagApp,
     _acquire_lock,
+    _init_config,
     _render,
     config_from_args,
     create_mcp,
@@ -794,6 +802,39 @@ async def test_cli_config_env_var(tmp_path: Path, monkeypatch) -> None:
     other.write_text('data_dir = "d2"\nindex_cwd = false\n', encoding="utf-8")
     cfg = config_from_args(["--config", str(other)])
     assert cfg.repositories == []
+
+
+async def test_cli_vhdl_ls_libraries_dir_override(tmp_path: Path) -> None:
+    """The vhdl_ls standard-library path is a property of the vhdl_ls
+    install, not of a project, so it has to be settable on the launcher
+    command line — a per-project .corvidex cannot carry it to every
+    workspace."""
+    path = tmp_path / "config.toml"
+    path.write_text('vhdl_ls_libraries_dir = "/from/file"\n', encoding="utf-8")
+    cfg = config_from_args(
+        ["--config", str(path), "--vhdl-ls-libraries-dir", "/from/cli"]
+    )
+    assert cfg.vhdl_ls_libraries_dir == Path("/from/cli")
+
+
+async def test_init_config_writes_template_and_never_clobbers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv(PROJECT_DIR_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / ".corvidex"
+
+    assert _init_config() == 0
+    written = target.read_text(encoding="utf-8")
+    assert written == DEFAULT_TEMPLATE
+    # The template is inert: every setting in it is commented out, so
+    # loading it is equivalent to having no config file at all.
+    assert load_config(cwd=tmp_path).repositories == [
+        default_repository_for_cwd(tmp_path)
+    ]
+
+    assert _init_config() == 1
+    assert target.read_text(encoding="utf-8") == written
 
 
 async def test_cli_overrides_are_revalidated(tmp_path: Path) -> None:

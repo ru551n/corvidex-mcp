@@ -155,6 +155,13 @@ enough — a Git checkout is indexed as its working tree (HEAD plus
 uncommitted and untracked changes), a plain directory as a bag of
 files. Confirm what got indexed with the `repository_status` tool.
 
+If you run the server from a local checkout rather than `uvx`, use
+`uv --project /path/to/corvidex-mcp run corvidex-mcp` and **not**
+`uv --directory ...`: `--directory` changes the working directory, so
+corvidex ends up indexing its own source tree instead of your code. Set
+`CORVIDEX_MCP_PROJECT_DIR` to your workspace root if a launcher gets
+this wrong and cannot be changed.
+
 Don't want that? Disable it with `--no-index-cwd` on the command line,
 or `index_cwd = false` in the config file, and run with an empty index
 until you configure `[[repositories]]` explicitly. Need more than the

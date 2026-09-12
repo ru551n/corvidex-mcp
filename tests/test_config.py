@@ -10,11 +10,14 @@ from pydantic import ValidationError
 
 from corvidex_mcp.config import (
     ALL_DOMAINS,
+    PROJECT_DIR_ENV,
     AppConfig,
     ConfigError,
     EmbeddingsConfig,
     RepositoryConfig,
     load_config,
+    project_config_path,
+    project_dir,
     project_identity_hash,
 )
 from corvidex_mcp.models import CollectionName
@@ -68,9 +71,7 @@ path = "~/work/current-project"
 
 
 def test_defaults_when_file_missing(tmp_path: Path) -> None:
-    cfg = load_config(
-        tmp_path / "config.toml", write_default=False, cwd=tmp_path / "workdir"
-    )
+    cfg = load_config(tmp_path / "config.toml", cwd=tmp_path / "workdir")
     workdir_root = (tmp_path / "workdir").resolve()
     # data_dir was not set explicitly: zero-config indexing redirects it to
     # a per-project subdirectory (see apply_default_repository).
@@ -112,20 +113,21 @@ def test_config_env_var_precedence(
     old_path.write_text('data_dir = "~/old-data"\n', encoding="utf-8")
 
     monkeypatch.setenv("VHDL_RAG_MCP_CONFIG", str(old_path))
-    cfg = load_config(write_default=False, cwd=tmp_path)
+    cfg = load_config(cwd=tmp_path)
     assert cfg.data_dir == Path("~/old-data").expanduser()
 
     monkeypatch.setenv("CORVIDEX_MCP_CONFIG", str(new_path))
-    cfg = load_config(write_default=False, cwd=tmp_path)
+    cfg = load_config(cwd=tmp_path)
     assert cfg.data_dir == Path("~/new-data").expanduser()
 
 
-def test_default_template_written(tmp_path: Path) -> None:
+def test_missing_explicit_config_path_falls_back_to_defaults(tmp_path: Path) -> None:
+    """A ``--config`` path that does not exist is not an error and is never
+    created; the cwd is still indexed by default."""
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     cfg = load_config(tmp_path / "config.toml", cwd=workdir)
-    assert (tmp_path / "config.toml").exists()
-    # Template repositories are comments; the cwd is still indexed by default.
+    assert not (tmp_path / "config.toml").exists()
     assert [r.name for r in cfg.repositories] == [
         f"workdir-{project_identity_hash(workdir.resolve())}"
     ]
@@ -136,33 +138,61 @@ def test_project_local_corvidex_file_is_discovered(tmp_path: Path) -> None:
     (tmp_path / ".corvidex").write_text(
         'data_dir = "~/project-data"\n', encoding="utf-8"
     )
-    cfg = load_config(write_default=False, cwd=tmp_path)
+    cfg = load_config(cwd=tmp_path)
     assert cfg.data_dir == Path("~/project-data").expanduser()
 
 
 def test_no_project_local_file_falls_back_to_defaults(tmp_path: Path) -> None:
     """No ``.corvidex`` in ``cwd``: built-in defaults, no global fallback."""
-    cfg = load_config(
-        write_default=False, cwd=tmp_path, inject_default_repository=False
-    )
+    cfg = load_config(cwd=tmp_path, inject_default_repository=False)
     assert cfg.data_dir == AppConfig().data_dir
 
 
-def test_default_template_written_to_project_local_path(tmp_path: Path) -> None:
-    """With no explicit ``path`` and no ``.corvidex`` in ``cwd``, the
-    template is written to ``.corvidex`` there (not a global location)."""
+def test_loading_never_writes_a_config_file(tmp_path: Path) -> None:
+    """Zero-config means zero files: loading with no ``.corvidex`` present
+    leaves the project directory untouched (it used to drop a template
+    there, which littered every workspace the server was started in)."""
     workdir = tmp_path / "workdir"
     workdir.mkdir()
-    load_config(cwd=workdir)
-    assert (workdir / ".corvidex").exists()
-    assert not (tmp_path / "config.toml").exists()
+    cfg = load_config(cwd=workdir)
+    assert list(workdir.iterdir()) == []
+    assert [r.path for r in cfg.repositories] == [workdir.resolve()]
+
+
+def test_project_dir_defaults_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(PROJECT_DIR_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert project_dir() == Path.cwd()
+
+
+def test_project_dir_env_var_overrides_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CORVIDEX_MCP_PROJECT_DIR`` names the workspace root outright, for
+    launchers that start the server in the wrong directory (e.g.
+    ``uv --directory``, which indexes corvidex-mcp's own source tree)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".corvidex").write_text('data_dir = "~/ws-data"\n', encoding="utf-8")
+    monkeypatch.delenv("CORVIDEX_MCP_CONFIG", raising=False)
+    monkeypatch.delenv("VHDL_RAG_MCP_CONFIG", raising=False)
+    monkeypatch.setenv(PROJECT_DIR_ENV, str(workspace))
+    monkeypatch.chdir(tmp_path)
+
+    assert project_dir() == workspace
+    assert project_config_path() == workspace / ".corvidex"
+    cfg = load_config()
+    assert cfg.data_dir == Path("~/ws-data").expanduser()
+    assert [r.path for r in cfg.repositories] == [workspace.resolve()]
 
 
 def test_explicit_path_wins_over_project_local_file(tmp_path: Path) -> None:
     (tmp_path / ".corvidex").write_text('data_dir = "~/local-data"\n', encoding="utf-8")
     explicit = tmp_path / "explicit.toml"
     explicit.write_text('data_dir = "~/explicit-data"\n', encoding="utf-8")
-    cfg = load_config(explicit, write_default=False, cwd=tmp_path)
+    cfg = load_config(explicit, cwd=tmp_path)
     assert cfg.data_dir == Path("~/explicit-data").expanduser()
 
 
@@ -173,7 +203,7 @@ def test_env_var_wins_over_project_local_file(
     env_path = tmp_path / "env.toml"
     env_path.write_text('data_dir = "~/env-data"\n', encoding="utf-8")
     monkeypatch.setenv("CORVIDEX_MCP_CONFIG", str(env_path))
-    cfg = load_config(write_default=False, cwd=tmp_path)
+    cfg = load_config(cwd=tmp_path)
     assert cfg.data_dir == Path("~/env-data").expanduser()
 
 
