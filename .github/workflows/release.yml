@@ -126,7 +126,7 @@ jobs:
           ## Install
 
           ```console
-          pip install corvidex-mcp        # or: uvx corvidex-mcp
+          pip install corvidex-mcp
           ```
 
           ## Air-gapped hosts

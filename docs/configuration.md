@@ -307,7 +307,7 @@ filesystem = true
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/) (for `uvx`), Python ≥ 3.12
+- Python ≥ 3.12 with `pip`
 - Git (with your normal credentials/SSH setup for private repos)
 - Supported platforms: Linux with glibc ≥ 2.34 (RHEL 9/10 and
   derivatives such as AlmaLinux 9.6+, Ubuntu 24.04, Debian 12;
@@ -349,8 +349,6 @@ download is needed (air-gapped installs — see below).
 
 ```console
 $ pip install corvidex-mcp
-# or, to run it without installing anything permanently:
-$ uvx corvidex-mcp
 ```
 
 The published wheel is **slim** (1.3 MB): it carries the tokenizer and
