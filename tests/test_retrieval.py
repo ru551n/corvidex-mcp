@@ -20,7 +20,11 @@ from corvidex_mcp.embeddings.provider import FastEmbedProvider
 from corvidex_mcp.embeddings.providers import EmbeddingProviders
 from corvidex_mcp.git_manager import GitManager
 from corvidex_mcp.models import Chunk, CollectionName, ContentType
-from corvidex_mcp.retrieval import RetrievalError, RetrievalService
+from corvidex_mcp.retrieval import (
+    RetrievalError,
+    RetrievalService,
+    _drop_contained,
+)
 from corvidex_mcp.state import StateStore
 from corvidex_mcp.vector_store import VectorStore
 
@@ -353,7 +357,8 @@ async def test_get_source(env) -> None:
     _store, retrieval = env
     text = retrieval.get_source("repo", "rtl/fifo.vhd")
     assert text.startswith("repo:rtl/fifo.vhd @ ")
-    assert FIFO_VHDL.rstrip() in text
+    # Every source line is there, behind the 1-based line-number gutter.
+    assert all(line in text for line in FIFO_VHDL.rstrip().splitlines() if line)
     sliced = retrieval.get_source("repo", "rtl/fifo.vhd", start_line=2, end_line=3)
     assert "(lines 2-3" in sliced
     assert sliced.endswith("end entity fifo;")
@@ -361,6 +366,81 @@ async def test_get_source(env) -> None:
         retrieval.get_source("repo", "no/such.c")
     with pytest.raises(RetrievalError, match="unknown repository"):
         retrieval.get_source("nope", "rtl/fifo.vhd")
+
+
+async def test_get_source_numbers_lines_like_search_results(env) -> None:
+    """get_source and search results label a line identically, so an
+    agent can carry a line number from one to the other (and to the
+    0-based navigation tools) without counting."""
+    _store, retrieval = env
+    text = retrieval.get_source("repo", "rtl/fifo.vhd")
+    assert "   1 | entity fifo is" in text
+    assert "   3 | end entity fifo;" in text
+    # A slice numbers by the absolute file line, not from 1.
+    sliced = retrieval.get_source("repo", "rtl/fifo.vhd", start_line=5, end_line=7)
+    assert "   5 | architecture rtl of fifo is" in sliced
+    assert "   1 |" not in sliced
+
+
+def test_drop_contained_drops_nested_same_file_hits() -> None:
+    """A chunk nested in a better-ranked chunk of the same file is
+    dropped; the same span in another file, and a container ranked below
+    its own nested chunk, are kept."""
+    commit = "c" * 40
+    outer = make_chunk(
+        CollectionName.HDL, "rtl/a.vhd", "a", "architecture", 595, 697, "x", commit
+    )
+    inner = make_chunk(
+        CollectionName.HDL, "rtl/a.vhd", "pipeline", "process", 595, 690, "y", commit
+    )
+    other = make_chunk(
+        CollectionName.HDL, "rtl/b.vhd", "b", "architecture", 595, 697, "z", commit
+    )
+    kept = _drop_contained([(0.9, outer), (0.8, inner), (0.7, other)])
+    assert [chunk.symbol for _, chunk in kept] == ["a", "b"]
+    # Containment is judged against better-ranked hits only: a process
+    # that outranks its architecture keeps both (the architecture is not
+    # contained in the process).
+    kept_inner_first = _drop_contained([(0.9, inner), (0.8, outer)])
+    assert [chunk.symbol for _, chunk in kept_inner_first] == ["pipeline", "a"]
+
+
+async def test_search_drops_overlapping_chunks(env) -> None:
+    """The whole-file chunk and the constructs nested in it never both
+    take a slot in one response."""
+    store, retrieval = env
+    commit = store.list_files("repo") and retrieval._states.get("repo").indexed_commit
+    assert commit
+    whole = make_chunk(
+        CollectionName.HDL,
+        "rtl/fifo.vhd",
+        "fifo_file",
+        "file",
+        1,
+        7,
+        FIFO_VHDL,
+        commit,
+        symbols=("fifo",),
+    )
+    dense = retrieval._providers.embed_passages(CollectionName.HDL, [whole.content])
+    store.upsert_chunks([whole], dense)
+    results = await retrieval.search(CollectionName.HDL, "fifo", limit=10)
+    spans = [(r.start_line, r.end_line) for r in results if r.file == "rtl/fifo.vhd"]
+    for index, (start, end) in enumerate(spans):
+        for other_start, other_end in spans[index + 1 :]:
+            assert not (start <= other_start and other_end <= end), spans
+    # The entity (1-3) and the architecture (5-7) both sit inside 1-7,
+    # so at least one of the three indexed chunks lost its slot.
+    assert len(spans) < 3
+
+
+async def test_has_more_only_when_further_candidates_exist(env) -> None:
+    _store, retrieval = env
+    few = await retrieval.search(CollectionName.HDL, "fifo", limit=2)
+    assert len(few) == 2
+    assert few.has_more
+    everything = await retrieval.search(CollectionName.HDL, "fifo", limit=50)
+    assert not everything.has_more
 
 
 async def test_get_source_bad_range(env) -> None:

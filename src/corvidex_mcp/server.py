@@ -70,12 +70,12 @@ from .git_manager import GitManager
 from .indexing import IndexPipeline
 from .logging_setup import setup_logging
 from .lsp import AnalyzerStatus, build_analyzer_statuses
-from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResult
+from .models import INDEX_SCHEMA_VERSION, CollectionName, SearchResults
 from .navigation import find_definition as _find_definition
 from .navigation import find_references as _find_references
 from .navigation import find_symbol as _find_symbol
 from .navigation import hover_info as _hover_info
-from .retrieval import RetrievalError, RetrievalService
+from .retrieval import WEAK_MATCH_SCORE, RetrievalError, RetrievalService
 from .selfcheck import SelfCheckResult, run_self_check
 from .standards import sync_coding_standards
 from .state import StateStore
@@ -105,7 +105,16 @@ INSTRUCTIONS = (
     "similarity only), or 'lexical' (full-text match only). Use "
     "get_source for the full text of a known file (exact "
     "lines, exact commit). Every result carries source attribution "
-    "(repository, file, line range, commit, language). For exact, "
+    "(repository, file, line range, commit, language) and quotes at "
+    "most 40 lines of the matched chunk; when more were elided the "
+    "last body line is the exact get_source call that returns them. "
+    "Quoted lines carry a 1-based line-number gutter (same numbering "
+    "get_source uses), while find_definition/find_references/hover_info "
+    "take 0-based lines — pass N-1 for a line displayed as N. `score` "
+    "is the cross-encoder reranker's relevance in 0-1 when reranking is "
+    "available (comparable across queries; below ~0.05 means no real "
+    "match and the search says so), otherwise the store's rank-fused "
+    "score, which is only comparable within one response. For exact, "
     "compiler-backed navigation (not similarity search) once a symbol's "
     "location is already known, use find_definition, find_references, "
     "and hover_info (LSP go-to-definition/find-references/hover, backed "
@@ -498,17 +507,44 @@ class VhdlRagApp:
 # -- MCP tools -----------------------------------------------------------------
 
 
+def _weak_match_hint(results: SearchResults) -> str | None:
+    """One line warning that the best hit is a poor match, or None.
+
+    Only emitted when the scores are cross-encoder relevance in
+    ``(0, 1)`` (see :attr:`SearchResults.calibrated_scores`), the only
+    scale on which an absolute threshold means anything. Without it a
+    nonsense query returns a full page of 0.0001-scoring hits with no
+    sign that they are junk, and the agent concludes the index is
+    useless instead of trying an exact-name lookup.
+    """
+    if not results or not results.calibrated_scores:
+        return None
+    top = results[0].score
+    if top >= WEAK_MATCH_SCORE:
+        return None
+    return (
+        f"Note: no strong match — the best hit scores {top:.4f} of 1.0 "
+        "(cross-encoder relevance), i.e. the index probably has nothing "
+        "on this. If the query is an exact symbol name, call find_symbol; "
+        "otherwise rephrase it in the words the code or docs would use."
+    )
+
+
 def _render(
-    results: list[SearchResult],
+    results: SearchResults,
     empty: str,
     note: str | None = None,
-    limit: int | None = None,
 ) -> str:
-    body = "\n".join(result.render() for result in results) if results else empty
-    if limit is not None and len(results) >= limit:
+    if not results:
+        return f"{note}\n\n{empty}" if note else empty
+    body = "\n".join(result.render() for result in results)
+    weak = _weak_match_hint(results)
+    if weak:
+        body = f"{weak}\n\n{body}"
+    if results.has_more:
         body += (
-            "\nNote: results may be truncated at the limit; increase "
-            "`limit` or refine the query to see more."
+            "\nNote: more matches exist beyond `limit`; increase `limit` "
+            "or refine the query to see them."
         )
     return f"{note}\n\n{body}" if note else body
 
@@ -549,20 +585,18 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
     retrieval = app.retrieval
 
     async def _search(
-        call: Callable[[], Awaitable[list[SearchResult]]],
+        call: Callable[[], Awaitable[SearchResults]],
         empty: str,
         repository: str | None,
-        limit: int,
     ) -> str:
         """Shared tail of every search_* tool: run ``call`` (the
         retrieval search), then render it with the repository's
-        indexing note and the limit-truncation hint. ``call`` is
+        indexing note, the weak-match hint, and the "there really is
+        more" hint (both carried on the results). ``call`` is
         invoked before ``app.indexing_note`` so an unknown-repository
         error from the search raises before indexing_note ever sees
         the (unvalidated) name."""
-        return _render(
-            await call(), empty, note=app.indexing_note(repository), limit=limit
-        )
+        return _render(await call(), empty, note=app.indexing_note(repository))
 
     @mcp.tool(annotations=_READ_ONLY)
     @_handle_errors
@@ -584,7 +618,15 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         works across HDL languages. `repository` restricts to one
         repository name. `mode` selects the search strategy: 'hybrid'
         (default; semantic + full-text), 'semantic' (embedding
-        similarity only), or 'lexical' (full-text match only)."""
+        similarity only), or 'lexical' (full-text match only). Each hit quotes at
+        most 40 lines of the matched chunk, with a 1-based line-number
+        gutter; an elided body ends with the exact get_source call for
+        the rest. The navigation tools take 0-based lines, so pass N-1
+        for a line displayed as N. `score` is the reranker's
+        cross-encoder relevance in 0-1 when reranking is available (a
+        top score below ~0.05 is reported as no real match), else the
+        store's rank-fused score, comparable only within one
+        response."""
         return await _search(
             lambda: retrieval.search(
                 CollectionName.HDL,
@@ -598,7 +640,6 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No HDL results. Try a broader query or a different language, "
             "or check repository_status.",
             repository,
-            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -615,7 +656,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         takes the same `query`/`limit`/`repository`/`symbols`/`mode`
         parameters (see its docstring for full parameter docs); this form
         is kept only for backward compatibility and has no advantage over
-        it."""
+        it. Result shape is
+        search_hdl's: at most 40 quoted lines per hit with a 1-based
+        line-number gutter (the navigation tools take 0-based lines:
+        pass N-1 for a displayed N), an exact get_source call for
+        anything elided, and a `score` that is cross-encoder relevance
+        in 0-1 when reranking is available, else a rank-fused score
+        comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
                 CollectionName.HDL,
@@ -628,7 +675,6 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No VHDL results. Try a broader query, or check repository_status.",
             repository,
-            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -645,7 +691,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         identifiers referenced in the section's code snippets. `mode`
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
-        (full-text match only)."""
+        (full-text match only). Result shape is
+        search_hdl's: at most 40 quoted lines per hit with a 1-based
+        line-number gutter (the navigation tools take 0-based lines:
+        pass N-1 for a displayed N), an exact get_source call for
+        anything elided, and a `score` that is cross-encoder relevance
+        in 0-1 when reranking is available, else a rank-fused score
+        comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
                 CollectionName.DOCS,
@@ -658,7 +710,6 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No documentation results. Try a broader query, or check "
             "repository_status.",
             repository,
-            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -675,7 +726,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         unit (cross-reference to VHDL signal/port names, etc.). `mode`
         selects the search strategy: 'hybrid' (default; semantic +
         full-text), 'semantic' (embedding similarity only), or 'lexical'
-        (full-text match only)."""
+        (full-text match only). Result shape is
+        search_hdl's: at most 40 quoted lines per hit with a 1-based
+        line-number gutter (the navigation tools take 0-based lines:
+        pass N-1 for a displayed N), an exact get_source call for
+        anything elided, and a `score` that is cross-encoder relevance
+        in 0-1 when reranking is available, else a rank-fused score
+        comparable only within one response."""
         return await _search(
             lambda: retrieval.search(
                 CollectionName.CODE,
@@ -687,7 +744,6 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             ),
             "No code results. Try a broader query, or check repository_status.",
             repository,
-            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -705,7 +761,13 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         implemented in VHDL and tested in C). `mode` selects the search
         strategy: 'hybrid' (default; semantic + full-text), 'semantic'
         (embedding similarity only), or 'lexical' (full-text match
-        only)."""
+        only). Result shape is
+        search_hdl's: at most 40 quoted lines per hit with a 1-based
+        line-number gutter (the navigation tools take 0-based lines:
+        pass N-1 for a displayed N), an exact get_source call for
+        anything elided, and a `score` that is cross-encoder relevance
+        in 0-1 when reranking is available, else a rank-fused score
+        comparable only within one response."""
         return await _search(
             lambda: retrieval.search_knowledge(
                 query,
@@ -717,7 +779,6 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
             "No results in any domain. Try a broader query, or check "
             "repository_status.",
             repository,
-            limit,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -731,7 +792,11 @@ def create_mcp(app: VhdlRagApp) -> MCPServer:
         """Read the exact current content of an indexed file (or a line
         range) from the synced repository, with commit attribution.
         `file` is the repository-relative path from any search result's
-        source line."""
+        source line; call it with the `start_line`/`end_line` a search
+        result's elision marker names to get the lines it did not quote.
+        Output carries the same 1-based line-number gutter search
+        results use — find_definition/find_references/hover_info take
+        0-based lines, so pass N-1 for a line displayed as N."""
         return retrieval.get_source(repository, file, start_line, end_line)
 
     @mcp.tool(annotations=_READ_ONLY)

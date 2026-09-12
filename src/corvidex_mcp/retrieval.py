@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from .config import CODING_STANDARDS_REPO, AppConfig, ConfigError
 from .embeddings.providers import EmbeddingProviders
 from .git_manager import GitError, GitManager
-from .models import Chunk, CollectionName, SearchResult
+from .models import Chunk, CollectionName, SearchResult, SearchResults, number_lines
 from .retrieval_lexicon import expand_query
 from .standards import StandardsError, extract_standards_text
 from .state import StateStore
@@ -56,6 +56,20 @@ HDL_LANGUAGES = ("vhdl", "verilog", "systemverilog")
 #: Search strategies: hybrid (dense + full-text, RRF-fused; the
 #: default), semantic (dense leg only), lexical (full-text leg only).
 SEARCH_MODES = ("hybrid", "semantic", "lexical")
+
+#: Cross-encoder relevance below which the best hit is reported as a
+#: weak match (see :attr:`SearchResults.calibrated_scores`).
+#:
+#: Reranked scores are ``sigmoid(logit)`` in ``(0, 1)`` (see
+#: :class:`corvidex_mcp.embeddings.reranker.CrossEncoderReranker`), so
+#: 0.05 is a logit of about -2.9: the cross-encoder has to actively
+#: judge the best candidate irrelevant, not merely be unexcited about
+#: it. Observed junk queries land at 1e-4..1e-3, real hits well above
+#: 0.1. The threshold is only ever applied to reranked scores — RRF/
+#: cosine/BM25 scores have no comparable absolute scale (an RRF score
+#: is at most a few times ``1/(RRF_K + 1)`` ≈ 0.016 even for a perfect
+#: hit), so a fixed cut-off there would call every result weak.
+WEAK_MATCH_SCORE = 0.05
 
 
 class RetrievalError(Exception):
@@ -86,7 +100,14 @@ def _slice_text(
     start_line: int | None,
     end_line: int | None,
 ) -> str:
-    """The source header plus a (default full) line slice of ``text``."""
+    """The source header plus a (default full) line slice of ``text``.
+
+    The body carries the same 1-based line-number gutter search results
+    use (see :func:`corvidex_mcp.models.number_lines`), so a line seen
+    in a search result and the same line seen here are labelled
+    identically — and both convert to the navigation tools' 0-based
+    lines the same way (displayed ``N`` is passed as ``N - 1``).
+    """
     lines = text.splitlines()
     if not lines:
         raise RetrievalError(f"file {file!r} is empty")
@@ -96,12 +117,39 @@ def _slice_text(
         raise RetrievalError(
             f"invalid line range {start}-{end} (file has {len(lines)} lines)"
         )
-    body = "\n".join(lines[start - 1 : end])
+    body = number_lines("\n".join(lines[start - 1 : end]), start)
     return (
         f"{repository}:{file} @ {commit[:12]} "
         f"(lines {start}-{end} of {len(lines)})\n"
         f"{body}"
     )
+
+
+def _drop_contained(pairs: list[tuple[float, Chunk]]) -> list[tuple[float, Chunk]]:
+    """Drop hits nested inside a better-ranked hit of the same file.
+
+    The chunkers deliberately emit nested constructs — a process at
+    lines 595-690 and the architecture at 595-697 that contains it — and
+    both search legs rank them adjacently, so one response quoted the
+    same 96 lines twice and burned two of the caller's slots on one
+    region of one file. ``pairs`` must already be in final rank order; a
+    hit whose line range is fully contained in that of an earlier
+    (better-ranked) hit from the same repository+file is dropped. Run
+    before the limit is applied so the dropped duplicate frees its slot
+    for a different file.
+    """
+    kept: list[tuple[float, Chunk]] = []
+    spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for score, chunk in pairs:
+        key = (chunk.repository, chunk.file)
+        seen = spans.setdefault(key, [])
+        if any(
+            start <= chunk.start_line and chunk.end_line <= end for start, end in seen
+        ):
+            continue
+        seen.append((chunk.start_line, chunk.end_line))
+        kept.append((score, chunk))
+    return kept
 
 
 class RetrievalService:
@@ -221,13 +269,16 @@ class RetrievalService:
         :meth:`search_knowledge`). When ``rerank_enabled``, more than
         ``limit`` candidates are fetched from the store so the caller
         can rerank before truncating back to ``limit`` (see
-        :meth:`_rerank`).
+        :meth:`_rerank`). At least ``limit + 1`` candidates are always
+        fetched: the extra one is what lets the caller tell "there were
+        exactly this many matches" from "there were more" without
+        guessing (see :attr:`SearchResults.has_more`).
         """
         embeddings = self._config.embeddings
         fetch_limit = (
-            max(limit, embeddings.rerank_candidates)
+            max(limit + 1, embeddings.rerank_candidates)
             if embeddings.rerank_enabled
-            else limit
+            else limit + 1
         )
         must: dict[str, str] = {}
         if repository is not None:
@@ -247,23 +298,26 @@ class RetrievalService:
         return [(sc.score, sc.chunk) for sc in scored]
 
     async def _rerank(
-        self, query: str, pairs: list[tuple[float, Chunk]], limit: int
-    ) -> list[tuple[float, Chunk]]:
-        """Cross-encoder rerank of ``pairs``, truncated to ``limit``.
+        self, query: str, pairs: list[tuple[float, Chunk]]
+    ) -> tuple[list[tuple[float, Chunk]], bool]:
+        """Cross-encoder rerank of ``pairs``: ``(ranked, reranked)``.
 
-        Falls back to the input ranking (truncated to ``limit``) when
+        Falls back to the input ranking (with ``reranked=False``) when
         reranking is disabled, there is nothing to rerank, or the
         model fails to load/run (not provisioned, no network yet) — a
         missing reranker degrades precision, it never fails the
-        search. The returned score is the sigmoid-normalized
+        search. The returned score is then the sigmoid-normalized
         cross-encoder relevance in ``(0, 1)`` (see
         :class:`corvidex_mcp.embeddings.reranker.CrossEncoderReranker`),
         the same scale family the RRF/cosine scores it replaces use, so
         it composes with the bounded per-repository priority bonus the
-        same way.
+        same way. The flag tells the caller which of the two scales the
+        scores are on; nothing is truncated here, because the caller
+        still has to drop nested duplicates before it can know which
+        results fill the limit.
         """
         if not self._config.embeddings.rerank_enabled or len(pairs) <= 1:
-            return pairs[:limit]
+            return pairs, False
         texts = [chunk.content for _, chunk in pairs]
         try:
             scores = await self._providers.rerank_async(query, texts)
@@ -272,12 +326,45 @@ class RetrievalService:
                 "reranking unavailable (%s); returning the unreranked ranking",
                 exc,
             )
-            return pairs[:limit]
+            return pairs, False
         reranked = sorted(
             zip(scores, (chunk for _, chunk in pairs), strict=True),
             key=lambda item: -item[0],
         )
-        return reranked[:limit]
+        return reranked, True
+
+    def _finalize(
+        self,
+        pairs: list[tuple[float, Chunk]],
+        limit: int,
+        calibrated: bool,
+    ) -> SearchResults:
+        """Priority bonus, stable sort, overlap dedupe, then the limit.
+
+        Deduplication happens before truncation so a nested duplicate
+        frees its slot for a different file (see
+        :func:`_drop_contained`), and ``has_more`` is measured on the
+        deduplicated list so it means "more distinct regions exist", not
+        "we over-fetched".
+        """
+        boosted = [
+            (score + self._priority_bonus(chunk.repository), chunk)
+            for score, chunk in pairs
+        ]
+        boosted.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].repository,
+                item[1].file,
+                item[1].start_line,
+            )
+        )
+        ranked = _drop_contained(boosted)
+        return SearchResults(
+            (self._to_result(score, chunk) for score, chunk in ranked[:limit]),
+            has_more=len(ranked) > limit,
+            calibrated_scores=calibrated,
+        )
 
     # -- public search ------------------------------------------------------------
 
@@ -290,7 +377,7 @@ class RetrievalService:
         symbols: tuple[str, ...] | None = None,
         language: str | None = None,
         mode: str = "hybrid",
-    ) -> list[SearchResult]:
+    ) -> SearchResults:
         """Search one collection.
 
         ``mode`` selects the strategy: ``hybrid`` (default; dense +
@@ -305,7 +392,11 @@ class RetrievalService:
         candidates cross-encoder reranked before this returns (see
         :meth:`_fetch_collection`, :meth:`_rerank`). The score carries
         a bounded per-repository priority bonus (see
-        :meth:`_priority_bonus`).
+        :meth:`_priority_bonus`). Hits nested inside a better-ranked hit
+        of the same file are dropped before the limit is applied, and
+        the returned :class:`SearchResults` reports whether further
+        candidates existed and which scale the scores are on (see
+        :meth:`_finalize`).
         """
         query = self._check_query(query)
         self._repository(repository)
@@ -329,20 +420,8 @@ class RetrievalService:
         pairs = self._fetch_collection(
             collection, dense, expanded, limit, repository, symbols, language, mode
         )
-        pairs = await self._rerank(query, pairs, limit)
-        boosted = [
-            (score + self._priority_bonus(chunk.repository), chunk)
-            for score, chunk in pairs
-        ]
-        boosted.sort(
-            key=lambda item: (
-                -item[0],
-                item[1].repository,
-                item[1].file,
-                item[1].start_line,
-            )
-        )
-        return [self._to_result(score, chunk) for score, chunk in boosted]
+        pairs, calibrated = await self._rerank(query, pairs)
+        return self._finalize(pairs, limit, calibrated)
 
     async def search_knowledge(
         self,
@@ -352,7 +431,7 @@ class RetrievalService:
         symbols: tuple[str, ...] | None = None,
         language: str | None = None,
         mode: str = "hybrid",
-    ) -> list[SearchResult]:
+    ) -> SearchResults:
         """Search all three collections in one strategy, fused then reranked.
 
         The query is expanded once (not per collection, see
@@ -371,7 +450,9 @@ class RetrievalService:
         per collection. The final score is the rerank score when
         reranking is enabled and available, else the fused RRF score,
         plus the bounded per-repository priority bonus (see
-        :meth:`_priority_bonus`), applied once. ``language`` filters
+        :meth:`_priority_bonus`), applied once; nested same-file hits
+        are then dropped before the limit (see :meth:`_finalize`).
+        ``language`` filters
         every collection (collections without that language simply
         contribute nothing). A collection whose embedding model is
         unavailable is skipped (with a warning) rather than failing the
@@ -430,21 +511,9 @@ class RetrievalService:
                 item[1].start_line,
             ),
         )
-        cap = embeddings.rerank_candidates if embeddings.rerank_enabled else limit
-        reranked = await self._rerank(query, fused_ranked[:cap], limit)
-        boosted = [
-            (score + self._priority_bonus(chunk.repository), chunk)
-            for score, chunk in reranked
-        ]
-        boosted.sort(
-            key=lambda item: (
-                -item[0],
-                item[1].repository,
-                item[1].file,
-                item[1].start_line,
-            )
-        )
-        return [self._to_result(score, chunk) for score, chunk in boosted]
+        cap = embeddings.rerank_candidates if embeddings.rerank_enabled else limit + 1
+        reranked, calibrated = await self._rerank(query, fused_ranked[:cap])
+        return self._finalize(reranked, limit, calibrated)
 
     # -- source access ------------------------------------------------------------
 

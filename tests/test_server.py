@@ -36,6 +36,7 @@ from corvidex_mcp.models import (
     CollectionName,
     ContentType,
     SearchResult,
+    SearchResults,
 )
 from corvidex_mcp.server import (
     VhdlRagApp,
@@ -349,31 +350,48 @@ async def test_indexing_note_zero_config_auto_indexed(env, tmp_path: Path) -> No
     assert "not yet indexed: myproj" in note
 
 
-def test_render_appends_truncation_note_at_limit() -> None:
-    commit = "a" * 12
-    results = [
-        SearchResult(
-            result_type="hdl",
-            repository="repo",
-            commit=commit,
-            file="rtl/fifo.vhd",
-            content="entity fifo is end;",
-            score=1.0,
-        )
-        for _ in range(2)
-    ]
-    truncated = _render(results, "empty", limit=2)
-    assert truncated.endswith(
-        "Note: results may be truncated at the limit; increase `limit` "
-        "or refine the query to see more."
+def _fake_result(score: float = 1.0) -> SearchResult:
+    return SearchResult(
+        result_type="hdl",
+        repository="repo",
+        commit="a" * 12,
+        file="rtl/fifo.vhd",
+        content="entity fifo is end;",
+        score=score,
     )
-    not_truncated = _render(results, "empty", limit=5)
-    assert "may be truncated" not in not_truncated
-    # No limit given at all: never appended.
-    assert "may be truncated" not in _render(results, "empty")
 
 
-async def test_search_hdl_tool_truncation_note(env) -> None:
+def test_render_notes_more_results_only_when_they_exist() -> None:
+    results = [_fake_result() for _ in range(2)]
+    more = _render(SearchResults(results, has_more=True), "empty")
+    assert more.endswith(
+        "Note: more matches exist beyond `limit`; increase `limit` "
+        "or refine the query to see them."
+    )
+    # A full page that happens to be everything there is says nothing:
+    # the old note fired on len(results) >= limit, i.e. on almost every
+    # call, and was learned as noise.
+    assert "more matches exist" not in _render(
+        SearchResults(results, has_more=False), "empty"
+    )
+    assert "more matches exist" not in _render(SearchResults(), "empty")
+
+
+def test_render_flags_a_weak_best_match_only_on_calibrated_scores() -> None:
+    junk = SearchResults([_fake_result(score=0.0012)], calibrated_scores=True)
+    text = _render(junk, "empty")
+    assert text.startswith("Note: no strong match")
+    assert "0.0012" in text
+    assert "find_symbol" in text
+    # Without the reranker the scores are RRF/cosine, whose scale makes
+    # a fixed threshold meaningless: no claim is made.
+    uncalibrated = SearchResults([_fake_result(score=0.0012)], calibrated_scores=False)
+    assert "no strong match" not in _render(uncalibrated, "empty")
+    strong = SearchResults([_fake_result(score=0.87)], calibrated_scores=True)
+    assert "no strong match" not in _render(strong, "empty")
+
+
+async def test_search_hdl_tool_more_results_note(env) -> None:
     app, mcp, _up = env
     commit = app.states.get("repo").indexed_commit or "abc123"
     chunks = [
@@ -387,10 +405,10 @@ async def test_search_hdl_tool_truncation_note(env) -> None:
     truncated = tool_text(
         await mcp.call_tool("search_hdl", {"query": "fifo", "limit": 2})
     )
-    assert "Note: results may be truncated at the limit" in truncated
+    assert "Note: more matches exist beyond `limit`" in truncated
 
     full = tool_text(await mcp.call_tool("search_hdl", {"query": "fifo", "limit": 10}))
-    assert "Note: results may be truncated at the limit" not in full
+    assert "more matches exist" not in full
 
 
 async def test_search_tool_reports_indexing_note(env) -> None:
@@ -417,13 +435,17 @@ async def test_get_source_tool(env) -> None:
     )
     text = tool_text(result)
     assert text.startswith("repo:src/fifo.c @ ")
-    assert FIFO_C.rstrip() in text
+    # Every line is there behind the 1-based gutter search results use.
+    assert all(line in text for line in FIFO_C.rstrip().splitlines() if line)
+    assert "   1 | " in text
 
     result = await mcp.call_tool(
         "get_source",
         {"repository": "repo", "file": "src/fifo.c", "start_line": 2, "end_line": 2},
     )
-    assert "(lines 2-2" in tool_text(result)
+    sliced = tool_text(result)
+    assert "(lines 2-2" in sliced
+    assert "   2 | " in sliced
 
     result = await mcp.call_tool("get_source", {"repository": "repo", "file": "no.c"})
     assert tool_text(result).startswith("Error:")
