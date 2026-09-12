@@ -421,8 +421,7 @@ def test_default_config_text_uses_explicit_files_list_when_given():
     workspace. A blanket '**/*.vhd' glob matches gitignored build-output
     directories whose names happen to end in '.vhd' (e.g. GHDL's
     per-run library cache under vunit_out/, which are directories, not
-    files) and dumps unrelated vendored/submodule trees into a single
-    defaultlib, causing duplicate-declaration errors."""
+    files)."""
     lsp = VhdlLsp(
         "vhdl_ls", Path("/tmp"), files=("modules/foo/src/foo.vhd", "src/bar.vhd")
     )
@@ -431,6 +430,72 @@ def test_default_config_text_uses_explicit_files_list_when_given():
     assert "'modules/foo/src/foo.vhd'" in text
     assert "'src/bar.vhd'" in text
     assert "**/*.vhd" not in text
+
+
+def test_default_config_text_declares_one_library_per_module():
+    """The tsfpga/hdl-modules layout maps each 'modules/<name>/...' file
+    to library '<name>'. Without that, a library-qualified name such as
+    'cnn_accel.cnn_accel_bias_requant' — the standard instantiation
+    style in these projects — resolves against no library at all and
+    every navigation tool silently returns nothing."""
+    lsp = VhdlLsp(
+        "vhdl_ls",
+        Path("/tmp"),
+        files=(
+            "modules/cnn_accel/src/cnn_accel_conv_core.vhd",
+            "modules/cnn_accel/test/tb_cnn_accel_conv_core.vhd",
+            "hdl-modules/modules/fifo/src/asynchronous_fifo.vhd",
+            "hdl-modules/modules/bfm/sim/axi_slave_pkg.vhd",
+        ),
+    )
+    text = lsp.default_config_text()
+    assert text is not None
+    assert "[libraries.cnn_accel]" in text
+    assert "[libraries.fifo]" in text
+    assert "[libraries.bfm]" in text
+    # src/ and the sibling test/ belong to the same library.
+    cnn_accel = text.split("[libraries.cnn_accel]")[1].split("[libraries.")[0]
+    assert "'modules/cnn_accel/src/cnn_accel_conv_core.vhd'" in cnn_accel
+    assert "'modules/cnn_accel/test/tb_cnn_accel_conv_core.vhd'" in cnn_accel
+    # Nothing is left over in the catch-all library.
+    assert "[libraries.defaultlib]" not in text
+
+
+def test_default_config_text_unrecognised_layout_falls_back_to_defaultlib():
+    lsp = VhdlLsp(
+        "vhdl_ls",
+        Path("/tmp"),
+        files=("rtl/top.vhd", "sim/tb_top.vhd", "modules/cnn_accel/src/pkg.vhd"),
+    )
+    text = lsp.default_config_text()
+    assert text is not None
+    defaultlib = text.split("[libraries.defaultlib]")[1].split("[libraries.")[0]
+    assert "'rtl/top.vhd'" in defaultlib
+    assert "'sim/tb_top.vhd'" in defaultlib
+    assert "'modules/cnn_accel/src/pkg.vhd'" not in defaultlib
+    assert "[libraries.cnn_accel]" in text
+
+
+def test_default_config_text_never_emits_a_work_library():
+    """vhdl_ls rejects the *whole* configuration when any library is
+    named 'work', so a 'modules/work/...' directory must not become
+    one; 'std'/'ieee' would collide with the bundled sections."""
+    lsp = VhdlLsp(
+        "vhdl_ls",
+        Path("/tmp"),
+        files=(
+            "modules/work/src/a.vhd",
+            "modules/ieee/src/b.vhd",
+            "modules/__pycache__/c.vhd",
+        ),
+    )
+    text = lsp.default_config_text()
+    assert text is not None
+    assert "[libraries.work]" not in text
+    assert "[libraries.ieee]" not in text
+    assert "[libraries.__pycache__]" not in text
+    assert text.count("[libraries.") == 1
+    assert "[libraries.defaultlib]" in text
 
 
 def test_default_config_text_explicit_empty_files_list():

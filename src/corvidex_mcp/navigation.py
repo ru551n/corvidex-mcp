@@ -137,6 +137,116 @@ def _check_file_exists(app: VhdlRagApp, cfg: RepositoryConfig, file: str) -> Non
         )
 
 
+def _validate_position(file: str, lines: list[str], line: int, character: int) -> None:
+    """Reject a position that cannot name anything in ``file``.
+
+    An out-of-range or negative position used to reach the language
+    server and come back as the same flat "No definition found at that
+    position." as a genuinely undefined symbol, so a caller could not
+    tell a typo'd position from a missing declaration and would
+    conclude the symbol does not exist. Positions are 0-based (LSP
+    convention); the messages say so and name the file's real extent,
+    so the caller can correct the position without guessing.
+    """
+    if line < 0 or character < 0:
+        raise RetrievalError(
+            f"invalid position {line}:{character} in {file!r}: line and "
+            "character are 0-based and must not be negative (the very "
+            "first character of a file is line 0, character 0)"
+        )
+    if not lines:
+        raise RetrievalError(
+            f"{file!r} is empty, so no position in it can name a symbol"
+        )
+    if line >= len(lines):
+        raise RetrievalError(
+            f"line {line} is past the end of {file!r}: the file has "
+            f"{len(lines)} lines, so the last addressable line is "
+            f"{len(lines) - 1} (positions here are 0-based — line "
+            f"{len(lines) - 1} is what an editor shows as line "
+            f"{len(lines)})"
+        )
+    width = len(lines[line])
+    if character > width:
+        raise RetrievalError(
+            f"character {character} is past the end of line {line} in "
+            f"{file!r}: that line is {width} characters long, so the last "
+            f"addressable character is {max(width - 1, 0)} (positions here "
+            "are 0-based)"
+        )
+
+
+#: A VHDL selected name — ``entity``, ``cnn_accel.cnn_accel_pkg``,
+#: ``work.foo.bar`` — used only to explain an unresolved position, so it
+#: deliberately ignores extended identifiers and whitespace around dots.
+_SELECTED_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
+
+
+def _selected_name_at(lines: list[str], line: int, character: int) -> str:
+    """The dotted VHDL name covering ``character``, or '' when the
+    position is not on an identifier at all."""
+    if not 0 <= line < len(lines):
+        return ""
+    text = lines[line]
+    for match in _SELECTED_NAME.finditer(text):
+        if match.start() <= character < match.end():
+            return match.group(0)
+    return ""
+
+
+def _no_result_message(what: str, lines: list[str], line: int, character: int) -> str:
+    """ "No <what> found" plus what can be told about *why*, cheaply.
+
+    The flat message alone is indistinguishable between "the symbol is
+    not declared anywhere", "you are pointing at whitespace" and "the
+    library in this library-qualified name is not configured" — and a
+    caller reading it concludes the symbol does not exist. The last
+    case is the common one in tsfpga/hdl-modules projects, where
+    ``<library>.<entity>`` instantiation is the standard style, so it
+    is called out explicitly.
+    """
+    base = f"No {what} found at that position."
+    name = _selected_name_at(lines, line, character)
+    if not name:
+        text = lines[line] if 0 <= line < len(lines) else ""
+        if not text.strip():
+            return (
+                f"{base} Line {line} is blank (positions here are 0-based, "
+                f"so this is line {line + 1} in an editor) — point at the "
+                "identifier itself."
+            )
+        return (
+            f"{base} Character {character} of line {line} is not part of an "
+            f"identifier (the line is {text.strip()[:80]!r}) — positions "
+            "here are 0-based and must sit on the name itself."
+        )
+    if "." in name:
+        library, _, suffix = name.partition(".")
+        if library.lower() == "work":
+            return (
+                f"{base} {name!r} names {suffix!r} in the file's own library "
+                "('work'), so either it is not declared there or the "
+                "declaring file is not part of this analysis session."
+            )
+        return (
+            f"{base} {name!r} is library-qualified and the library "
+            f"{library!r} did not resolve. vhdl_ls can only resolve "
+            "'<library>.<name>' when that library is declared in the "
+            "workspace's vhdl_ls.toml: check the repository's own "
+            "vhdl_ls.toml (or its vhdl_ls_hook) if it has one — otherwise "
+            "the built-in generated config infers libraries from the "
+            "'modules/<library>/...' layout, and this file does not match "
+            "it. The symbol may well exist; this is a configuration "
+            "result, not a 'not declared' one."
+        )
+    return (
+        f"{base} The position is on {name!r}; if that symbol is declared in "
+        "another file, that file may be outside this session's file set "
+        f"(capped at {MAX_SESSION_FILES} same-language files) or in a "
+        "library the vhdl_ls configuration does not declare."
+    )
+
+
 def _session_files(
     app: VhdlRagApp, cfg: RepositoryConfig, file: str, extensions: frozenset[str]
 ) -> list[str]:
@@ -213,22 +323,32 @@ async def _navigate[T](
     repository: str,
     file: str,
     call: Callable[[LspClient, Path], Awaitable[T]],
-) -> tuple[T, LspClient, Path]:
+    position: tuple[int, int],
+) -> tuple[T, LspClient, Path, list[str]]:
     """Shared session lifecycle for definition/references/hover.
 
     Resolves the repository, picks the analyzer from ``file``'s
-    extension, opens a same-language file set (see
-    :func:`_session_files`), runs ``call``, and returns its result
-    alongside the (now shut down, but still readable) client — for
-    ``supports_*`` checks — and the checkout dir, for path rendering.
+    extension, validates ``position`` against the file's real extent
+    *before* paying for a language-server session, opens a
+    same-language file set (see :func:`_session_files`), runs ``call``,
+    and returns its result alongside the (now shut down, but still
+    readable) client — for ``supports_*`` checks — the checkout dir,
+    for path rendering, and the file's lines, for explaining an empty
+    result.
     """
     cfg = _resolve_repository(app, repository)
     analyzer = _analyzer_for(file)
     _check_file_exists(app, cfg, file)
+    try:
+        source = app.git.read_file(cfg, file)
+    except GitError as exc:
+        raise RetrievalError(str(exc)) from exc
+    lines = source.splitlines()
+    _validate_position(file, lines, *position)
     files = _session_files(app, cfg, file, _EXTENSIONS[analyzer])
     async with _session(app, cfg, analyzer, files) as (lsp, repo_dir):
         result = await call(lsp, repo_dir / file)
-    return result, lsp, repo_dir
+    return result, lsp, repo_dir, lines
 
 
 #: A URI path component shaped like ``/C:/...`` — the POSIX-style
@@ -299,8 +419,12 @@ async def find_definition(
     for the cross-file resolution caveat (same-language files up to
     :data:`MAX_SESSION_FILES` are opened alongside ``file``).
     """
-    locations, lsp, repo_dir = await _navigate(
-        app, repository, file, lambda c, path: c.definition(path, line, character)
+    locations, lsp, repo_dir, lines = await _navigate(
+        app,
+        repository,
+        file,
+        lambda c, path: c.definition(path, line, character),
+        (line, character),
     )
     if not lsp.supports_definition:
         return (
@@ -308,7 +432,7 @@ async def find_definition(
             "go-to-definition support."
         )
     if not locations:
-        return "No definition found at that position."
+        return _no_result_message("definition", lines, line, character)
     return _format_locations(app, repository, repo_dir, locations)
 
 
@@ -326,13 +450,14 @@ async def find_references(
     rendered as 1-based ``path:line:col``. See the module docstring
     for the cross-file resolution caveat.
     """
-    locations, lsp, repo_dir = await _navigate(
+    locations, lsp, repo_dir, lines = await _navigate(
         app,
         repository,
         file,
         lambda c, path: c.references(
             path, line, character, include_declaration=include_declaration
         ),
+        (line, character),
     )
     if not lsp.supports_references:
         return (
@@ -340,7 +465,7 @@ async def find_references(
             "find-references support."
         )
     if not locations:
-        return "No references found at that position."
+        return _no_result_message("references", lines, line, character)
     return _format_locations(app, repository, repo_dir, locations)
 
 
@@ -352,13 +477,17 @@ async def hover_info(
     ``line``/``character`` are 0-based (LSP convention). Not a
     substitute for search_hdl when the exact position is unknown.
     """
-    text, lsp, _repo_dir = await _navigate(
-        app, repository, file, lambda c, path: c.hover(path, line, character)
+    text, lsp, _repo_dir, lines = await _navigate(
+        app,
+        repository,
+        file,
+        lambda c, path: c.hover(path, line, character),
+        (line, character),
     )
     if not lsp.supports_hover:
         return "The language server for this file does not advertise hover support."
     if text is None:
-        return "No hover information at that position."
+        return _no_result_message("hover information", lines, line, character)
     return text
 
 

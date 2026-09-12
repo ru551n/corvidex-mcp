@@ -256,11 +256,25 @@ filesystem = true
   generates `vhdl_ls.toml` when the file is missing (before the
   `vhdl_ls` session for that repository). When no hook is set, the hook
   fails, or it leaves no file behind, the server writes a built-in
-  default (a `defaultlib` glob for all `.vhd`/`.vhdl` files plus the
-  standard libraries shipped with `vhdl_ls`) and removes it after the
-  session; files a hook creates are owned by the hook and are never
-  removed by the server. For local working repositories the hook runs
-  inside your own checkout.
+  default and removes it after the session; files a hook creates are
+  owned by the hook and are never removed by the server. For local
+  working repositories the hook runs inside your own checkout.
+
+  The built-in default is **library-aware**: each indexed file is
+  mapped to a VHDL library from the tsfpga/hdl-modules directory
+  layout — `modules/<library>/…` (`src`, `rtl`, `test`, `sim`,
+  `regs_src`, … all belong to the same library), matched at any depth
+  so a vendored submodule's own `modules/` wins — and gets a
+  `[libraries.<name>]` section, plus the standard libraries shipped
+  with `vhdl_ls`. Files whose layout is not recognised fall back to a
+  single `defaultlib`. This is what makes a library-qualified name
+  (`cnn_accel.cnn_accel_bias_requant`, the standard instantiation
+  style in these projects) resolvable: `vhdl_ls` resolves
+  `<library>.<name>` only against a library the configuration
+  declares, so a flat single-library config silently returns nothing
+  from `find_definition`, `find_references` and `hover_info` for every
+  such name. Repositories laid out differently should supply their own
+  `vhdl_ls.toml` or a `vhdl_ls_hook`.
 - **Local working repositories** index the working tree: HEAD plus
    uncommitted changes (staged and unstaged) and untracked files
    (honoring `.gitignore`); chunks are attributed to the current HEAD
@@ -311,7 +325,7 @@ filesystem = true
   `vhdl_libraries` directory shipped next to the binary is
   auto-detected. Per repository, `vhdl_ls_hook` may generate the
   `vhdl_ls.toml` workspace config (above); otherwise the server writes
-  a built-in default.
+  a built-in, library-aware default.
 - Veridian (only needed for repositories that contain Verilog or
   SystemVerilog): install it so `veridian` is on your `PATH`, or point
   `veridian_path` at the binary. Per repository, `veridian_hook` may

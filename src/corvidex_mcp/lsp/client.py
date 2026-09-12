@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .libraries import DEFAULT_LIBRARY, group_by_library, library_section
+
 logger = logging.getLogger(__name__)
 
 #: How long to wait for the server to stop emitting diagnostics.
@@ -911,22 +913,44 @@ class VhdlLsp(LspClient):
         return diagnostic.code == "syntax_error"
 
     def default_config_text(self) -> str | None:
-        entries = self._files if self._files is not None else self._DEFAULTLIB_GLOBS
-        files_list = ", ".join(f"'{entry}'" for entry in entries)
-        lines = ["[libraries.defaultlib]", f"files = [{files_list}]", ""]
+        """A library-aware ``vhdl_ls.toml`` for the resolved file list.
+
+        Each file is mapped to the VHDL library its directory layout
+        says it belongs to (see :mod:`corvidex_mcp.lsp.libraries`) and
+        gets its own ``[libraries.<name>]`` section, so a
+        library-qualified name (``cnn_accel.cnn_accel_bias_requant``)
+        resolves. Declaring everything in one ``defaultlib`` — what
+        this used to do — leaves every such name unresolvable, which
+        is the dominant style in tsfpga/hdl-modules projects. Files
+        whose layout is not recognised still land in ``defaultlib``,
+        and so does the whole workspace when no file list was given.
+        """
+        lines: list[str] = []
+        if self._files is None:
+            lines += library_section(DEFAULT_LIBRARY, self._DEFAULTLIB_GLOBS)
+        else:
+            groups = group_by_library(self._files)
+            for name, files in groups.items():
+                lines += library_section(name, files)
+            if not groups:
+                lines += library_section(DEFAULT_LIBRARY, ())
+            logger.info(
+                "generated %s for %s with %d librar%s: %s",
+                self.config_name,
+                self._workspace,
+                len(groups),
+                "y" if len(groups) == 1 else "ies",
+                ", ".join(groups) or DEFAULT_LIBRARY,
+            )
         if self._libraries is not None and self._libraries.is_dir():
             lib = str(self._libraries)
-            ieee_files = ", ".join(
-                f"'{lib}/{name}/*.vhdl'"
-                for name in ("ieee2008", "synopsys", "vital2000")
+            lines += library_section("std", [f"{lib}/std/*.vhd"], third_party=True)
+            lines += library_section(
+                "ieee",
+                [
+                    f"{lib}/{name}/*.vhdl"
+                    for name in ("ieee2008", "synopsys", "vital2000")
+                ],
+                third_party=True,
             )
-            lines += [
-                "[libraries.std]",
-                f"files = ['{lib}/std/*.vhd']",
-                "is_third_party = true",
-                "",
-                "[libraries.ieee]",
-                f"files = [{ieee_files}]",
-                "is_third_party = true",
-            ]
-        return "\n".join(lines)
+        return "\n".join(lines).rstrip("\n") + "\n"
