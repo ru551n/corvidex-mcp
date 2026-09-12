@@ -343,67 +343,138 @@ background. By default the model is downloaded once and cached; it
 can alternatively ship inside the installed package so no runtime
 download is needed (air-gapped installs — see below).
 
-## Air-gapped installation
+## Installation
 
-For hosts without network access, install from a wheel plus a
-dependency wheelhouse; after installation the server never touches
-the network. Everything is built on an internet-connected machine:
+### From PyPI (models downloaded on first run)
 
-1. **Bundle the model into the package** (the ONNX weights are
-   gitignored, so a plain git checkout does not contain them):
+```console
+$ pip install corvidex-mcp
+# or, to run it without installing anything permanently:
+$ uvx corvidex-mcp
+```
 
-   ```console
-   $ uv run --no-sync python tools/bundle_model.py
-   # offline alternative, from an existing snapshot directory:
-   $ uv run --no-sync python tools/bundle_model.py --from /path/to/snapshot
-   ```
+The published wheel is **slim** (1.3 MB): it carries the tokenizer and
+config files of every model but none of their ONNX weights. On first
+start fastembed downloads the weights the configuration asks for into
+`<data_dir>/embed-cache` (~0.86 GB for the three defaults) and every
+later start reads them from there.
 
-2. **Build the package wheel** (the model ships inside it, ~75 MB):
+`pip install corvidex-mcp` needs network access at install time *and*
+at first run. For a host that has neither, use the offline bundle
+below.
 
-   ```console
-   $ uv build --wheel --out-dir dist
-   ```
+Platform note: on Apple Silicon, **Python 3.14 requires macOS 14+** —
+every `onnxruntime` wheel for CPython 3.14 is tagged
+`macosx_14_0_arm64`, and unlike 3.12/3.13 there is no older cp314 build
+to fall back to. On 3.12/3.13 the resolver backtracks to an
+onnxruntime with a macOS 13-compatible wheel.
 
-3. **Build the dependency wheelhouse** (the third-party dependencies
-   stay external; the wheel only carries the model data). Portable
-   form, targeting the air-gapped host's platform:
+### Air-gapped installation (offline bundle)
 
-   ```console
-   $ uv export --no-hashes --no-emit-project --no-dev > requirements.txt
-   $ pip download -r requirements.txt --dest wheelhouse \
-       --only-binary=:all: --python-version 312 \
-       --platform manylinux2014_x86_64 --platform any
-   ```
+The offline bundle carries **every** model inside the wheel, so an
+air-gapped host downloads nothing at install time or at run time. It is
+one archive:
 
-   (Omit the `--platform`/`--python-version` flags when building on a
-   machine with the same OS, architecture, and Python version as the
-   target.)
+```
+corvidex-mcp-<version>-offline-<platform>-<abi>.tar.gz
+├── corvidex_mcp-<version>+offline-py3-none-any.whl   the package, models embedded
+├── wheelhouse/                                       every runtime dependency
+├── install.sh                                        venv + pip install --no-index
+└── README.md                                         install and verification
+```
 
-4. **Transfer** `dist/corvidex_mcp-*.whl` and the `wheelhouse/`
-   directory to the air-gapped host.
+Measured for 0.1.0 on `manylinux2014_x86_64` / CPython 3.12:
 
-5. **Install offline** (Python ≥ 3.12 with `pip`, or uv):
+| Artifact | Size |
+| --- | --- |
+| slim wheel (PyPI) | 1.3 MB |
+| sdist (PyPI) | 1.4 MB |
+| embedded ONNX weights, uncompressed | 862.3 MB |
+| all-models wheel | 537.4 MB |
+| dependency wheelhouse (55 wheels) | 71.5 MB |
+| **offline bundle archive** | **607.6 MB** |
 
-   ```console
-   $ python3.12 -m venv .venv
-   $ .venv/bin/pip install --no-index --find-links wheelhouse \
-       dist/corvidex_mcp-0.1.0-py3-none-any.whl
-   # with uv: uv venv .venv && uv pip install --python .venv/bin/python \
-   #     --no-index --find-links wheelhouse dist/corvidex_mcp-0.1.0-py3-none-any.whl
-   ```
+**This bundle is not on PyPI and cannot be.** PyPI enforces a 100 MB
+per-file limit plus a per-project quota, and limit increases are not
+granted for bundled model weights. Splitting the weights across several
+sub-100 MB wheels to get under the cap was considered and rejected: it
+abuses a shared, donated index to host ~0.9 GB of third-party model
+binaries. The bundle is published as a **GitHub Release asset** on
+<https://github.com/ru551n/corvidex-mcp/releases> instead.
 
-6. **Register the MCP client** with the absolute path to the installed
-   console script (no `uvx`, no network):
+The embedded wheel's version is `<version>+offline` — a PEP 440 local
+version segment. PyPI refuses local versions outright, so it cannot be
+uploaded there by accident; `pip` still installs it; it sorts *above*
+the plain public release, so a host that later gains an index is not
+silently downgraded; and `pip show corvidex-mcp` tells you which
+variant is installed.
 
-   ```console
-   $ claude mcp add corvidex-mcp -- /path/to/.venv/bin/corvidex-mcp
-   ```
+#### Building it (on a connected machine)
 
-On startup the self-check logs that the embedding model is loaded from
-the bundled assets; `repository_status` reports per-collection model
-state. If a wheel was built without the model assets (plain git
-checkout), the fallback is to pre-provision the fastembed cache: copy
-an existing `embed-cache` directory (from an online machine) into
+```console
+$ uv run --no-sync python tools/build_release.py --all
+```
+
+That produces both artifacts: `dist/` gets the slim wheel + sdist
+(nothing else ever lands there, so `twine check dist/*` is always
+safe), and `dist-offline/` gets the bundle archive. Useful flags:
+
+- `--model-source ~/.local/share/corvidex/embed-cache` provisions the
+  embedded models by copying an existing fastembed/HF cache instead of
+  re-downloading them; add `--models-offline` to make a model missing
+  from that cache an error rather than a silent fetch.
+- `--python-version` / `--platform` target the wheelhouse at the
+  air-gapped host's interpreter and platform (defaults: CPython 3.12,
+  the x86_64 manylinux tag set). pip matches `--platform` literally, so
+  the default asks for several manylinux variants; the resulting floor
+  is the strictest tag actually chosen (today glibc 2.34 — RHEL 9 /
+  Ubuntu 22.04 and newer).
+- `--slim` / `--offline` build just one of the two.
+
+To provision the models into a working checkout without building
+anything (e.g. to develop against the bundled-asset code path):
+
+```console
+$ uv run --no-sync python tools/bundle_model.py --list   # what is needed
+$ uv run --no-sync python tools/bundle_model.py --all
+$ uv run --no-sync python tools/bundle_model.py --all \
+      --from ~/.local/share/corvidex/embed-cache --offline
+```
+
+`--all` reads the model names from the live `EmbeddingsConfig`
+defaults, so it follows a changed default automatically. A single
+`--model NAME` still provisions one model, and `--from` accepts either
+a Hugging Face cache root or one model's snapshot directory. The ONNX
+weights are gitignored; the small JSON files are committed.
+
+#### Installing it (on the air-gapped host)
+
+```console
+$ tar xzf corvidex-mcp-0.1.0-offline-manylinux2014-x86-64-cp312.tar.gz
+$ cd corvidex-mcp-0.1.0-offline-manylinux2014-x86-64-cp312
+$ ./install.sh /opt/corvidex-venv          # PYTHON=... to pick an interpreter
+$ claude mcp add corvidex-mcp -- /opt/corvidex-venv/bin/corvidex-mcp
+```
+
+#### Verifying it
+
+```console
+$ /opt/corvidex-venv/bin/python -m corvidex_mcp.verify_offline
+```
+
+The verifier refuses every outbound socket for the rest of the process,
+then reports which models resolved to the bundled package assets,
+indexes a throwaway repository through the real pipeline (real
+chunking, real ONNX embedding, real sqlite-vec + FTS5 store), searches
+all three collections, and asserts the cross-encoder reranker actually
+ran rather than degrading silently. A download attempt fails loudly
+instead of hiding. It ends with `offline verification: OK`.
+
+At runtime the startup self-check logs that each model was loaded from
+the bundled assets, and `repository_status` reports per-collection
+model state. If a wheel was built *without* the model assets (a plain
+git checkout), the fallback is to pre-provision the fastembed cache:
+copy an existing `embed-cache` directory from an online machine into
 `<data_dir>/embed-cache` before the first start.
 
 ## Startup and background sync

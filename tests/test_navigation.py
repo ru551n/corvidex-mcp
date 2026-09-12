@@ -231,7 +231,19 @@ def fake_providers(config: AppConfig) -> EmbeddingProviders:
     providers = EmbeddingProviders(config)
     dense = FastEmbedProvider("fake/dense", dense=FakeDense())
     providers._dense_provider = lambda _collection: dense  # type: ignore[method-assign]
+    # The reranker must be faked too, not just the dense model: otherwise
+    # these tests depend on whether a real cross-encoder happens to be
+    # loadable on the machine (bundled package assets, or a populated
+    # embed-cache), which silently changes every score from the store's
+    # RRF ranking to the model's. Making it unavailable pins the
+    # documented degradation path (see RetrievalService._rerank); tests
+    # that exercise reranking install their own scorer over this.
+    providers.rerank = _unavailable_reranker  # type: ignore[method-assign]
     return providers
+
+
+def _unavailable_reranker(query: str, texts: list[str]) -> list[float]:
+    raise RuntimeError("no reranker model in the unit tests")
 
 
 class FakeApp:

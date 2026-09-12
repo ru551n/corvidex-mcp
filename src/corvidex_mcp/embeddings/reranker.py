@@ -46,20 +46,46 @@ class CrossEncoderReranker:
         cache_dir: Path | None = None,
         threads: int | None = None,
         model: CrossEncoderLike | None = None,
+        offline_model_dir: Path | None = None,
     ) -> None:
         self._model_name = model_name
         self._cache_dir = cache_dir
         self._threads = threads
+        self._offline_model_dir = offline_model_dir
         self._model: CrossEncoderLike | None = model
 
     def _ensure_model(self) -> CrossEncoderLike:
+        """Lazily load the cross-encoder.
+
+        When ``offline_model_dir`` is set (the reranker bundled in the
+        package, air-gapped installs), fastembed loads the weights and
+        tokenizer from that directory and never touches the network or
+        the download cache — the same ``specific_model_path`` mechanism
+        the dense providers use (``TextCrossEncoder`` forwards it to
+        ``OnnxTextCrossEncoder`` through ``**kwargs``).
+        """
         if self._model is None:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-            logger.info("loading reranker model %s", self._model_name)
             cache_dir = str(self._cache_dir) if self._cache_dir is not None else None
+            offline_dir = (
+                str(self._offline_model_dir)
+                if self._offline_model_dir is not None
+                else None
+            )
+            if offline_dir is not None:
+                logger.info(
+                    "loading reranker model %s from bundled assets %s",
+                    self._model_name,
+                    offline_dir,
+                )
+            else:
+                logger.info("loading reranker model %s", self._model_name)
             self._model = TextCrossEncoder(
-                self._model_name, cache_dir=cache_dir, threads=self._threads
+                self._model_name,
+                cache_dir=cache_dir,
+                threads=self._threads,
+                specific_model_path=offline_dir,
             )
         return self._model
 
