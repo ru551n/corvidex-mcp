@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Install dependencies
         run: uv sync --frozen
       - name: Check formatting
@@ -51,7 +51,7 @@ jobs:
       CORVIDEX_QUALITY_DATA: /tmp/corvidex-quality
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Cache embedding models
         uses: actions/cache@v6
         with:
@@ -96,7 +96,7 @@ jobs:
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Install dependencies
         run: uv sync --frozen
       - name: Run tests
@@ -185,7 +185,7 @@ jobs:
           (command -v git  || apt-get install -y --no-install-recommends git)
           (command -v curl || apt-get install -y --no-install-recommends curl)
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Install dependencies
         run: uv sync --frozen
       - name: Run tests
