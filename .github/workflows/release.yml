@@ -60,7 +60,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         run: uv sync --frozen
@@ -240,7 +240,7 @@ jobs:
       - name: Publish
         # Trusted Publishing: no token, no secret. Authenticates with the
         # OIDC identity granted by `id-token: write` above.
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@v1.14.3
         with:
           # Fail loudly rather than silently skipping a version that is
           # already on PyPI — a re-run of a tag should not look like a
